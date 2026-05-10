@@ -1,8 +1,7 @@
 [Unit]
 Description=Grafana
 Wants=network-online.target observability-network.service mimir.service loki.service tempo.service
-After=network-online.target observability-network.service mimir.service loki.service tempo.service wg-quick@{{ wireguard_interface }}.service
-Requires=wg-quick@{{ wireguard_interface }}.service
+After=network-online.target observability-network.service mimir.service loki.service tempo.service
 
 [Container]
 Image={{ image_grafana }}
@@ -17,8 +16,6 @@ Environment=GF_PATHS_LOGS=/var/log/grafana
 Environment=GF_PATHS_PLUGINS=/var/lib/grafana/plugins
 Environment=GF_PATHS_PROVISIONING=/etc/grafana/provisioning
 Environment=GF_SECURITY_ADMIN_PASSWORD={{ grafana_admin_password }}
-
-PublishPort={{ wireguard_server_ip }}:3000:3000
 
 User=472
 Group=472

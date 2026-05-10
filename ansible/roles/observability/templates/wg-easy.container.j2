@@ -1,0 +1,37 @@
+[Unit]
+Description=wg-easy WireGuard peer management
+# wg-easy manages the host wg0 interface directly; it must start after the
+# network is up but has no dependency on any observability container.
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image={{ image_wg_easy }}
+ContainerName=wg-easy
+
+# Host network required so wg-easy can create/configure the wg0 interface on
+# the real host namespace.  Container network isolation is intentionally bypassed.
+Network=host
+
+# Capabilities for WireGuard interface management
+AddCapability=NET_ADMIN
+AddCapability=NET_RAW
+AddCapability=SYS_MODULE
+
+# Disable SELinux labelling — the container needs to write /etc/wireguard on
+# the host and bind /dev/net/tun; the default container policy would deny this.
+SecurityLabelDisable=true
+
+# /etc/wireguard is bind-mounted WITHOUT :Z so the host directory keeps its
+# original SELinux context and `wg` tooling outside the container still works.
+Volume=/etc/wireguard:/etc/wireguard
+
+EnvironmentFile={{ observability_secrets_dir }}/wg-easy.env
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target default.target

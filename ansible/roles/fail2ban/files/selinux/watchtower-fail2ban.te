@@ -1,0 +1,17 @@
+module watchtower-fail2ban 1.0;
+
+# Allow fail2ban to read Coraza WAF audit logs written by the containerised
+# Caddy process.  The audit log directory is bind-mounted with Podman's shared
+# `:z` relabel option, which labels files as container_file_t:s0 (no private
+# MCS category).  fail2ban runs with s0 clearance, so the MCS check passes;
+# only the type allow rule is missing from the base policy.
+
+require {
+    type fail2ban_t;
+    type container_file_t;
+    class file  { getattr open read };
+    class dir   { getattr open read search };
+}
+
+allow fail2ban_t container_file_t:dir  { getattr open read search };
+allow fail2ban_t container_file_t:file { getattr open read };

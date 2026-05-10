@@ -1,4 +1,9 @@
 ---
+- name: Install wireguard-tools
+  ansible.builtin.package:
+    name: wireguard-tools
+    state: present
+
 - name: Ensure /etc/wireguard exists
   ansible.builtin.file:
     path: /etc/wireguard
@@ -6,15 +11,6 @@
     mode: "0700"
     owner: root
     group: root
-
-- name: Render wg0.conf
-  ansible.builtin.template:
-    src: wg0.conf.j2
-    dest: "/etc/wireguard/{{ wireguard_interface }}.conf"
-    mode: "0600"
-    owner: root
-    group: root
-  notify: Restart wireguard
 
 - name: Enable IPv4 forwarding
   ansible.posix.sysctl:
@@ -24,8 +20,18 @@
     state: present
     reload: true
 
-- name: Enable wg-quick service
+- name: Enable src_valid_mark (required for WireGuard routing)
+  ansible.posix.sysctl:
+    name: net.ipv4.conf.all.src_valid_mark
+    value: "1"
+    sysctl_set: true
+    state: present
+    reload: true
+
+# wg-easy takes over wg0 management; ensure wg-quick is not competing.
+- name: Disable and stop wg-quick
   ansible.builtin.systemd:
     name: "wg-quick@{{ wireguard_interface }}"
-    enabled: true
-    state: started
+    enabled: false
+    state: stopped
+  failed_when: false

@@ -12,3 +12,8 @@ vault_wireguard_peers:
   - name: admin-laptop
     public_key: REPLACE_ME
     allowed_ips: 10.8.0.10/32
+
+# bcrypt hash of the wg-easy web-UI password.
+# Generate with: python3 -c "import bcrypt; print(bcrypt.hashpw(b'YOURPASSWORD', bcrypt.gensalt(12)).decode())"
+# or: htpasswd -bnBC 12 '' YOURPASSWORD | tr -d ':\n'
+vault_wg_easy_password_hash: "REPLACE_ME_BCRYPT_HASH"

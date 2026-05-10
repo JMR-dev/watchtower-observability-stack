@@ -57,6 +57,12 @@ variable "admin_allow_ipv6" {
   default     = ["::/0"]
 }
 
+variable "observability_volume_size_gb" {
+  description = "Size in GB of the Hetzner Volume used for all observability service data (Loki WAL, Tempo WAL, Mimir TSDB, Grafana DB)."
+  type        = number
+  default     = 500
+}
+
 variable "bucket_prefix" {
   description = "Prefix for the three telemetry buckets."
   type        = string

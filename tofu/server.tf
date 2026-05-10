@@ -44,6 +44,28 @@ resource "hcloud_primary_ip" "ipv6" {
   auto_delete     = false
 }
 
+resource "hcloud_volume" "observability" {
+  name     = "${var.server_name}-observability"
+  size     = var.observability_volume_size_gb
+  location = var.location
+
+  labels = {
+    role        = "observability-data"
+    managed_by  = "opentofu"
+    environment = "prod"
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "hcloud_volume_attachment" "observability" {
+  volume_id = hcloud_volume.observability.id
+  server_id = hcloud_server.watchtower.id
+  automount = false
+}
+
 resource "hcloud_server" "watchtower" {
   name         = var.server_name
   server_type  = var.server_type

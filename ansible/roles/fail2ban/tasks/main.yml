@@ -4,11 +4,12 @@
     name: epel-release
     state: present
 
-- name: Install fail2ban
+- name: Install fail2ban and checkpolicy
   ansible.builtin.dnf:
     name:
       - fail2ban
       - fail2ban-firewalld     # provides the firewallcmd actions; harmless even if firewalld is masked
+      - checkpolicy            # provides checkmodule + semodule_package for custom SELinux modules
     state: present
     update_cache: true
 
@@ -19,6 +20,44 @@
   ansible.builtin.file:
     path: /etc/fail2ban/jail.d/00-firewalld.conf
     state: absent
+  notify: Restart fail2ban
+
+# Deploy filter and action files BEFORE the jail is enabled so fail2ban can
+# find them on its first start.
+- name: Deploy fail2ban filter files
+  ansible.builtin.copy:
+    src: filter.d/
+    dest: /etc/fail2ban/filter.d/
+    mode: "0644"
+  notify: Restart fail2ban
+
+- name: Deploy fail2ban action files
+  ansible.builtin.copy:
+    src: action.d/
+    dest: /etc/fail2ban/action.d/
+    mode: "0644"
+  notify: Restart fail2ban
+
+# Install a custom SELinux policy module that allows fail2ban_t to read files
+# labelled container_file_t:s0.  The Coraza audit log directory is bind-mounted
+# into Caddy with ':z' (shared label), which sets container_file_t:s0 — no
+# private MCS categories — so fail2ban's s0 clearance can pass the MCS check,
+# but the type allow rule is still required.
+- name: Copy watchtower-fail2ban SELinux policy source
+  ansible.builtin.copy:
+    src: selinux/watchtower-fail2ban.te
+    dest: /tmp/watchtower-fail2ban.te
+    mode: "0644"
+  register: selinux_policy_src
+
+- name: Compile and install watchtower-fail2ban SELinux policy module
+  ansible.builtin.shell: |
+    set -e
+    cd /tmp
+    checkmodule -M -m -o watchtower-fail2ban.mod watchtower-fail2ban.te
+    semodule_package -o watchtower-fail2ban.pp -m watchtower-fail2ban.mod
+    semodule -i watchtower-fail2ban.pp
+  when: selinux_policy_src.changed
   notify: Restart fail2ban
 
 - name: Render jail.local

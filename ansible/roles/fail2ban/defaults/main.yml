@@ -10,3 +10,9 @@ fail2ban_sender: fail2ban@watchtower
 fail2ban_recidive_bantime: 1w
 fail2ban_recidive_findtime: 1d
 fail2ban_recidive_maxretry: 5
+
+# Coraza WAF jail — higher maxretry than sshd because CRS in DetectionOnly
+# mode fires on benign requests too; tune these down when SecRuleEngine=On.
+fail2ban_coraza_bantime: 1h
+fail2ban_coraza_findtime: 10m
+fail2ban_coraza_maxretry: 15

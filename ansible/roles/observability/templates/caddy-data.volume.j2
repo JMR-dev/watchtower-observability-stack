@@ -1,0 +1,7 @@
+[Volume]
+# Caddy uses this volume for its internal state (OCSP staples, Coraza audit
+# logs, etc.).  The host path sits on the 500 GB observability data disk.
+VolumeName=caddy-data
+Device={{ observability_data_root }}/caddy
+Type=bind
+Options=bind

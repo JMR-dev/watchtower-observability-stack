@@ -1,0 +1,77 @@
+{
+    # Disable the built-in ACME client; TLS is terminated inside the VPN.
+    auto_https off
+
+    # coraza_waf must be ordered before the reverse_proxy handler so WAF
+    # inspection runs before the request is forwarded upstream.
+    order coraza_waf first
+
+    # Send Caddy's own structured log to stdout; Podman + journald capture it.
+    log {
+        output stdout
+        format json
+    }
+
+    # Accept cleartext HTTP/2 (h2c) from OTLP gRPC clients on port 4317.
+    # The transport block in the :4317 site only controls Caddy → Tempo;
+    # this servers block makes Caddy accept h2c from the client side too.
+    servers :4317 {
+        protocols h1 h2c
+    }
+}
+
+# ── Grafana UI — browser-facing ───────────────────────────────────────────────
+# Full OWASP CRS in detection-only mode.  Switch SecRuleEngine to "On" after
+# reviewing Coraza audit logs and tuning false-positives for your workload.
+:80 {
+    coraza_waf {
+        load_owasp_crs
+
+        directives `
+            Include @coraza.conf-recommended
+            Include @crs-setup.conf.example
+            Include @owasp_crs/*.conf
+
+            SecRuleEngine DetectionOnly
+            SecRequestBodyAccess On
+            SecResponseBodyAccess Off
+            SecAuditEngine RelevantOnly
+            SecAuditLog /var/log/caddy/coraza-audit-grafana.log
+            SecAuditLogType Serial
+        `
+    }
+
+    reverse_proxy grafana:3000
+}
+
+# ── Loki push + query API ─────────────────────────────────────────────────────
+# Machine-to-machine over WireGuard; no CRS (structured/binary payloads).
+:3100 {
+    reverse_proxy loki:3100
+}
+
+# ── Mimir push + query API ────────────────────────────────────────────────────
+:8080 {
+    reverse_proxy mimir:8080
+}
+
+# ── Tempo query API ───────────────────────────────────────────────────────────
+:3200 {
+    reverse_proxy tempo:3200
+}
+
+# ── Tempo OTLP HTTP ingest ────────────────────────────────────────────────────
+:4318 {
+    reverse_proxy tempo:4318
+}
+
+# ── Tempo OTLP gRPC ingest ────────────────────────────────────────────────────
+# Tempo's gRPC receiver speaks h2c (plain HTTP/2 without TLS upgrade).
+# The transport block disables TLS and forces HTTP/2 on the upstream connection.
+:4317 {
+    reverse_proxy tempo:4317 {
+        transport http {
+            versions h2c
+        }
+    }
+}

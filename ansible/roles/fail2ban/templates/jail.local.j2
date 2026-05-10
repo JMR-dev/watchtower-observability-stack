@@ -41,3 +41,27 @@ banaction = nftables-allports
 bantime   = {{ fail2ban_recidive_bantime }}
 findtime  = {{ fail2ban_recidive_findtime }}
 maxretry  = {{ fail2ban_recidive_maxretry }}
+
+# Coraza WAF audit log — bans WireGuard peer IPs (10.8.0.x) that trigger
+# WAF rules through Caddy.  Uses nftables-forward-allports because Podman
+# DNATs published ports, so traffic traverses FORWARD (not INPUT) and
+# INPUT-based ban actions never intercept it.
+#
+# ignoreip intentionally excludes wireguard_subnet_v4 so misbehaving VPN
+# clients can be banned.  The server's own address (127.0.0.1/::1) is still
+# whitelisted to prevent self-banning.
+#
+# Tune fail2ban_coraza_maxretry down (and SecRuleEngine to "On") once you
+# have reviewed the Coraza audit log and confirmed false-positive rate.
+[coraza-waf]
+enabled   = true
+port      = 0:65535
+protocol  = tcp
+logpath   = {{ observability_data_root }}/caddy/logs/coraza-audit-grafana.log
+backend   = auto
+filter    = coraza-waf
+banaction = nftables-forward-allports
+ignoreip  = 127.0.0.1/8 ::1
+maxretry  = {{ fail2ban_coraza_maxretry }}
+findtime  = {{ fail2ban_coraza_findtime }}
+bantime   = {{ fail2ban_coraza_bantime }}

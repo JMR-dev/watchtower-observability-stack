@@ -10,7 +10,7 @@ locals {
     }
     tempo = {
       name           = "${var.bucket_prefix}-tempo"
-      retention_days = 30
+      retention_days = 90
     }
   }
 }
