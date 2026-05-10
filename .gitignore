@@ -12,6 +12,8 @@ ansible/inventory/hosts.yml
 ansible/group_vars/**/vault.yml
 wireguard/wg0.conf
 wireguard/peers/
+.aws/
+.env
 
 # OpenTofu / Terraform
 .terraform/
@@ -24,6 +26,7 @@ crash.log
 crash.*.log
 override.tf
 override.tf.json
+backend.hcl
 *_override.tf
 *_override.tf.json
 

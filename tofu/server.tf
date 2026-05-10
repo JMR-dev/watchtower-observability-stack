@@ -31,17 +31,17 @@ resource "hcloud_firewall" "watchtower" {
 }
 
 resource "hcloud_primary_ip" "ipv4" {
-  name        = "${var.server_name}-ipv4"
-  type        = "ipv4"
-  datacenter  = "${var.location}-dc3"
-  auto_delete = false
+  name            = "${var.server_name}-ipv4"
+  type            = "ipv4"
+  assignee_type   = "server"
+  auto_delete     = false
 }
 
 resource "hcloud_primary_ip" "ipv6" {
-  name        = "${var.server_name}-ipv6"
-  type        = "ipv6"
-  datacenter  = "${var.location}-dc3"
-  auto_delete = false
+  name            = "${var.server_name}-ipv6"
+  type            = "ipv6"
+  assignee_type   = "server"
+  auto_delete     = false
 }
 
 resource "hcloud_server" "watchtower" {

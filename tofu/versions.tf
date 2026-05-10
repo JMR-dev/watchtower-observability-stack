@@ -27,7 +27,7 @@ terraform {
   # use_lockfile = true requires OpenTofu >= 1.10 and provides native S3-based
   # state locking via conditional PutObject (no DynamoDB needed; R2-compatible).
   backend "s3" {
-    bucket = "watchtower-tofu-state"
+    bucket = "watchtower-observability-opentofu-state"
     key    = "watchtower/terraform.tfstate"
     region = "auto"
 
