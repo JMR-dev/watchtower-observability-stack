@@ -1,0 +1,43 @@
+# /etc/fail2ban/jail.local — managed by Ansible.
+#
+# fail2ban manages its own nftables table (inet f2b-table), inserted at higher
+# priority than the watchtower ruleset, so bans take effect even when the
+# watchtower table accept-list rule has already matched.
+
+[DEFAULT]
+# Backend reads from systemd journal — no /var/log/secure on AlmaLinux 10 by default.
+backend = systemd
+
+bantime  = {{ fail2ban_bantime }}
+findtime = {{ fail2ban_findtime }}
+maxretry = {{ fail2ban_maxretry }}
+
+# nftables-multiport creates: table inet f2b-table { set f2b-<jail> ... }
+banaction       = nftables-multiport
+banaction_allports = nftables-allports
+
+# Whitelist trusted networks: WireGuard subnet, loopback, and the admin allow list.
+ignoreip = 127.0.0.1/8 ::1 {{ wireguard_subnet_v4 }}{% for c in admin_allow_ipv4 %} {{ c }}{% endfor %}{% for c in admin_allow_ipv6 %} {{ c }}{% endfor %}
+
+destemail = {{ fail2ban_destemail }}
+sender    = {{ fail2ban_sender }}
+mta       = sendmail
+
+# Action: ban only (mailing requires an MTA — disable if you don't run one).
+action = %(action_)s
+
+[sshd]
+enabled  = true
+port     = ssh
+mode     = aggressive
+maxretry = {{ fail2ban_maxretry }}
+journalmatch = _SYSTEMD_UNIT=sshd.service + _COMM=sshd
+
+# Long-term ban for repeat offenders. Watches fail2ban's own log.
+[recidive]
+enabled   = true
+logpath   = /var/log/fail2ban.log
+banaction = nftables-allports
+bantime   = {{ fail2ban_recidive_bantime }}
+findtime  = {{ fail2ban_recidive_findtime }}
+maxretry  = {{ fail2ban_recidive_maxretry }}

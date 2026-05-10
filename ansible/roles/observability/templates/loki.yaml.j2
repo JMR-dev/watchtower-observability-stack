@@ -1,0 +1,90 @@
+# Loki monolithic deployment with multi-tenancy and Hetzner S3 backend.
+
+auth_enabled: true
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /var/lib/loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+  storage:
+    s3:
+      endpoint: "{{ hetzner_location }}.your-objectstorage.com"
+      region: "{{ s3_region }}"
+      bucketnames: "{{ s3_bucket_loki }}"
+      access_key_id: "${AWS_ACCESS_KEY_ID}"
+      secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+      s3forcepathstyle: true
+      insecure: false
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: s3
+      schema: v13
+      index:
+        prefix: loki_index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /var/lib/loki/tsdb-index
+    cache_location: /var/lib/loki/tsdb-cache
+  aws:
+    endpoint: "{{ hetzner_location }}.your-objectstorage.com"
+    region: "{{ s3_region }}"
+    bucketnames: "{{ s3_bucket_loki }}"
+    s3forcepathstyle: true
+    insecure: false
+
+compactor:
+  working_directory: /var/lib/loki/compactor
+  delete_request_store: s3
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
+  compaction_interval: 10m
+
+# Required to allow the GDPR right-to-erasure flow via Loki's Delete API.
+limits_config:
+  retention_period: {{ loki_retention_days }}d
+  max_query_lookback: {{ loki_retention_days }}d
+  max_query_length: 721h
+  ingestion_rate_mb: 16
+  ingestion_burst_size_mb: 32
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+  allow_structured_metadata: true
+  volume_enabled: true
+  deletion_mode: filter-and-delete
+
+ruler:
+  storage:
+    type: s3
+    s3:
+      endpoint: "{{ hetzner_location }}.your-objectstorage.com"
+      region: "{{ s3_region }}"
+      bucketnames: "{{ s3_bucket_loki }}"
+      s3forcepathstyle: true
+  rule_path: /var/lib/loki/rules
+  alertmanager_url: http://mimir:8080/alertmanager
+
+analytics:
+  reporting_enabled: false
+
+frontend:
+  encoding: protobuf
+
+query_range:
+  cache_results: true
+
+querier:
+  max_concurrent: 8

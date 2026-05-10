@@ -1,0 +1,12 @@
+# Initialize OpenTofu state in Cloudflare R2:
+#
+#   export AWS_ACCESS_KEY_ID=<R2_ACCESS_KEY>
+#   export AWS_SECRET_ACCESS_KEY=<R2_SECRET_KEY>
+#   tofu init -backend-config=backend.hcl
+#
+# Replace <ACCOUNT_ID> with your Cloudflare account ID.
+# Create the R2 bucket "watchtower-tofu-state" in Cloudflare dashboard first.
+
+endpoints = {
+  s3 = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
+}

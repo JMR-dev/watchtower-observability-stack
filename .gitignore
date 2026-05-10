@@ -1,0 +1,36 @@
+# Secrets — NEVER commit
+*.key
+*.pem
+*.crt
+*.priv
+secrets/
+**/secrets/
+*.vault
+.vault_pass
+.vault_password
+ansible/inventory/hosts.yml
+ansible/group_vars/**/vault.yml
+wireguard/wg0.conf
+wireguard/peers/
+
+# OpenTofu / Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+*~

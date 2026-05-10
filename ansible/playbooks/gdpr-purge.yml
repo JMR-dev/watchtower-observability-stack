@@ -1,0 +1,48 @@
+---
+# Submit a Loki Delete API request to erase all logs matching a label selector.
+#
+# Usage:
+#   ansible-playbook playbooks/gdpr-purge.yml \
+#     -e tenant=team-alpha \
+#     -e 'selector={user_id="abc-123"}' \
+#     -e start=2025-01-01T00:00:00Z \
+#     -e end=2026-12-31T23:59:59Z
+
+- name: GDPR right-to-erasure (Loki)
+  hosts: watchtower
+  become: true
+  gather_facts: true
+  vars:
+    tenant: "{{ tenant | mandatory }}"
+    selector: "{{ selector | mandatory }}"
+    start: "{{ start | mandatory }}"
+    end: "{{ end | default(lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')) }}"
+  tasks:
+    - name: Submit Loki delete request
+      ansible.builtin.uri:
+        url: "http://{{ wireguard_server_ip }}:3100/loki/api/v1/delete"
+        method: POST
+        headers:
+          X-Scope-OrgID: "{{ tenant }}"
+        body_format: form-urlencoded
+        body:
+          query: "{{ selector }}"
+          start: "{{ start }}"
+          end: "{{ end }}"
+        status_code: [204]
+      register: result
+
+    - name: Audit log
+      ansible.builtin.lineinfile:
+        path: /var/log/observability/gdpr-audit.log
+        create: true
+        mode: "0640"
+        line: "{{ ansible_date_time.iso8601 }} tenant={{ tenant }} selector='{{ selector }}' start={{ start }} end={{ end }} status=submitted"
+
+    - name: Reminder
+      ansible.builtin.debug:
+        msg: |
+          Loki delete request submitted. Mimir/Tempo do not provide per-record
+          deletion APIs; the {{ mimir_retention_days }}-day metrics retention
+          and {{ tempo_retention_days }}-day trace retention satisfy the
+          GDPR Art. 17 erasure window.

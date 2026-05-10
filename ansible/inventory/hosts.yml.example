@@ -1,0 +1,6 @@
+all:
+  hosts:
+    watchtower:
+      ansible_host: REPLACE_WITH_TOFU_OUTPUT_IPV4
+      ansible_user: root
+      ansible_python_interpreter: /usr/bin/python3

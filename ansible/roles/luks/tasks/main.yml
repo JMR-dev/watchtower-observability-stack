@@ -1,0 +1,110 @@
+---
+# LUKS2 encrypted volume for Mimir/Loki/Tempo WALs and Grafana DB.
+#
+# CPX42 ships with a single root disk on /dev/sda. We allocate a sparse-backed
+# loop file in /var/lib/observability-luks.img if no second device is present.
+# Override luks_device_source and luks_use_loop_file in group_vars to use a real
+# block device (e.g. an attached Hetzner Volume).
+
+- name: Stat configured LUKS source device
+  ansible.builtin.stat:
+    path: "{{ luks_device_source }}"
+  register: luks_device_stat
+
+- name: Decide whether to use a loop-backed LUKS file
+  ansible.builtin.set_fact:
+    luks_use_loop_file: "{{ not luks_device_stat.stat.exists }}"
+
+- name: Create loop-backed LUKS image (if no real device)
+  when: luks_use_loop_file
+  block:
+    - name: Allocate sparse 80G image
+      ansible.builtin.command: >
+        truncate -s 80G /var/lib/observability-luks.img
+      args:
+        creates: /var/lib/observability-luks.img
+
+    - name: Set permissions on LUKS image
+      ansible.builtin.file:
+        path: /var/lib/observability-luks.img
+        mode: "0600"
+        owner: root
+        group: root
+
+    - name: Set effective LUKS source to loop file
+      ansible.builtin.set_fact:
+        luks_effective_source: /var/lib/observability-luks.img
+
+- name: Set effective LUKS source (real device)
+  when: not luks_use_loop_file
+  ansible.builtin.set_fact:
+    luks_effective_source: "{{ luks_device_source }}"
+
+- name: Generate LUKS keyfile
+  ansible.builtin.command: dd if=/dev/urandom of=/root/observability.luks.key bs=4096 count=1
+  args:
+    creates: /root/observability.luks.key
+
+- name: Secure LUKS keyfile
+  ansible.builtin.file:
+    path: /root/observability.luks.key
+    mode: "0400"
+    owner: root
+    group: root
+
+- name: Check if device is already LUKS-formatted
+  ansible.builtin.command: cryptsetup isLuks "{{ luks_effective_source }}"
+  register: is_luks
+  changed_when: false
+  failed_when: false
+
+- name: Format LUKS2
+  ansible.builtin.command: >
+    cryptsetup luksFormat --batch-mode --type luks2
+    --key-file /root/observability.luks.key
+    "{{ luks_effective_source }}"
+  when: is_luks.rc != 0
+
+- name: Add crypttab entry
+  ansible.builtin.lineinfile:
+    path: /etc/crypttab
+    regexp: "^{{ luks_mapper_name }} "
+    line: "{{ luks_mapper_name }} {{ luks_effective_source }} /root/observability.luks.key luks,nofail"
+    create: true
+    mode: "0600"
+
+- name: Open LUKS device
+  ansible.builtin.command: >
+    cryptsetup open --key-file /root/observability.luks.key
+    "{{ luks_effective_source }}" "{{ luks_mapper_name }}"
+  args:
+    creates: "/dev/mapper/{{ luks_mapper_name }}"
+
+- name: Create filesystem on mapped device
+  community.general.filesystem:
+    fstype: xfs
+    dev: "/dev/mapper/{{ luks_mapper_name }}"
+
+- name: Ensure data root exists
+  ansible.builtin.file:
+    path: "{{ observability_data_root }}"
+    state: directory
+    mode: "0755"
+
+- name: Mount data root
+  ansible.posix.mount:
+    path: "{{ observability_data_root }}"
+    src: "/dev/mapper/{{ luks_mapper_name }}"
+    fstype: xfs
+    opts: defaults,nofail,x-systemd.requires=systemd-cryptsetup@{{ luks_mapper_name }}.service
+    state: mounted
+
+- name: Set SELinux context for container data
+  community.general.sefcontext:
+    target: "{{ observability_data_root }}(/.*)?"
+    setype: container_file_t
+    state: present
+
+- name: Apply SELinux context
+  ansible.builtin.command: restorecon -R "{{ observability_data_root }}"
+  changed_when: false

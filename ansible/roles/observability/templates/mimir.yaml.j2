@@ -1,0 +1,97 @@
+# Mimir monolithic deployment with multi-tenancy and Hetzner S3 backend.
+# Reference: https://grafana.com/docs/mimir/latest/configure/
+
+target: all,alertmanager,overrides-exporter
+
+multitenancy_enabled: true
+
+server:
+  http_listen_port: 8080
+  grpc_listen_port: 9095
+  log_level: info
+
+common:
+  storage:
+    backend: s3
+    s3:
+      endpoint: "{{ hetzner_location }}.your-objectstorage.com"
+      region: "{{ s3_region }}"
+      bucket_name: "{{ s3_bucket_mimir }}"
+      access_key_id: "${AWS_ACCESS_KEY_ID}"
+      secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+      insecure: false
+
+blocks_storage:
+  backend: s3
+  s3:
+    bucket_name: "{{ s3_bucket_mimir }}"
+  storage_prefix: blocks
+  tsdb:
+    dir: /var/lib/mimir/tsdb
+    retention_period: 24h
+  bucket_store:
+    sync_dir: /var/lib/mimir/tsdb-sync
+
+compactor:
+  data_dir: /var/lib/mimir/compactor
+  sharding_ring:
+    kvstore:
+      store: memberlist
+
+distributor:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: memberlist
+
+ingester:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: memberlist
+    replication_factor: 1
+
+ruler:
+  rule_path: /var/lib/mimir/rules
+  alertmanager_url: http://localhost:8080/alertmanager
+  ring:
+    instance_addr: 127.0.0.1
+
+ruler_storage:
+  backend: s3
+  s3:
+    bucket_name: "{{ s3_bucket_mimir }}"
+  storage_prefix: ruler
+
+alertmanager:
+  data_dir: /var/lib/mimir/alertmanager
+  external_url: http://{{ wireguard_server_ip }}:8080/alertmanager
+  sharding_ring:
+    replication_factor: 1
+
+alertmanager_storage:
+  backend: s3
+  s3:
+    bucket_name: "{{ s3_bucket_mimir }}"
+  storage_prefix: alertmanager
+
+store_gateway:
+  sharding_ring:
+    replication_factor: 1
+
+memberlist:
+  bind_port: 7946
+
+# Per-tenant retention and limits.
+limits:
+  compactor_blocks_retention_period: {{ mimir_retention_days }}d
+  ingestion_rate: 100000
+  ingestion_burst_size: 1000000
+  max_global_series_per_user: 500000
+  max_label_names_per_series: 30
+  # Reject any incoming labels that match common PII patterns. Defense in depth;
+  # primary scrubbing happens at the Alloy/Promtail collector.
+  ingestion_partitions_tenant_shard_size: 0
+
+runtime_config:
+  file: /etc/mimir/runtime.yaml

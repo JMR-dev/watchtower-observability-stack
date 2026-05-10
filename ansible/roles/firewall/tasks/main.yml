@@ -1,0 +1,46 @@
+---
+- name: Stop and disable firewalld (replaced by native nftables)
+  ansible.builtin.systemd:
+    name: firewalld
+    enabled: false
+    state: stopped
+    masked: true
+  failed_when: false
+
+- name: Install nftables
+  ansible.builtin.dnf:
+    name: nftables
+    state: present
+
+- name: Ensure /etc/nftables exists
+  ansible.builtin.file:
+    path: /etc/nftables
+    state: directory
+    mode: "0755"
+
+- name: Render watchtower nftables ruleset
+  ansible.builtin.template:
+    src: watchtower.nft.j2
+    dest: /etc/nftables/watchtower.nft
+    mode: "0640"
+    owner: root
+    group: root
+    validate: nft --check --file %s
+  notify: Reload nftables
+
+- name: Point /etc/sysconfig/nftables.conf at the watchtower ruleset
+  ansible.builtin.copy:
+    dest: /etc/sysconfig/nftables.conf
+    mode: "0640"
+    owner: root
+    group: root
+    content: |
+      # Loaded at boot by nftables.service.
+      include "/etc/nftables/watchtower.nft"
+  notify: Reload nftables
+
+- name: Enable nftables.service
+  ansible.builtin.systemd:
+    name: nftables
+    enabled: true
+    state: started

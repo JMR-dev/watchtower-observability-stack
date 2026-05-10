@@ -1,0 +1,34 @@
+[Unit]
+Description=Grafana
+Wants=network-online.target observability-network.service mimir.service loki.service tempo.service
+After=network-online.target observability-network.service mimir.service loki.service tempo.service wg-quick@{{ wireguard_interface }}.service
+Requires=wg-quick@{{ wireguard_interface }}.service
+
+[Container]
+Image={{ image_grafana }}
+ContainerName=grafana
+Network=observability.network
+Volume=grafana-data.volume:/var/lib/grafana:Z
+Volume={{ observability_config_dir }}/grafana/grafana.ini:/etc/grafana/grafana.ini:ro,Z
+Volume={{ observability_config_dir }}/grafana/provisioning:/etc/grafana/provisioning:ro,Z
+
+Environment=GF_PATHS_DATA=/var/lib/grafana
+Environment=GF_PATHS_LOGS=/var/log/grafana
+Environment=GF_PATHS_PLUGINS=/var/lib/grafana/plugins
+Environment=GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+Environment=GF_SECURITY_ADMIN_PASSWORD={{ grafana_admin_password }}
+
+PublishPort={{ wireguard_server_ip }}:3000:3000
+
+User=472
+Group=472
+
+PodmanArgs=--memory=2g --memory-swap=2g
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target default.target

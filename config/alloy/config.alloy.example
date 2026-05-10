@@ -1,0 +1,118 @@
+# Grafana Alloy collector configuration for clients shipping telemetry into
+# the watchtower stack. Run this on each client host (over WireGuard).
+#
+# Defense-in-depth PII redaction before forwarding to Loki/Tempo/Mimir.
+# Replace TENANT_SLUG and 10.8.0.1 with your tenant id and watchtower wg IP.
+
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+// ============================================================
+// LOGS  ──► Loki
+// ============================================================
+
+loki.write "default" {
+  endpoint {
+    url = "http://10.8.0.1:3100/loki/api/v1/push"
+    headers = {
+      "X-Scope-OrgID" = "TENANT_SLUG",
+    }
+  }
+}
+
+loki.source.journal "system" {
+  forward_to    = [loki.process.scrub.receiver]
+  relabel_rules = loki.relabel.system.rules
+  labels        = { job = "systemd-journal" }
+}
+
+loki.relabel "system" {
+  forward_to = []
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+  rule {
+    source_labels = ["__journal__hostname"]
+    target_label  = "host"
+  }
+}
+
+loki.process "scrub" {
+  forward_to = [loki.write.default.receiver]
+
+  stage.replace { expression = `\b(?:\d{1,3}\.){3}\d{1,3}\b`                                                replace = "[REDACTED-IP]"    }
+  stage.replace { expression = `\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b`                             replace = "[REDACTED-IP6]"   }
+  stage.replace { expression = `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`                        replace = "[REDACTED-EMAIL]" }
+  stage.replace { expression = `\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`                     replace = "[REDACTED-JWT]"   }
+  stage.replace { expression = `(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._-]+`                            replace = "$1[REDACTED-TOKEN]" }
+  stage.replace { expression = `\b(?:\d[ -]*?){13,19}\b`                                                    replace = "[REDACTED-PAN]"   }
+  stage.replace { expression = `\b[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b`    replace = "[REDACTED-UUID]"  }
+
+  stage.match {
+    selector = `{job=~".+"} |~ "(?i)(password|ssn|cvv|cvc)\\s*[:=]"`
+    action   = "drop"
+  }
+}
+
+// ============================================================
+// TRACES  ──► Tempo (OTLP)
+// ============================================================
+
+otelcol.receiver.otlp "default" {
+  grpc { endpoint = "0.0.0.0:4317" }
+  http { endpoint = "0.0.0.0:4318" }
+  output {
+    traces  = [otelcol.processor.attributes.scrub.input]
+    metrics = [otelcol.processor.attributes.scrub.input]
+    logs    = [otelcol.processor.attributes.scrub.input]
+  }
+}
+
+otelcol.processor.attributes "scrub" {
+  action { key = "enduser.id"                          action = "hash"   }
+  action { key = "user.email"                          action = "delete" }
+  action { key = "client.address"                      action = "delete" }
+  action { key = "http.request.header.authorization"  action = "delete" }
+  action { key = "http.request.header.cookie"         action = "delete" }
+  action { key = "http.request.body"                  action = "delete" }
+
+  output {
+    traces  = [otelcol.exporter.otlp.tempo.input]
+    metrics = [otelcol.exporter.otlphttp.mimir.input]
+  }
+}
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "10.8.0.1:4317"
+    tls { insecure = true }
+    headers = { "X-Scope-OrgID" = "TENANT_SLUG" }
+  }
+}
+
+// ============================================================
+// METRICS  ──► Mimir
+// ============================================================
+
+prometheus.remote_write "mimir" {
+  endpoint {
+    url = "http://10.8.0.1:8080/api/v1/push"
+    headers = { "X-Scope-OrgID" = "TENANT_SLUG" }
+  }
+  external_labels = { tenant = "TENANT_SLUG" }
+}
+
+otelcol.exporter.otlphttp "mimir" {
+  client {
+    endpoint = "http://10.8.0.1:8080/otlp"
+    headers  = { "X-Scope-OrgID" = "TENANT_SLUG" }
+  }
+}
+
+prometheus.scrape "node" {
+  targets    = [{"__address__" = "127.0.0.1:9100"}]
+  forward_to = [prometheus.remote_write.mimir.receiver]
+}

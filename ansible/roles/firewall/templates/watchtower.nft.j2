@@ -1,0 +1,102 @@
+#!/usr/sbin/nft -f
+# Watchtower host firewall — explicit nftables ruleset.
+#
+# Layered defense:
+#   1. Hetzner Cloud Firewall (edge)  — allows ssh + wg from admin CIDRs
+#   2. This nftables ruleset (host)   — same policy + state tracking + rate limits
+#   3. fail2ban                       — adds dynamic bans into table inet f2b-table
+#   4. WireGuard                      — only authenticated peers reach services
+#   5. Podman PublishPort=10.8.0.1:*  — services bound to wg0 only
+#
+# Reload with: systemctl reload nftables
+# Test parse with: nft --check --file /etc/nftables/watchtower.nft
+
+# Flush only our own table so we don't disturb fail2ban or podman tables.
+table inet watchtower
+delete table inet watchtower
+
+table inet watchtower {
+
+    set admin_v4 {
+        type ipv4_addr
+        flags interval
+        elements = {
+{% for cidr in admin_allow_ipv4 %}
+            {{ cidr }}{% if not loop.last %},{% endif %}
+
+{% endfor %}
+        }
+    }
+
+    set admin_v6 {
+        type ipv6_addr
+        flags interval
+        elements = {
+{% for cidr in admin_allow_ipv6 %}
+            {{ cidr }}{% if not loop.last %},{% endif %}
+
+{% endfor %}
+        }
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        # Stateful base
+        ct state established,related accept
+        ct state invalid drop
+
+        # Loopback
+        iif "lo" accept
+
+        # ICMP / ICMPv6 (rate-limited)
+        ip  protocol icmp     limit rate 20/second accept
+        ip6 nexthdr   icmpv6  limit rate 20/second accept
+
+        # Anything arriving on WireGuard is treated as trusted (only authenticated
+        # peers can reach this interface). Service ports are bound to 10.8.0.1.
+        iifname "{{ wireguard_interface }}" accept
+
+        # Podman bridge networks: allow the kernel to deliver packets the
+        # netavark/aardvark stack creates for inter-container DNS, etc.
+        # Podman manages its own filter rules in separate tables.
+        iifname "podman*" accept
+        iifname "cni-*"   accept
+
+        # SSH from admin CIDRs only — short-burst rate limit deters scanners.
+        # fail2ban will additionally ban repeat offenders.
+        ip  saddr @admin_v4 tcp dport 22 ct state new limit rate 6/minute accept
+        ip6 saddr @admin_v6 tcp dport 22 ct state new limit rate 6/minute accept
+
+        # WireGuard listen port from admin CIDRs.
+        ip  saddr @admin_v4 udp dport {{ wireguard_listen_port }} accept
+        ip6 saddr @admin_v6 udp dport {{ wireguard_listen_port }} accept
+
+        # Log a sample of dropped packets so we know if something is mis-routed.
+        limit rate 5/minute log prefix "nft-drop-input: " level info
+        counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        ct state established,related accept
+        ct state invalid drop
+
+        # Allow forwarding for Podman-managed bridges. Podman/netavark also
+        # installs its own rules; this is a safety allow-list.
+        iifname "podman*" accept
+        oifname "podman*" accept
+        iifname "cni-*"   accept
+        oifname "cni-*"   accept
+
+        # WireGuard egress to services on the host loopback / podman:
+        iifname "{{ wireguard_interface }}" accept
+        oifname "{{ wireguard_interface }}" accept
+
+        counter drop
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+    }
+}

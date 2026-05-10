@@ -1,0 +1,32 @@
+[Unit]
+Description=Grafana Tempo
+Wants=network-online.target observability-network.service
+After=network-online.target observability-network.service wg-quick@{{ wireguard_interface }}.service
+Requires=wg-quick@{{ wireguard_interface }}.service
+
+[Container]
+Image={{ image_tempo }}
+ContainerName=tempo
+Network=observability.network
+Volume=tempo-data.volume:/var/lib/tempo:Z
+Volume={{ observability_config_dir }}/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro,Z
+EnvironmentFile={{ observability_secrets_dir }}/s3.env
+
+PublishPort={{ wireguard_server_ip }}:3200:3200
+PublishPort={{ wireguard_server_ip }}:4317:4317
+PublishPort={{ wireguard_server_ip }}:4318:4318
+
+Exec=-config.file=/etc/tempo/tempo.yaml -config.expand-env=true
+
+User=10001
+Group=10001
+
+PodmanArgs=--memory=5g --memory-swap=5g
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target default.target

@@ -1,0 +1,37 @@
+---
+- name: Enable EPEL (provides fail2ban on AlmaLinux 10)
+  ansible.builtin.dnf:
+    name: epel-release
+    state: present
+
+- name: Install fail2ban
+  ansible.builtin.dnf:
+    name:
+      - fail2ban
+      - fail2ban-firewalld     # provides the firewallcmd actions; harmless even if firewalld is masked
+    state: present
+    update_cache: true
+
+# Default fail2ban-firewalld package drops a 0-firewalld.conf in jail.d that sets
+# banaction = firewallcmd-rich-rules — but firewalld is masked. Remove it so our
+# nftables banaction wins.
+- name: Remove fail2ban-firewalld jail override
+  ansible.builtin.file:
+    path: /etc/fail2ban/jail.d/00-firewalld.conf
+    state: absent
+  notify: Restart fail2ban
+
+- name: Render jail.local
+  ansible.builtin.template:
+    src: jail.local.j2
+    dest: /etc/fail2ban/jail.local
+    mode: "0644"
+    owner: root
+    group: root
+  notify: Restart fail2ban
+
+- name: Enable and start fail2ban
+  ansible.builtin.systemd:
+    name: fail2ban
+    enabled: true
+    state: started

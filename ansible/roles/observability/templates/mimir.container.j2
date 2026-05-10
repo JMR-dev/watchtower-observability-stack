@@ -1,0 +1,33 @@
+[Unit]
+Description=Grafana Mimir
+Wants=network-online.target observability-network.service
+After=network-online.target observability-network.service wg-quick@{{ wireguard_interface }}.service
+Requires=wg-quick@{{ wireguard_interface }}.service
+
+[Container]
+Image={{ image_mimir }}
+ContainerName=mimir
+Network=observability.network
+Volume=mimir-data.volume:/var/lib/mimir:Z
+Volume={{ observability_config_dir }}/mimir/mimir.yaml:/etc/mimir/mimir.yaml:ro,Z
+EnvironmentFile={{ observability_secrets_dir }}/s3.env
+
+# Bind only to WireGuard interface
+PublishPort={{ wireguard_server_ip }}:8080:8080
+PublishPort={{ wireguard_server_ip }}:9095:9095
+
+# -config.expand-env enables ${AWS_*} substitution from EnvironmentFile.
+Exec=-config.file=/etc/mimir/mimir.yaml -config.expand-env=true
+
+User=10001
+Group=10001
+
+PodmanArgs=--memory=8g --memory-swap=8g
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target default.target

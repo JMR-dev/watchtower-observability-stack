@@ -1,0 +1,14 @@
+# Encrypt with: ansible-vault encrypt group_vars/all/vault.yml
+
+vault_hetzner_s3_access_key: "REPLACE_ME"
+vault_hetzner_s3_secret_key: "REPLACE_ME"
+
+vault_grafana_admin_password: "REPLACE_ME"
+
+vault_wireguard_server_private_key: "REPLACE_ME_BASE64"
+vault_wireguard_server_public_key:  "REPLACE_ME_BASE64"
+
+vault_wireguard_peers:
+  - name: admin-laptop
+    public_key: REPLACE_ME
+    allowed_ips: 10.8.0.10/32

@@ -1,0 +1,62 @@
+# Grafana datasource provisioning.
+# One datasource set per tenant. The X-Scope-OrgID header is what scopes
+# Mimir/Loki/Tempo queries to that tenant. Datasources are created in the
+# Default Grafana org; per-tenant Grafana orgs (and their own datasources)
+# are created by playbooks/onboard-tenant.yml.
+
+apiVersion: 1
+
+datasources:
+{% for tenant in tenants %}
+  - name: "Mimir ({{ tenant.org_name }})"
+    uid: "mimir-{{ tenant.slug }}"
+    type: prometheus
+    access: proxy
+    url: http://mimir:8080/prometheus
+    orgId: 1
+    isDefault: {{ 'true' if loop.first else 'false' }}
+    jsonData:
+      httpMethod: POST
+      manageAlerts: true
+      prometheusType: Mimir
+      httpHeaderName1: "X-Scope-OrgID"
+    secureJsonData:
+      httpHeaderValue1: "{{ tenant.slug }}"
+    editable: false
+
+  - name: "Loki ({{ tenant.org_name }})"
+    uid: "loki-{{ tenant.slug }}"
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    orgId: 1
+    jsonData:
+      httpHeaderName1: "X-Scope-OrgID"
+      derivedFields:
+        - datasourceUid: "tempo-{{ tenant.slug }}"
+          matcherRegex: "trace_id=(\\w+)"
+          name: TraceID
+          url: "$${__value.raw}"
+    secureJsonData:
+      httpHeaderValue1: "{{ tenant.slug }}"
+    editable: false
+
+  - name: "Tempo ({{ tenant.org_name }})"
+    uid: "tempo-{{ tenant.slug }}"
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    orgId: 1
+    jsonData:
+      httpHeaderName1: "X-Scope-OrgID"
+      tracesToLogsV2:
+        datasourceUid: "loki-{{ tenant.slug }}"
+        spanStartTimeShift: -1m
+        spanEndTimeShift: 1m
+        filterByTraceID: true
+      serviceMap:
+        datasourceUid: "mimir-{{ tenant.slug }}"
+    secureJsonData:
+      httpHeaderValue1: "{{ tenant.slug }}"
+    editable: false
+{% endfor %}

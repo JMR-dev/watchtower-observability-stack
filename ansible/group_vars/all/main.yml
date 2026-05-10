@@ -1,0 +1,61 @@
+# Non-secret defaults shared across the stack.
+# Secret values live in group_vars/all/vault.yml (ansible-vault encrypted).
+
+hetzner_location: nbg1
+timezone: Europe/Berlin
+
+# Object storage
+s3_endpoint: "https://{{ hetzner_location }}.your-objectstorage.com"
+s3_region: "{{ hetzner_location }}"
+s3_bucket_mimir: watchtower-mimir
+s3_bucket_loki:  watchtower-loki
+s3_bucket_tempo: watchtower-tempo
+
+# Indirection: real values come from vault.yml
+hetzner_s3_access_key: "{{ vault_hetzner_s3_access_key }}"
+hetzner_s3_secret_key: "{{ vault_hetzner_s3_secret_key }}"
+grafana_admin_password: "{{ vault_grafana_admin_password }}"
+wireguard_server_private_key: "{{ vault_wireguard_server_private_key }}"
+wireguard_server_public_key: "{{ vault_wireguard_server_public_key }}"
+wireguard_peers: "{{ vault_wireguard_peers }}"
+
+# WireGuard
+wireguard_interface: wg0
+wireguard_listen_port: 51820
+wireguard_subnet_v4: 10.8.0.0/24
+wireguard_server_address: 10.8.0.1/24
+wireguard_server_ip: 10.8.0.1
+
+# Public-facing interface (Hetzner CPX42 default).
+public_interface: eth0
+
+# CIDRs allowed to reach SSH (22/tcp) and WireGuard (51820/udp) at the host.
+# Mirror or tighten what you set in tofu/terraform.tfvars admin_allow_ipv4/v6.
+admin_allow_ipv4:
+  - 0.0.0.0/0
+admin_allow_ipv6:
+  - "::/0"
+
+# Local data
+observability_data_root: /var/lib/observability
+observability_secrets_dir: /etc/observability/secrets
+observability_config_dir: /etc/observability/config
+luks_device_source: /dev/sdb
+luks_mapper_name: observability_data
+
+# Container images (pin in production)
+image_mimir:   "docker.io/grafana/mimir:2.14.3"
+image_loki:    "docker.io/grafana/loki:3.3.2"
+image_tempo:   "docker.io/grafana/tempo:2.7.1"
+image_grafana: "docker.io/grafana/grafana:11.4.0"
+
+# Retention (per signal)
+mimir_retention_days: 90
+loki_retention_days:  30
+tempo_retention_days: 14
+
+# Tenants — override in production
+tenants:
+  - slug: default
+    org_name: Default
+    grafana_admin_email: admin@example.com

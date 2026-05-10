@@ -1,0 +1,104 @@
+---
+# Onboard a new tenant: create Grafana org, admin user, and provisioned datasources.
+#
+# Usage:
+#   ansible-playbook playbooks/onboard-tenant.yml \
+#     -e tenant_slug=team-alpha \
+#     -e tenant_name='Team Alpha' \
+#     -e admin_email=alpha-admin@example.com
+
+- name: Onboard tenant
+  hosts: watchtower
+  become: true
+  gather_facts: false
+  vars:
+    tenant_slug: "{{ tenant_slug | mandatory }}"
+    tenant_name: "{{ tenant_name | default(tenant_slug) }}"
+    admin_email: "{{ admin_email | mandatory }}"
+    grafana_url: "http://{{ wireguard_server_ip }}:3000"
+  tasks:
+    - name: Create Grafana org
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/orgs"
+        method: POST
+        user: admin
+        password: "{{ vault_grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body: { name: "{{ tenant_name }}" }
+        status_code: [200, 409]
+      register: org_create
+
+    - name: Look up org id
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/orgs/name/{{ tenant_name | urlencode }}"
+        user: admin
+        password: "{{ vault_grafana_admin_password }}"
+        force_basic_auth: true
+      register: org_lookup
+
+    - name: Switch admin context to tenant org
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/user/using/{{ org_lookup.json.id }}"
+        method: POST
+        user: admin
+        password: "{{ vault_grafana_admin_password }}"
+        force_basic_auth: true
+        status_code: [200]
+
+    - name: Provision tenant-scoped Mimir datasource
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        user: admin
+        password: "{{ vault_grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: Mimir
+          type: prometheus
+          access: proxy
+          url: "http://mimir:8080/prometheus"
+          jsonData:
+            httpHeaderName1: X-Scope-OrgID
+          secureJsonData:
+            httpHeaderValue1: "{{ tenant_slug }}"
+        status_code: [200, 409]
+
+    - name: Provision tenant-scoped Loki datasource
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        user: admin
+        password: "{{ vault_grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: Loki
+          type: loki
+          access: proxy
+          url: "http://loki:3100"
+          jsonData:
+            httpHeaderName1: X-Scope-OrgID
+          secureJsonData:
+            httpHeaderValue1: "{{ tenant_slug }}"
+        status_code: [200, 409]
+
+    - name: Provision tenant-scoped Tempo datasource
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        user: admin
+        password: "{{ vault_grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: Tempo
+          type: tempo
+          access: proxy
+          url: "http://tempo:3200"
+          jsonData:
+            httpHeaderName1: X-Scope-OrgID
+          secureJsonData:
+            httpHeaderValue1: "{{ tenant_slug }}"
+        status_code: [200, 409]

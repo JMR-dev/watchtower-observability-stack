@@ -1,0 +1,15 @@
+---
+- name: Restart journald
+  ansible.builtin.systemd:
+    name: systemd-journald
+    state: restarted
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart dnf-automatic timer
+  ansible.builtin.systemd:
+    name: dnf-automatic-install.timer
+    state: restarted
+    enabled: true

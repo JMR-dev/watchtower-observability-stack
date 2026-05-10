@@ -1,0 +1,39 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart mimir
+  ansible.builtin.systemd:
+    name: mimir.service
+    state: restarted
+    daemon_reload: true
+
+- name: Restart loki
+  ansible.builtin.systemd:
+    name: loki.service
+    state: restarted
+    daemon_reload: true
+
+- name: Restart tempo
+  ansible.builtin.systemd:
+    name: tempo.service
+    state: restarted
+    daemon_reload: true
+
+- name: Restart grafana
+  ansible.builtin.systemd:
+    name: grafana.service
+    state: restarted
+    daemon_reload: true
+
+- name: Restart all services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: restarted
+    daemon_reload: true
+  loop:
+    - mimir.service
+    - loki.service
+    - tempo.service
+    - grafana.service

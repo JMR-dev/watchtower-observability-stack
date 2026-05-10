@@ -1,0 +1,117 @@
+---
+- name: Update all packages
+  ansible.builtin.dnf:
+    name: "*"
+    state: latest
+    update_cache: true
+
+- name: Install required packages
+  ansible.builtin.dnf:
+    name:
+      - podman
+      - podman-compose
+      - wireguard-tools
+      - cryptsetup
+      - nftables
+      - python3-libselinux
+      - policycoreutils-python-utils
+      - container-selinux
+      - jq
+      - bind-utils
+      - tar
+      - rsync
+      - dnf-automatic
+    state: present
+
+- name: Set timezone
+  community.general.timezone:
+    name: "{{ timezone }}"
+
+- name: Configure persistent journald with size cap
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/persistent.conf
+    mode: "0644"
+    content: |
+      [Journal]
+      Storage=persistent
+      SystemMaxUse=2G
+      SystemMaxFileSize=128M
+      MaxRetentionSec=30day
+  notify: Restart journald
+
+- name: Render dnf-automatic config (security updates, apply, reboot when needed)
+  ansible.builtin.copy:
+    dest: /etc/dnf/automatic.conf
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      # Managed by Ansible — see roles/base/tasks/main.yml.
+      [commands]
+      upgrade_type = security
+      random_sleep = 360
+      network_online_timeout = 60
+      download_updates = yes
+      apply_updates = yes
+      reboot = when-needed
+      reboot_command = "shutdown -r +5 'Rebooting for security updates'"
+
+      [emitters]
+      emit_via = stdio,motd
+
+      [base]
+      # Don't auto-restart the container runtime / observability stack out from
+      # under us — operator applies these manually during a maintenance window.
+      exclude = podman* conmon crun containers-common netavark aardvark-dns container-selinux
+  notify: Restart dnf-automatic timer
+
+- name: Ensure dnf-automatic-install timer override directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/dnf-automatic-install.timer.d
+    state: directory
+    mode: "0755"
+
+- name: Pin dnf-automatic to 01:00 Central time (America/Chicago, honours DST)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/dnf-automatic-install.timer.d/override.conf
+    mode: "0644"
+    content: |
+      [Timer]
+      OnCalendar=
+      OnCalendar=*-*-* 01:00:00 America/Chicago
+      RandomizedDelaySec=30m
+      Persistent=true
+  notify:
+    - Reload systemd
+    - Restart dnf-automatic timer
+
+- name: Ensure override directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/dnf-automatic-install.timer.d
+    state: directory
+    mode: "0755"
+
+- name: Disable the download-only timer (we use the install timer)
+  ansible.builtin.systemd:
+    name: dnf-automatic.timer
+    enabled: false
+    state: stopped
+  failed_when: false
+
+- name: Enable dnf-automatic-install.timer (downloads + applies + reboots)
+  ansible.builtin.systemd:
+    name: dnf-automatic-install.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Ensure SELinux enforcing
+  ansible.posix.selinux:
+    policy: targeted
+    state: enforcing
+
+- name: Enable container manage cgroup boolean (rootful Podman + systemd)
+  ansible.posix.seboolean:
+    name: container_manage_cgroup
+    state: true
+    persistent: true

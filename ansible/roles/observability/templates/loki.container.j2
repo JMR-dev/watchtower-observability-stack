@@ -1,0 +1,30 @@
+[Unit]
+Description=Grafana Loki
+Wants=network-online.target observability-network.service
+After=network-online.target observability-network.service wg-quick@{{ wireguard_interface }}.service
+Requires=wg-quick@{{ wireguard_interface }}.service
+
+[Container]
+Image={{ image_loki }}
+ContainerName=loki
+Network=observability.network
+Volume=loki-data.volume:/var/lib/loki:Z
+Volume={{ observability_config_dir }}/loki/loki.yaml:/etc/loki/loki.yaml:ro,Z
+EnvironmentFile={{ observability_secrets_dir }}/s3.env
+
+PublishPort={{ wireguard_server_ip }}:3100:3100
+
+Exec=-config.file=/etc/loki/loki.yaml -config.expand-env=true
+
+User=10001
+Group=10001
+
+PodmanArgs=--memory=6g --memory-swap=6g
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target default.target

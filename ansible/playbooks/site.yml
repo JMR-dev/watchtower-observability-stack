@@ -1,0 +1,13 @@
+---
+- name: Provision Watchtower observability stack
+  hosts: watchtower
+  become: true
+  gather_facts: true
+
+  roles:
+    - base
+    - luks
+    - firewall
+    - fail2ban
+    - wireguard
+    - observability

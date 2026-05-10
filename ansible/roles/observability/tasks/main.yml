@@ -1,0 +1,158 @@
+---
+- name: Ensure observability config and secret directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+    owner: root
+    group: root
+  loop:
+    - { path: "{{ observability_secrets_dir }}", mode: "0700" }
+    - { path: "{{ observability_config_dir }}", mode: "0755" }
+    - { path: "{{ observability_config_dir }}/mimir", mode: "0755" }
+    - { path: "{{ observability_config_dir }}/loki", mode: "0755" }
+    - { path: "{{ observability_config_dir }}/tempo", mode: "0755" }
+    - { path: "{{ observability_config_dir }}/grafana", mode: "0755" }
+    - { path: "{{ observability_config_dir }}/grafana/provisioning", mode: "0755" }
+    - { path: "{{ observability_config_dir }}/grafana/provisioning/datasources", mode: "0755" }
+    - { path: "{{ observability_config_dir }}/grafana/provisioning/dashboards", mode: "0755" }
+    - { path: /var/log/observability, mode: "0750" }
+    - { path: /etc/containers/systemd, mode: "0755" }
+
+# Container processes run as non-root UIDs. Bind-mounted data dirs must be
+# owned by those UIDs or the services cannot create their WAL/index/DB files.
+- name: Ensure data directories with correct UIDs
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ item.uid }}"
+    group: "{{ item.gid }}"
+  loop:
+    - { path: "{{ observability_data_root }}/mimir",   uid: 10001, gid: 10001 }
+    - { path: "{{ observability_data_root }}/loki",    uid: 10001, gid: 10001 }
+    - { path: "{{ observability_data_root }}/tempo",   uid: 10001, gid: 10001 }
+    - { path: "{{ observability_data_root }}/grafana", uid: 472,   gid: 472 }
+
+- name: Write S3 credentials env file
+  ansible.builtin.template:
+    src: s3.env.j2
+    dest: "{{ observability_secrets_dir }}/s3.env"
+    mode: "0600"
+    owner: root
+    group: root
+  notify:
+    - Restart mimir
+    - Restart loki
+    - Restart tempo
+
+- name: Render Mimir config
+  ansible.builtin.template:
+    src: mimir.yaml.j2
+    dest: "{{ observability_config_dir }}/mimir/mimir.yaml"
+    mode: "0644"
+  notify: Restart mimir
+
+- name: Render Loki config
+  ansible.builtin.template:
+    src: loki.yaml.j2
+    dest: "{{ observability_config_dir }}/loki/loki.yaml"
+    mode: "0644"
+  notify: Restart loki
+
+- name: Render Tempo config
+  ansible.builtin.template:
+    src: tempo.yaml.j2
+    dest: "{{ observability_config_dir }}/tempo/tempo.yaml"
+    mode: "0644"
+  notify: Restart tempo
+
+- name: Render Grafana config
+  ansible.builtin.template:
+    src: grafana.ini.j2
+    dest: "{{ observability_config_dir }}/grafana/grafana.ini"
+    mode: "0640"
+  notify: Restart grafana
+
+- name: Render Grafana datasource provisioning
+  ansible.builtin.template:
+    src: datasources.yaml.j2
+    dest: "{{ observability_config_dir }}/grafana/provisioning/datasources/datasources.yaml"
+    mode: "0644"
+  notify: Restart grafana
+
+- name: Apply SELinux context to config tree
+  ansible.builtin.command: restorecon -R /etc/observability
+  changed_when: false
+
+- name: Deploy Podman network quadlet
+  ansible.builtin.copy:
+    src: observability.network
+    dest: /etc/containers/systemd/observability.network
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Deploy volume quadlets
+  ansible.builtin.template:
+    src: "{{ item }}.volume.j2"
+    dest: "/etc/containers/systemd/{{ item }}.volume"
+    mode: "0644"
+  loop:
+    - mimir-data
+    - loki-data
+    - tempo-data
+    - grafana-data
+  notify: Reload systemd
+
+- name: Deploy container quadlets
+  ansible.builtin.template:
+    src: "{{ item }}.container.j2"
+    dest: "/etc/containers/systemd/{{ item }}.container"
+    mode: "0644"
+  loop:
+    - mimir
+    - loki
+    - tempo
+    - grafana
+  notify:
+    - Reload systemd
+    - Restart all services
+
+- name: Force handlers to flush before health checks
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for Mimir /ready
+  ansible.builtin.uri:
+    url: "http://{{ wireguard_server_ip }}:8080/ready"
+    status_code: 200
+  register: mimir_ready
+  retries: 30
+  delay: 5
+  until: mimir_ready.status == 200
+
+- name: Wait for Loki /ready
+  ansible.builtin.uri:
+    url: "http://{{ wireguard_server_ip }}:3100/ready"
+    status_code: 200
+  register: loki_ready
+  retries: 30
+  delay: 5
+  until: loki_ready.status == 200
+
+- name: Wait for Tempo /ready
+  ansible.builtin.uri:
+    url: "http://{{ wireguard_server_ip }}:3200/ready"
+    status_code: 200
+  register: tempo_ready
+  retries: 30
+  delay: 5
+  until: tempo_ready.status == 200
+
+- name: Wait for Grafana /api/health
+  ansible.builtin.uri:
+    url: "http://{{ wireguard_server_ip }}:3000/api/health"
+    status_code: 200
+  register: grafana_ready
+  retries: 30
+  delay: 5
+  until: grafana_ready.status == 200

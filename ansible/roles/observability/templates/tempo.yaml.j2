@@ -1,0 +1,73 @@
+# Tempo single-binary deployment with multi-tenancy and Hetzner S3 backend.
+
+multitenancy_enabled: true
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9097
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+    jaeger:
+      protocols:
+        thrift_http:
+          endpoint: 0.0.0.0:14268
+
+ingester:
+  max_block_duration: 5m
+  trace_idle_period: 10s
+
+compactor:
+  compaction:
+    block_retention: {{ tempo_retention_days * 24 }}h
+    compacted_block_retention: 1h
+    compaction_window: 1h
+    max_block_bytes: 100000000
+    retention_concurrency: 16
+
+storage:
+  trace:
+    backend: s3
+    wal:
+      path: /var/lib/tempo/wal
+    s3:
+      endpoint: "{{ hetzner_location }}.your-objectstorage.com"
+      region: "{{ s3_region }}"
+      bucket: "{{ s3_bucket_tempo }}"
+      access_key: "${AWS_ACCESS_KEY_ID}"
+      secret_key: "${AWS_SECRET_ACCESS_KEY}"
+      forcepathstyle: true
+      insecure: false
+    pool:
+      max_workers: 100
+      queue_depth: 10000
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+      cluster: watchtower
+  storage:
+    path: /var/lib/tempo/generator/wal
+    remote_write:
+      - url: http://mimir:8080/api/v1/push
+        send_exemplars: true
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics]
+
+usage_report:
+  reporting_enabled: false
+
+querier:
+  frontend_worker:
+    frontend_address: 127.0.0.1:9097
