@@ -1,0 +1,10 @@
+# Copy to backend.hcl (gitignored) and set your Cloudflare Account ID.
+# Pass at init time: tofu init -backend-config=backend.hcl
+#
+# Credentials are read from env vars — set before running tofu:
+#   export AWS_ACCESS_KEY_ID=<r2-access-key-id>
+#   export AWS_SECRET_ACCESS_KEY=<r2-secret-access-key>
+
+endpoints = {
+  s3 = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
+}

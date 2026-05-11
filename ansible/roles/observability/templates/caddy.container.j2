@@ -1,0 +1,56 @@
+[Unit]
+Description=Caddy reverse proxy with Coraza WAF
+# Caddy publishes ports on the WireGuard IP; wg0 must be up before the
+# PublishPort binds succeed.  wg-easy.service owns the wg0 interface.
+Wants=network-online.target observability-network.service wg-easy.service
+After=network-online.target observability-network.service wg-easy.service
+
+[Container]
+Image={{ image_caddy }}
+ContainerName=caddy
+
+# Same network as all backends; Caddy reaches them by container name.
+Network=observability.network
+
+Volume=caddy-data.volume:/var/lib/caddy:Z
+Volume={{ observability_config_dir }}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro,Z
+# Separate bind mount with shared (':z') label so fail2ban on the host can
+# read the Coraza audit log.  Private (':Z') would assign a container-private
+# MCS category that fail2ban cannot access even as root.
+Volume={{ observability_data_root }}/caddy/logs:/var/log/caddy:z
+
+# Expose each service port on the WireGuard IP only.  Caddy listens on
+# 0.0.0.0 inside the container; Podman's PublishPort restricts host exposure.
+PublishPort={{ wireguard_server_ip }}:80:80
+PublishPort={{ wireguard_server_ip }}:3100:3100
+PublishPort={{ wireguard_server_ip }}:8080:8080
+PublishPort={{ wireguard_server_ip }}:3200:3200
+PublishPort={{ wireguard_server_ip }}:4317:4317
+PublishPort={{ wireguard_server_ip }}:4318:4318
+
+# Port 80 requires NET_BIND_SERVICE when running as non-root.
+AddCapability=NET_BIND_SERVICE
+
+User=1000
+Group=1000
+
+PodmanArgs=--memory=512m --memory-swap=512m
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=120
+
+# Wait for wg0 to have its address before Caddy tries to bind PublishPorts on
+# the WireGuard IP.  Times out after 2 minutes and lets systemd mark the unit
+# failed so the operator sees a clear error rather than a silent bind error.
+ExecStartPre=/bin/bash -c \
+  'for i in $(seq 60); do \
+     ip -4 addr show {{ wireguard_interface }} 2>/dev/null \
+       | grep -q "{{ wireguard_server_ip }}" && exit 0; \
+     sleep 2; \
+   done; \
+   echo "Timed out waiting for {{ wireguard_interface }}"; exit 1'
+
+[Install]
+WantedBy=multi-user.target default.target

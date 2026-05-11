@@ -14,8 +14,10 @@ single Hetzner CPX42 in Nuremberg (nbg1). Built with Mimir, Loki, Tempo, and Gra
 ```bash
 # 1. Provision infrastructure
 cd tofu
-cp terraform.tfvars.example terraform.tfvars   # fill in your tokens
-tofu init
+cp backend.hcl.example backend.hcl          # set your Cloudflare Account ID
+cp terraform.tfvars.example terraform.tfvars # set Hetzner tokens + SSH key
+set -a && source .env && set +a             # load R2 credentials into env
+tofu init -backend-config=backend.hcl
 tofu apply
 
 # 2. Configure server

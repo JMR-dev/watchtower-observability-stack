@@ -15,6 +15,16 @@
   ansible.builtin.set_fact:
     luks_use_loop_file: "{{ not luks_device_stat.stat.exists }}"
 
+- name: Fail if Hetzner Volume expected but device not found
+  ansible.builtin.fail:
+    msg: >
+      Device {{ luks_device_source }} was not found, but observability_volume_id is set
+      to '{{ observability_volume_id }}'. Ensure the Hetzner Volume is attached to the server
+      and udev has settled (try: udevadm settle --timeout=30).
+  when:
+    - (observability_volume_id | string) | length > 0
+    - not luks_device_stat.stat.exists
+
 - name: Create loop-backed LUKS image (if no real device)
   when: luks_use_loop_file
   block:

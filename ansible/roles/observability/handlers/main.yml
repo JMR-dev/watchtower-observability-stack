@@ -27,13 +27,33 @@
     state: restarted
     daemon_reload: true
 
+- name: Restart caddy
+  ansible.builtin.systemd:
+    name: caddy.service
+    state: restarted
+    daemon_reload: true
+
+- name: Restart wg-easy
+  ansible.builtin.systemd:
+    name: wg-easy.service
+    state: restarted
+    daemon_reload: true
+
 - name: Restart all services
   ansible.builtin.systemd:
     name: "{{ item }}"
     state: restarted
     daemon_reload: true
   loop:
+    - wg-easy.service
+    - caddy.service
     - mimir.service
     - loki.service
     - tempo.service
     - grafana.service
+
+- name: Restart disk-guard timer
+  ansible.builtin.systemd:
+    name: disk-guard.timer
+    state: restarted
+    daemon_reload: true

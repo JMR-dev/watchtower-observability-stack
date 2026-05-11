@@ -40,7 +40,16 @@ admin_allow_ipv6:
 observability_data_root: /var/lib/observability
 observability_secrets_dir: /etc/observability/secrets
 observability_config_dir: /etc/observability/config
-luks_device_source: /dev/sdb
+# observability_volume_id is injected per-host from the Ansible inventory.
+# Run `tofu output -json | jq -r '.ansible_inventory.value'` to regenerate hosts.yml.
+# Leave empty in dev/staging — the LUKS role will fall back to an 80 GB loop file.
+observability_volume_id: ""
+
+# When observability_volume_id is set, use the stable Hetzner by-id path.
+# When empty, the LUKS role falls back to a loop-backed image on the root disk (dev/staging only).
+luks_device_source: >-
+  {{ ((observability_volume_id | string) | length > 0)
+     | ternary('/dev/disk/by-id/scsi-0HC_Volume_' + (observability_volume_id | string), '/dev/sdb') }}
 luks_mapper_name: observability_data
 
 # Container images (pin in production)
@@ -48,11 +57,21 @@ image_mimir:   "docker.io/grafana/mimir:2.14.3"
 image_loki:    "docker.io/grafana/loki:3.3.2"
 image_tempo:   "docker.io/grafana/tempo:2.7.1"
 image_grafana: "docker.io/grafana/grafana:11.4.0"
+image_caddy:   "localhost/watchtower-caddy:latest"
+
+# wg-easy — WireGuard peer management web UI.
+# image built from ghcr.io; pin the tag in production.
+image_wg_easy: "ghcr.io/wg-easy/wg-easy:14"
+wg_easy_web_port: 51821   # TCP — web UI, wg0 only (covered by iifname wg0 accept in nftables)
+wg_easy_wg_port: "{{ wireguard_listen_port }}"
+
+# Indirection for vault secret
+wg_easy_password_hash: "{{ vault_wg_easy_password_hash }}"
 
 # Retention (per signal)
 mimir_retention_days: 90
 loki_retention_days:  30
-tempo_retention_days: 14
+tempo_retention_days: 30
 
 # Tenants — override in production
 tenants:

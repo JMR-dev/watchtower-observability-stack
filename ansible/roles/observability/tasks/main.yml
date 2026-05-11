@@ -16,8 +16,10 @@
     - { path: "{{ observability_config_dir }}/grafana/provisioning", mode: "0755" }
     - { path: "{{ observability_config_dir }}/grafana/provisioning/datasources", mode: "0755" }
     - { path: "{{ observability_config_dir }}/grafana/provisioning/dashboards", mode: "0755" }
+    - { path: "{{ observability_config_dir }}/caddy", mode: "0755" }
     - { path: /var/log/observability, mode: "0750" }
     - { path: /etc/containers/systemd, mode: "0755" }
+    - { path: /etc/observability/caddy-build, mode: "0755" }
 
 # Container processes run as non-root UIDs. Bind-mounted data dirs must be
 # owned by those UIDs or the services cannot create their WAL/index/DB files.
@@ -29,10 +31,12 @@
     owner: "{{ item.uid }}"
     group: "{{ item.gid }}"
   loop:
-    - { path: "{{ observability_data_root }}/mimir",   uid: 10001, gid: 10001 }
-    - { path: "{{ observability_data_root }}/loki",    uid: 10001, gid: 10001 }
-    - { path: "{{ observability_data_root }}/tempo",   uid: 10001, gid: 10001 }
-    - { path: "{{ observability_data_root }}/grafana", uid: 472,   gid: 472 }
+    - { path: "{{ observability_data_root }}/mimir",      uid: 10001, gid: 10001 }
+    - { path: "{{ observability_data_root }}/loki",       uid: 10001, gid: 10001 }
+    - { path: "{{ observability_data_root }}/tempo",      uid: 10001, gid: 10001 }
+    - { path: "{{ observability_data_root }}/grafana",    uid: 472,   gid: 472 }
+    - { path: "{{ observability_data_root }}/caddy",      uid: 1000,  gid: 1000 }
+    - { path: "{{ observability_data_root }}/caddy/logs", uid: 1000,  gid: 1000 }
 
 - name: Write S3 credentials env file
   ansible.builtin.template:
@@ -50,6 +54,13 @@
   ansible.builtin.template:
     src: mimir.yaml.j2
     dest: "{{ observability_config_dir }}/mimir/mimir.yaml"
+    mode: "0644"
+  notify: Restart mimir
+
+- name: Render Mimir runtime overrides
+  ansible.builtin.template:
+    src: mimir-runtime.yaml.j2
+    dest: "{{ observability_config_dir }}/mimir/runtime.yaml"
     mode: "0644"
   notify: Restart mimir
 
@@ -71,7 +82,7 @@
   ansible.builtin.template:
     src: grafana.ini.j2
     dest: "{{ observability_config_dir }}/grafana/grafana.ini"
-    mode: "0640"
+    mode: "0644"
   notify: Restart grafana
 
 - name: Render Grafana datasource provisioning
@@ -80,6 +91,22 @@
     dest: "{{ observability_config_dir }}/grafana/provisioning/datasources/datasources.yaml"
     mode: "0644"
   notify: Restart grafana
+
+- name: Render Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ observability_config_dir }}/caddy/Caddyfile"
+    mode: "0644"
+  notify: Restart caddy
+
+- name: Render wg-easy env file
+  ansible.builtin.template:
+    src: wg-easy.env.j2
+    dest: "{{ observability_secrets_dir }}/wg-easy.env"
+    mode: "0600"
+    owner: root
+    group: root
+  notify: Restart wg-easy
 
 - name: Apply SELinux context to config tree
   ansible.builtin.command: restorecon -R /etc/observability
@@ -102,7 +129,27 @@
     - loki-data
     - tempo-data
     - grafana-data
+    - caddy-data
   notify: Reload systemd
+
+# Copy the Caddy build context to the server so podman build runs locally.
+- name: Copy Caddy + Coraza Dockerfile to server
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../../build/caddy/Dockerfile"
+    dest: /etc/observability/caddy-build/Dockerfile
+    mode: "0644"
+  register: caddy_dockerfile_result
+
+- name: Check if Caddy + Coraza image already exists
+  ansible.builtin.command: podman image inspect localhost/watchtower-caddy:latest
+  register: caddy_image_inspect
+  changed_when: false
+  failed_when: false
+
+- name: Build Caddy + Coraza image
+  ansible.builtin.command: podman build -t localhost/watchtower-caddy:latest /etc/observability/caddy-build/
+  when: caddy_image_inspect.rc != 0 or caddy_dockerfile_result.changed
+  notify: Restart caddy
 
 - name: Deploy container quadlets
   ansible.builtin.template:
@@ -114,12 +161,75 @@
     - loki
     - tempo
     - grafana
+    - wg-easy
+    - caddy
   notify:
     - Reload systemd
     - Restart all services
 
 - name: Force handlers to flush before health checks
   ansible.builtin.meta: flush_handlers
+
+# Handlers only restart services when the quadlet templates change.  On
+# subsequent runs (or partial first runs) the units exist but are stopped, so
+# explicitly ensure each backend is started before the health checks below.
+# Quadlet-generated units cannot be `enabled` (they're auto-wired by their
+# WantedBy= line), so we only set state=started — systemd treats this as a
+# no-op when the unit is already active.
+- name: Ensure observability services are started
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    daemon_reload: true
+  loop:
+    - wg-easy.service
+    - mimir.service
+    - loki.service
+    - tempo.service
+    - grafana.service
+    - caddy.service
+
+- name: Deploy disk-guard script
+  ansible.builtin.template:
+    src: disk-guard.sh.j2
+    dest: /usr/local/bin/disk-guard.sh
+    mode: "0750"
+    owner: root
+    group: root
+
+- name: Deploy disk-guard systemd units
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+    owner: root
+    group: root
+  loop:
+    - disk-guard.service
+    - disk-guard.timer
+  notify:
+    - Reload systemd
+    - Restart disk-guard timer
+
+- name: Enable and start disk-guard timer
+  ansible.builtin.systemd:
+    name: disk-guard.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# Health checks run on the managed host (via SSH) so they work regardless of
+# whether the Ansible controller is connected to the WireGuard VPN.  The server
+# can reach its own WireGuard IP (10.8.0.1) via the local wg0 interface.
+- name: Wait for Caddy to be ready
+  ansible.builtin.uri:
+    url: "http://{{ wireguard_server_ip }}/api/health"
+    status_code: 200
+  register: caddy_ready
+  retries: 30
+  delay: 5
+  until: caddy_ready.status == 200
+  delegate_to: "{{ inventory_hostname }}"
 
 - name: Wait for Mimir /ready
   ansible.builtin.uri:
@@ -129,6 +239,7 @@
   retries: 30
   delay: 5
   until: mimir_ready.status == 200
+  delegate_to: "{{ inventory_hostname }}"
 
 - name: Wait for Loki /ready
   ansible.builtin.uri:
@@ -138,6 +249,7 @@
   retries: 30
   delay: 5
   until: loki_ready.status == 200
+  delegate_to: "{{ inventory_hostname }}"
 
 - name: Wait for Tempo /ready
   ansible.builtin.uri:
@@ -147,12 +259,5 @@
   retries: 30
   delay: 5
   until: tempo_ready.status == 200
+  delegate_to: "{{ inventory_hostname }}"
 
-- name: Wait for Grafana /api/health
-  ansible.builtin.uri:
-    url: "http://{{ wireguard_server_ip }}:3000/api/health"
-    status_code: 200
-  register: grafana_ready
-  retries: 30
-  delay: 5
-  until: grafana_ready.status == 200

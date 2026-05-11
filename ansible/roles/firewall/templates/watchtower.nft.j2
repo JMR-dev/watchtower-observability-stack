@@ -55,6 +55,8 @@ table inet watchtower {
 
         # Anything arriving on WireGuard is treated as trusted (only authenticated
         # peers can reach this interface). Service ports are bound to 10.8.0.1.
+        # This also implicitly allows the wg-easy web UI on TCP 51821, which
+        # is bound to 10.8.0.1 and therefore only reachable from VPN peers.
         iifname "{{ wireguard_interface }}" accept
 
         # Podman bridge networks: allow the kernel to deliver packets the

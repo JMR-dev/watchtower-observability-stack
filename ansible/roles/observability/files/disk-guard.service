@@ -1,0 +1,8 @@
+[Unit]
+Description=Observability disk-guard: flush services when data volume is near-full
+After=network-online.target wg-easy.service loki.service mimir.service tempo.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/disk-guard.sh

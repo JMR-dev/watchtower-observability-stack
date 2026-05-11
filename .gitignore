@@ -9,7 +9,7 @@ secrets/
 .vault_pass
 .vault_password
 ansible/inventory/hosts.yml
-ansible/group_vars/**/vault.yml
+ansible/inventory/group_vars/**/vault.yml
 wireguard/wg0.conf
 wireguard/peers/
 .aws/

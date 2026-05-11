@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Managed by Ansible — see roles/observability/templates/disk-guard.sh.j2
+#
+# Monitors disk usage on the observability data volume and calls each service's
+# ingester-flush HTTP API when the disk is near capacity, accelerating the
+# drain of in-memory chunks to Hetzner Object Storage.
+#
+# NOTE: /flush and /ingester/flush are admin-only endpoints registered outside
+# the standard auth middleware in Loki, Mimir, and Tempo. They flush all tenants
+# and do not require X-Scope-OrgID even when multitenancy is enabled.
+#
+# Thresholds:
+#   >= 80 %  WARNING — flush all ingesters
+#   >= 90 %  ERR     — flush + journal critical (operator action required)
+
+set -euo pipefail
+
+DATA_ROOT="{{ observability_data_root }}"
+MAPPER="{{ luks_mapper_name }}"
+BASE_URL="http://{{ wireguard_server_ip }}"
+
+# Verify the LUKS volume is actually mounted; if not, we'd be checking the
+# wrong (root) filesystem and triggering spurious flushes.
+if ! findmnt --source "/dev/mapper/${MAPPER}" --target "${DATA_ROOT}" > /dev/null 2>&1; then
+  systemd-cat -t disk-guard -p err \
+    printf 'LUKS volume /dev/mapper/%s is not mounted at %s — skipping disk check' \
+    "${MAPPER}" "${DATA_ROOT}"
+  exit 1
+fi
+
+USAGE=$(df --output=pcent "${DATA_ROOT}" | tail -1 | tr -d ' %')
+
+if (( USAGE < 80 )); then
+  exit 0
+fi
+
+LEVEL="WARNING"
+(( USAGE >= 90 )) && LEVEL="ERR"
+
+systemd-cat -t disk-guard -p "${LEVEL,,}" \
+  printf '%s: observability data volume at %d%% — flushing ingesters to object storage' \
+  "${LEVEL}" "${USAGE}"
+
+flush() {
+  local svc=$1 url=$2
+  local http_code
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${url}" --max-time 10 || true)
+  if [[ "${http_code}" == "204" || "${http_code}" == "200" ]]; then
+    systemd-cat -t disk-guard -p info printf 'Flushed %s ingester (HTTP %s)' "${svc}" "${http_code}"
+  else
+    systemd-cat -t disk-guard -p warning printf 'Flush %s returned HTTP %s (check service logs)' "${svc}" "${http_code}"
+  fi
+}
+
+flush loki  "${BASE_URL}:3100/flush"
+flush mimir "${BASE_URL}:8080/ingester/flush"
+flush tempo "${BASE_URL}:3200/flush"
+
+if (( USAGE >= 90 )); then
+  systemd-cat -t disk-guard -p err \
+    printf 'ERR: observability volume at %d%% — manual intervention required (compact, scale, or extend volume)' \
+    "${USAGE}"
+fi
