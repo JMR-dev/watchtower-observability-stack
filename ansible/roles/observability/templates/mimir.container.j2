@@ -9,6 +9,7 @@ ContainerName=mimir
 Network=observability.network
 Volume=mimir-data.volume:/var/lib/mimir:Z
 Volume={{ observability_config_dir }}/mimir/mimir.yaml:/etc/mimir/mimir.yaml:ro,Z
+Volume={{ observability_config_dir }}/mimir/runtime.yaml:/etc/mimir/runtime.yaml:ro,Z
 EnvironmentFile={{ observability_secrets_dir }}/s3.env
 
 # -config.expand-env enables ${AWS_*} substitution from EnvironmentFile.

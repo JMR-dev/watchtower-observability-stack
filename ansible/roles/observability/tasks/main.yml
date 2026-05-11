@@ -57,6 +57,13 @@
     mode: "0644"
   notify: Restart mimir
 
+- name: Render Mimir runtime overrides
+  ansible.builtin.template:
+    src: mimir-runtime.yaml.j2
+    dest: "{{ observability_config_dir }}/mimir/runtime.yaml"
+    mode: "0644"
+  notify: Restart mimir
+
 - name: Render Loki config
   ansible.builtin.template:
     src: loki.yaml.j2
@@ -75,7 +82,7 @@
   ansible.builtin.template:
     src: grafana.ini.j2
     dest: "{{ observability_config_dir }}/grafana/grafana.ini"
-    mode: "0640"
+    mode: "0644"
   notify: Restart grafana
 
 - name: Render Grafana datasource provisioning
@@ -162,6 +169,25 @@
 
 - name: Force handlers to flush before health checks
   ansible.builtin.meta: flush_handlers
+
+# Handlers only restart services when the quadlet templates change.  On
+# subsequent runs (or partial first runs) the units exist but are stopped, so
+# explicitly ensure each backend is started before the health checks below.
+# Quadlet-generated units cannot be `enabled` (they're auto-wired by their
+# WantedBy= line), so we only set state=started — systemd treats this as a
+# no-op when the unit is already active.
+- name: Ensure observability services are started
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    daemon_reload: true
+  loop:
+    - wg-easy.service
+    - mimir.service
+    - loki.service
+    - tempo.service
+    - grafana.service
+    - caddy.service
 
 - name: Deploy disk-guard script
   ansible.builtin.template:

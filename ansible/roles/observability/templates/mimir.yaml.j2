@@ -5,6 +5,12 @@ target: all,alertmanager,overrides-exporter
 
 multitenancy_enabled: true
 
+# The activity tracker writes its log to ./metrics-activity.log by default.
+# Inside the container the working directory is "/" which is not writable for
+# the non-root user, so point it at the data volume.
+activity_tracker:
+  filepath: /var/lib/mimir/metrics-activity.log
+
 server:
   http_listen_port: 8080
   grpc_listen_port: 9095

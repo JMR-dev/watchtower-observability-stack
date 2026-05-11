@@ -7,10 +7,10 @@
 # Rebuild whenever the ARG versions below change; Ansible will detect the
 # Dockerfile checksum change and re-run `podman build`.
 
-FROM golang:1.23-bookworm AS builder
+FROM golang:1.26-trixie AS builder
 
 ARG XCADDY_VERSION=v0.3.5
-ARG CADDY_VERSION=v2.9.1
+ARG CADDY_VERSION=v2.11.2
 ARG CORAZA_CADDY_VERSION=v2.5.0
 ARG CORAZA_CRS_VERSION=v4.7.0
 
@@ -21,7 +21,7 @@ RUN xcaddy build "${CADDY_VERSION}" \
     --with "github.com/corazawaf/coraza-coreruleset@${CORAZA_CRS_VERSION}"
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \

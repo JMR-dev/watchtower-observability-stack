@@ -12,6 +12,23 @@
     owner: root
     group: root
 
+# wg-easy runs `wg-quick up wg0` inside its container, which calls
+# iptables-legacy to set up the NAT POSTROUTING rule.  AlmaLinux 10 doesn't
+# auto-load the legacy iptables kernel modules, so the call fails with
+# "can't initialize iptables table 'nat': Table does not exist" and wg0 is
+# torn down.  Load the modules now and persist them across reboots.
+- name: Load iptables kernel modules required by wg-easy
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+    persistent: present
+  loop:
+    - ip_tables
+    - iptable_filter
+    - iptable_nat
+    - nf_nat
+    - nf_conntrack
+
 - name: Enable IPv4 forwarding
   ansible.posix.sysctl:
     name: net.ipv4.ip_forward

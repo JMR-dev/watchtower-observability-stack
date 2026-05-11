@@ -22,7 +22,7 @@
       to '{{ observability_volume_id }}'. Ensure the Hetzner Volume is attached to the server
       and udev has settled (try: udevadm settle --timeout=30).
   when:
-    - observability_volume_id | length > 0
+    - (observability_volume_id | string) | length > 0
     - not luks_device_stat.stat.exists
 
 - name: Create loop-backed LUKS image (if no real device)

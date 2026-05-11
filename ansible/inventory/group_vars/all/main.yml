@@ -48,8 +48,8 @@ observability_volume_id: ""
 # When observability_volume_id is set, use the stable Hetzner by-id path.
 # When empty, the LUKS role falls back to a loop-backed image on the root disk (dev/staging only).
 luks_device_source: >-
-  {{ (observability_volume_id | length > 0)
-     | ternary('/dev/disk/by-id/scsi-0HC_Volume_' + observability_volume_id, '/dev/sdb') }}
+  {{ ((observability_volume_id | string) | length > 0)
+     | ternary('/dev/disk/by-id/scsi-0HC_Volume_' + (observability_volume_id | string), '/dev/sdb') }}
 luks_mapper_name: observability_data
 
 # Container images (pin in production)

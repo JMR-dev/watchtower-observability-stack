@@ -4,6 +4,6 @@ all:
       ansible_host: REPLACE_WITH_TOFU_OUTPUT_IPV4
       ansible_user: root
       ansible_python_interpreter: /usr/bin/python3
-      # Hetzner Volume ID for the observability data disk.
+      # Hetzner Volume ID for the observability data disk (quote to keep as string).
       # Populate from: tofu output -json | jq -r '.ansible_inventory.value'
-      observability_volume_id: REPLACE_WITH_TOFU_OUTPUT_OBSERVABILITY_VOLUME_ID
+      observability_volume_id: "REPLACE_WITH_TOFU_OUTPUT_OBSERVABILITY_VOLUME_ID"

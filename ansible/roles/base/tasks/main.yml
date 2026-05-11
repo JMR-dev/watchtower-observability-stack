@@ -9,7 +9,6 @@
   ansible.builtin.dnf:
     name:
       - podman
-      - podman-compose
       - wireguard-tools
       - cryptsetup
       - nftables
@@ -26,6 +25,12 @@
 - name: Set timezone
   community.general.timezone:
     name: "{{ timezone }}"
+
+- name: Ensure journald drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    mode: "0755"
 
 - name: Configure persistent journald with size cap
   ansible.builtin.copy:
