@@ -80,7 +80,7 @@ endpoint `watchtower.jasonmross.dev`, which resolves to the in-tunnel address
   the newest Ready edge pod on a Ready node, ignoring pods stuck on dead nodes
   (which the upstream controller would follow). A drain moves the VPN in
   about a minute, a dead node in about seven (30 s eviction, then
-  Kubernetes' six-minute force-detach of the volume).
+  Kubernetes' six-minute force-detach of its volumes).
 - **The API by DNS round-robin.** `api.watchtower.jasonmross.dev` lists the
   three control-plane nodes, and the firewall admits only admin and CI
   addresses, so there is no load balancer to pay for.

@@ -98,7 +98,7 @@ hcloud floating-ip list -l role=watchtower-vpn
 ```
 
 **Edge pod stuck Terminating on a dead node** (the node will not come back
-soon): the replacement waits up to six minutes for the volume. To hurry it:
+soon): the replacement waits up to six minutes for its two volumes. To hurry it:
 
 ```bash
 kubectl -n watchtower-edge delete pod <old-pod> --grace-period=0 --force

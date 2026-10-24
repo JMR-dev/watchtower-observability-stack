@@ -14,10 +14,20 @@
 	admin off
 	order coraza_waf first
 
+	# No HTTP->HTTPS redirect server on :80: Caddy runs as UID 1000 and may
+	# bind only 443 and up (the pod's ip_unprivileged_port_start), and
+	# nothing in the tunnel speaks plain HTTP to it.
+	auto_https disable_redirects
+
 	storage file_system /data/caddy
 
-	acme_dns googleclouddns {
-		gcp_project {$GCP_PROJECT}
+	# Let's Encrypt only (the network policy admits no other CA). With a DNS
+	# provider set, certmagic uses DNS-01 exclusively: no HTTP-01 or
+	# TLS-ALPN-01 attempts that could never reach this private endpoint.
+	cert_issuer acme {
+		dns googleclouddns {
+			gcp_project {$GCP_PROJECT}
+		}
 	}
 
 	log {

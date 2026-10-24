@@ -253,6 +253,9 @@ jobs:
         env:
           GOFLAGS: -p=2
         run: go build -o bin/apps ./apps
+      # Chart children's URN types carry the chart's: `...Chart$kubernetes:apps/v1:StatefulSet`.
+      # The guard's regex matches the child type after `$`, so the Loki
+      # ingesters are covered as well as Mimir.
       - name: Preview, with a guard on stateful workloads and storage
         working-directory: infra/apps
         env:
@@ -266,7 +269,7 @@ jobs:
           pulumi preview --diff
           pulumi preview --json >"${RUNNER_TEMP}/preview.json"
           ../../scripts/preview-guard.sh "${RUNNER_TEMP}/preview.json" \
-            '^kubernetes:(core/v1:(Namespace|PersistentVolumeClaim)|apps/v1:StatefulSet|storage.k8s.io/v1:StorageClass)$'
+            '(^|\$)kubernetes:(core/v1:(Namespace|PersistentVolumeClaim)|apps/v1:StatefulSet|storage.k8s.io/v1:StorageClass)$'
       - name: pulumi up
         working-directory: infra/apps
         run: pulumi up --yes --skip-preview --stack prod

@@ -376,7 +376,9 @@ func TestEdge(t *testing.T) {
 func TestCaddyfile(t *testing.T) {
 	c := file("Caddyfile")
 	for _, want := range []string{
-		"acme_dns googleclouddns", "SecRuleEngine DetectionOnly", "admin off",
+		"dns googleclouddns", "SecRuleEngine DetectionOnly", "admin off",
+		// Without it Caddy binds :80 for redirects, which UID 1000 cannot.
+		"auto_https disable_redirects",
 		"{$DOMAIN}:443", "{$DOMAIN}:3100", "{$DOMAIN}:8080", "{$DOMAIN}:3200",
 		"{$DOMAIN}:4317", "{$DOMAIN}:4318", "{$DOMAIN}:51821",
 		"loki-distributor.watchtower.svc.cluster.local:3100",
