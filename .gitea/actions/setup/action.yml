@@ -74,7 +74,8 @@ runs:
         }
 
         apt_deps="jq curl openssh-client unzip xz-utils"
-        [[ " $TOOLS " == *" ansible "* ]] && apt_deps+=" python3-venv git"
+        # nftables: CI checks the node firewall template with nft.
+        [[ " $TOOLS " == *" ansible "* ]] && apt_deps+=" python3-venv git nftables"
         sudo=""
         [[ "$(id -u)" == 0 ]] || sudo=sudo
         export DEBIAN_FRONTEND=noninteractive

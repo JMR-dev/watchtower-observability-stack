@@ -84,6 +84,25 @@ jobs:
             ansible-playbook -i inventory/hosts.sample.yml "$playbook" --syntax-check
           done
           ansible-lint
+      - name: Render the node firewall and check it with nft
+        working-directory: ansible
+        run: |
+          set -euo pipefail
+          # The role's `validate: nft --check` only runs on the nodes, so a
+          # broken template would otherwise surface mid-deploy. Render it from
+          # the sample inventory, once as is and once with no IPv6 admin
+          # addresses (an empty set), and have the kernel check each in a
+          # network namespace of its own.
+          out="${RUNNER_TEMP}/nft"
+          mkdir -p "$out"
+          for variant in sample v4-only; do
+            extra=()
+            [[ $variant == v4-only ]] && extra=(-e '{"watchtower_admin_cidrs": ["192.0.2.0/24"]}')
+            ansible -i inventory/hosts.sample.yml watchtower-1 -c local -m ansible.builtin.template \
+              -a "src=roles/firewall/templates/watchtower.nft.j2 dest=${out}/${variant}.nft" "${extra[@]}" >/dev/null
+            unshare --user --map-root-user --net nft --check --file "${out}/${variant}.nft"
+            echo "${variant}: ok"
+          done
 
   images:
     # docker build needs a Docker daemon; ubuntu-latest job pods have none.
