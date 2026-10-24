@@ -66,8 +66,11 @@ ingester:
     enabled: false
   persistence:
     enabled: true
+    # A claims list replaces the chart's default one whole, accessModes
+    # included, and the API server rejects a claim without them.
     claims:
       - name: data
+        accessModes: [ReadWriteOnce]
         size: 10Gi
         storageClass: hcloud-luks
 
@@ -105,8 +108,11 @@ compactor:
   replicas: 1
   persistence:
     enabled: true
+    # A claims list replaces the chart's default one whole, accessModes
+    # included, and the API server rejects a claim without them.
     claims:
       - name: data
+        accessModes: [ReadWriteOnce]
         size: 10Gi
         storageClass: hcloud-luks
 

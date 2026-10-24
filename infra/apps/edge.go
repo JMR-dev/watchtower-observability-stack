@@ -107,6 +107,9 @@ func newEdge(ctx *pulumi.Context, cfg *Config, ns *namespaces, opts ...pulumi.Re
 							Secret: &corev1.SecretVolumeSourceArgs{SecretName: dns.Metadata.Name()},
 						},
 						&corev1.VolumeArgs{Name: pulumi.String("caddy-config"), EmptyDir: &corev1.EmptyDirVolumeSourceArgs{}},
+						&corev1.VolumeArgs{Name: pulumi.String("caddy-tmp"), EmptyDir: &corev1.EmptyDirVolumeSourceArgs{
+							SizeLimit: pulumi.String("1Gi"),
+						}},
 					},
 				},
 			},
@@ -163,9 +166,11 @@ func wgEasyContainer(secret *corev1.Secret) *corev1.ContainerArgs {
 			},
 			SeLinuxOptions: &corev1.SELinuxOptionsArgs{Type: pulumi.String("spc_t")},
 		},
+		// Node peaks at about 320 MB resident while starting (measured on
+		// k3s); 256Mi got it OOM-killed on every start.
 		Resources: &corev1.ResourceRequirementsArgs{
-			Requests: pulumi.StringMap{"cpu": pulumi.String("50m"), "memory": pulumi.String("128Mi")},
-			Limits:   pulumi.StringMap{"memory": pulumi.String("256Mi")},
+			Requests: pulumi.StringMap{"cpu": pulumi.String("50m"), "memory": pulumi.String("256Mi")},
+			Limits:   pulumi.StringMap{"memory": pulumi.String("512Mi")},
 		},
 		VolumeMounts: corev1.VolumeMountArray{&corev1.VolumeMountArgs{
 			Name: pulumi.String("wireguard"), MountPath: pulumi.String("/etc/wireguard"),
@@ -210,6 +215,9 @@ func caddyContainer(cfg *Config, dns *corev1.Secret) *corev1.ContainerArgs {
 			&corev1.VolumeMountArgs{Name: pulumi.String("dns01"), MountPath: pulumi.String("/etc/caddy-dns"), ReadOnly: pulumi.Bool(true)},
 			&corev1.VolumeMountArgs{Name: pulumi.String("caddy-data"), MountPath: pulumi.String("/data")},
 			&corev1.VolumeMountArgs{Name: pulumi.String("caddy-config"), MountPath: pulumi.String("/config")},
+			// Coraza refuses to start unless it can create a file in the temp
+			// dir, and buffers large request bodies there.
+			&corev1.VolumeMountArgs{Name: pulumi.String("caddy-tmp"), MountPath: pulumi.String("/tmp")},
 		},
 	}
 }

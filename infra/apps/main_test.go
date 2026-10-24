@@ -371,6 +371,18 @@ func TestEdge(t *testing.T) {
 	if env(caddy)["DOMAIN"] != names.Domain {
 		t.Errorf("caddy env %v", env(caddy))
 	}
+	// Read-only root: Coraza exits at startup without a writable /tmp.
+	tmp := false
+	for _, v := range dig(caddy, "volumeMounts").([]interface{}) {
+		tmp = tmp || (dig(v, "mountPath") == "/tmp" && dig(v, "readOnly") == nil)
+	}
+	if !tmp {
+		t.Errorf("caddy has no writable /tmp: %v", caddy["volumeMounts"])
+	}
+	// Measured start-up peak is about 320 MB.
+	if dig(wg, "resources.limits.memory") != "512Mi" {
+		t.Errorf("wg-easy memory limit %v", dig(wg, "resources.limits.memory"))
+	}
 }
 
 func TestCaddyfile(t *testing.T) {
@@ -443,6 +455,15 @@ func TestLokiValues(t *testing.T) {
 	}
 	if names.RetentionLokiDays*24 != 720 {
 		t.Error("loki retention constant drifted from values/loki.yaml")
+	}
+	// Our claims lists replace the chart's, so they must carry accessModes
+	// themselves; kubeconform passes without them, the API server does not.
+	for _, component := range []string{"ingester", "compactor"} {
+		for _, c := range dig(v, component+".persistence.claims").([]interface{}) {
+			if dig(c, "accessModes.0") != "ReadWriteOnce" {
+				t.Errorf("loki %s claim %v has no accessModes", component, dig(c, "name"))
+			}
+		}
 	}
 }
 
@@ -537,6 +558,10 @@ func TestLogship(t *testing.T) {
 	}
 	if strings.Count(conf, "use_put_object    On") != 3 {
 		t.Error("every output must use PutObject: the archive key cannot run multipart uploads")
+	}
+	// The S3 plugin turns no_limits into 5 attempts (~30 s), then gives up.
+	if strings.Count(conf, "retry_limit       300") != 3 || strings.Contains(conf, "retry_limit       no_limits") {
+		t.Error("every output needs an explicit retry_limit that outlasts an S3 outage")
 	}
 	ds := resourceOf(t, m, "kubernetes:apps/v1:DaemonSet", "fluent-bit")
 	if dig(ds, "spec.template.spec.tolerations.0.operator") != "Exists" {
