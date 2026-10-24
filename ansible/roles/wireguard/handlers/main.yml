@@ -1,6 +1,0 @@
----
-# wg-quick is no longer used; wg-easy manages the WireGuard interface.
-# Handler kept as a no-op stub so any lingering notify references don't fail.
-- name: Restart wireguard
-  ansible.builtin.debug:
-    msg: "wg-quick is disabled; wg-easy manages {{ wireguard_interface }}"

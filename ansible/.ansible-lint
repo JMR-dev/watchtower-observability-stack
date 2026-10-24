@@ -1,0 +1,8 @@
+---
+profile: production
+exclude_paths:
+  - .collections/
+  - .facts_cache/
+# Kubespray's own variables are not ours to prefix.
+skip_list:
+  - var-naming[no-role-prefix]

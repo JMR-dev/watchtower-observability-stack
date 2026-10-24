@@ -1,0 +1,99 @@
+# Edge proxy for watchtower.jasonmross.dev, inside the WireGuard tunnel.
+#
+# Caddy shares the edge pod's network namespace with wg-easy, so it is
+# reachable at wg0's 10.8.0.1. That address is the private endpoint's A
+# record, so nothing outside the tunnel reaches these listeners; the pod's
+# CiliumNetworkPolicy admits only UDP 51820 from outside.
+#
+# One certificate for the one name, issued over ACME DNS-01 against the
+# Cloud DNS zone watchtower.jasonmross.dev. The service account key can write
+# only that zone.
+#
+# Ported from ansible's Caddyfile.j2: the same ports, now with TLS.
+{
+	admin off
+	order coraza_waf first
+
+	storage file_system /data/caddy
+
+	acme_dns googleclouddns {
+		gcp_project {$GCP_PROJECT}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# ── Grafana UI: browser-facing ──────────────────────────────────────────────
+# Full OWASP CRS in detection-only mode. Switch SecRuleEngine to On after
+# reviewing the Coraza audit log (in the log archive) and tuning false
+# positives.
+{$DOMAIN}:443 {
+	coraza_waf {
+		load_owasp_crs
+
+		directives `
+			Include @coraza.conf-recommended
+			Include @crs-setup.conf.example
+			Include @owasp_crs/*.conf
+
+			SecRuleEngine DetectionOnly
+			SecRequestBodyAccess On
+			SecResponseBodyAccess Off
+			SecAuditEngine RelevantOnly
+			SecAuditLog /dev/stdout
+			SecAuditLogFormat JSON
+			SecAuditLogType Serial
+		`
+	}
+
+	reverse_proxy grafana.watchtower.svc.cluster.local:80
+}
+
+# ── Loki: push to the distributors, deletes to the compactor, rules to the
+# ruler, everything else (queries, tail) to the query frontend.
+# Machine-to-machine; no CRS (structured, often compressed payloads).
+{$DOMAIN}:3100 {
+	@push path /loki/api/v1/push /otlp/v1/logs /api/prom/push
+	reverse_proxy @push loki-distributor.watchtower.svc.cluster.local:3100
+
+	@delete path /loki/api/v1/delete /loki/api/v1/delete/* /loki/api/v1/cache/generation_numbers
+	reverse_proxy @delete loki-compactor.watchtower.svc.cluster.local:3100
+
+	@rules path /loki/api/v1/rules* /api/prom/rules* /prometheus/api/v1/rules* /prometheus/api/v1/alerts
+	reverse_proxy @rules loki-ruler.watchtower.svc.cluster.local:3100
+
+	reverse_proxy loki-query-frontend.watchtower.svc.cluster.local:3100
+}
+
+# ── Mimir: remote_write, queries, rules, Alertmanager ──────────────────────
+{$DOMAIN}:8080 {
+	reverse_proxy mimir.watchtower.svc.cluster.local:8080
+}
+
+# ── Tempo query API ─────────────────────────────────────────────────────────
+{$DOMAIN}:3200 {
+	reverse_proxy tempo.watchtower.svc.cluster.local:3200
+}
+
+# ── Tempo OTLP HTTP ingest ──────────────────────────────────────────────────
+{$DOMAIN}:4318 {
+	reverse_proxy tempo.watchtower.svc.cluster.local:4318
+}
+
+# ── Tempo OTLP gRPC ingest: gRPC over TLS from clients (HTTP/2), cleartext
+# HTTP/2 (h2c) to Tempo.
+{$DOMAIN}:4317 {
+	reverse_proxy tempo.watchtower.svc.cluster.local:4317 {
+		transport http {
+			versions h2c
+		}
+	}
+}
+
+# ── wg-easy web UI (peer management); wg-easy itself listens on loopback.
+{$DOMAIN}:51821 {
+	reverse_proxy 127.0.0.1:51822
+}

@@ -1,72 +1,66 @@
-# Required values
+# Required secrets
 
-This stack needs two kinds of inputs:
+Nothing secret is committed in plaintext. There are three places secrets
+live:
 
-1. **Bootstrap / infra values** for OpenTofu.
-2. **Runtime secrets** for Ansible and the services it configures.
+1. **gopass** (`watchtower/...`), for owner-run commands; `scripts/env.sh`
+   exports them.
+2. **Gitea Actions repo secrets**, for `deploy.yml`. `ci.yml` uses none.
+3. **Pulumi stack config**, encrypted with the passphrase provider and
+   committed, for anything the cluster's workloads need.
 
-## OpenTofu / infrastructure
+## Gitea Actions secrets (and their gopass twins)
 
-| Variable | Required | Where used | Notes |
-| --- | --- | --- | --- |
-| `AWS_ACCESS_KEY_ID` | Yes | `tofu init` / state backend | Cloudflare R2 access key for the OpenTofu state bucket. |
-| `AWS_SECRET_ACCESS_KEY` | Yes | `tofu init` / state backend | Cloudflare R2 secret key for the OpenTofu state bucket. |
-| `hcloud_token` | Yes | Hetzner API provider | Hetzner Cloud API token with read/write access. |
-| `hetzner_s3_access_key` | Yes | Hetzner Object Storage provider | S3 access key for the telemetry buckets. |
-| `hetzner_s3_secret_key` | Yes | Hetzner Object Storage provider | S3 secret key for the telemetry buckets. |
-| `ssh_public_key` | Yes | Hetzner SSH key / initial root access | ed25519 public key used to reach the server on first boot. |
-| `admin_allow_ipv4` | Usually | Host firewall / WireGuard allow list | CIDRs allowed to reach SSH and WireGuard. Default is `0.0.0.0/0`, but you should tighten it. |
-| `admin_allow_ipv6` | Usually | Host firewall / WireGuard allow list | IPv6 version of the same allow list. Default is `::/0`. |
+| Secret | gopass path | Used by | Notes |
+|---|---|---|---|
+| `HCLOUD_TOKEN` | `watchtower/hcloud-token` | Pulumi `cloud`, `scripts/verify.sh` | Hetzner API, read/write |
+| `HCLOUD_CCM_TOKEN` | `watchtower/hcloud-ccm-token` | Kubespray → `kube-system/hcloud` (CCM and hcloud-csi) | Separate token so it can be rotated alone |
+| `S3_ADMIN_ACCESS_KEY` | `watchtower/s3-admin-access-key` | Pulumi backend, MinIO provider, `verify.sh` | The only key the state bucket admits |
+| `S3_ADMIN_SECRET_KEY` | `watchtower/s3-admin-secret-key` | same | |
+| `PULUMI_CONFIG_PASSPHRASE` | `watchtower/pulumi-passphrase` | both stacks | At least 32 random bytes: the repo is mirrored publicly |
+| `GCP_DNS_DEPLOYER_KEY` | `watchtower/gcp-dns-deployer-key` | Pulumi `cloud` (DNS records) | JSON key of `watchtower-dns-deployer@watchtower-observe`; `dns.admin` on the one zone; `scripts/rotate-gcp-key.sh deployer` |
+| `SSH_PRIVATE_KEY` | `watchtower/ssh-private-key` | Ansible | ed25519; root on the nodes |
+| `REGISTRY_TOKEN` | — | image pushes | Gitea token, `write:package` |
 
-## Ansible vault values
+## Pulumi stack config
 
-Store these in `ansible/group_vars/all/vault.yml` and encrypt it with `ansible-vault`:
+### `infra/cloud` (`Pulumi.prod.yaml`)
 
-| Variable | Required | Where used | Notes |
-| --- | --- | --- | --- |
-| `vault_hetzner_s3_access_key` | Yes | Runtime S3 credentials | Written to `/etc/observability/secrets/s3.env`. |
-| `vault_hetzner_s3_secret_key` | Yes | Runtime S3 credentials | Written to `/etc/observability/secrets/s3.env`. |
-| `vault_grafana_admin_password` | Yes | Grafana admin login | Used by Grafana and tenant onboarding playbooks. |
-| `vault_wireguard_server_private_key` | Yes | WireGuard server config | Server private key for `wg0`. |
-| `vault_wireguard_server_public_key` | Yes | WireGuard server config | Server public key shared with clients. |
-| `vault_wireguard_peers` | Yes | WireGuard client config | At least one peer entry is needed if you want to connect remotely. |
+| Key | Secret? | Notes |
+|---|---|---|
+| `watchtower:hetznerProjectId` | no | From the Console URL |
+| `watchtower:sshPublicKey` | no | Public half of `SSH_PRIVATE_KEY` |
+| `watchtower:adminCidrs`, `ciCidrs`, `wireguardAllowCidrs` | no | Firewall sources |
+| `watchtower:bucketPrefix` | no | Must match the apps stack |
+| `watchtower:s3AccessKeys.{admin,loki,mimir,tempo,logship}` | **yes** | Access key IDs the bucket policies name |
 
-Each peer entry in `vault_wireguard_peers` should contain:
+### `infra/apps` (`Pulumi.prod.yaml`)
 
-| Field | Required | Notes |
-| --- | --- | --- |
-| `name` | Yes | Friendly peer name. |
-| `public_key` | Yes | Client WireGuard public key. |
-| `allowed_ips` | Yes | Usually a `/32` from `10.8.0.0/24`. |
-| `preshared_key` | No | Optional extra protection. |
+| Key | Notes |
+|---|---|
+| `watchtower:grafanaAdminPassword` | Also in gopass as `watchtower/grafana-admin-password` (onboarding script) |
+| `watchtower:wgEasyPassword` | wg-easy's first-start admin password |
+| `watchtower:caddyDnsKey` | JSON key of `watchtower-caddy-dns01@`; `scripts/rotate-gcp-key.sh caddy` |
+| `watchtower:luksPassphrase` | Encrypts every hcloud-csi volume. **Losing it loses the volumes' data** |
+| `watchtower:registryToken` | Gitea token, `read:package`, for image pulls |
+| `watchtower:hcloudFipToken` | Hetzner token for fipd only |
+| `watchtower:s3Keys.{loki,mimir,tempo,logship}.{accessKey,secretKey}` | One S3 key per component |
 
-## Service passwords / tokens
+`watchtower:caddyImage` and `watchtower:fipdImage` are not secrets and are
+not committed: `deploy.yml` sets them to the digests it just built.
 
-| Variable | Required | Where used | Notes |
-| --- | --- | --- | --- |
-| `grafana_admin_password` | Yes | Grafana UI and API | Bootstraps Grafana admin access. |
+## What each S3 key can reach
 
-## Minimum set to get the stack running
+Bucket policies (Hetzner's `p<project>:<key>` principals) deny every key but
+the admin key and the bucket's own:
 
-To fully deploy and log in, you need at least:
+| Bucket | Admin | loki | mimir | tempo | logship |
+|---|---|---|---|---|---|
+| `-pulumi-state` | ✓ | | | | |
+| `-loki` | ✓ | ✓ | | | |
+| `-mimir-blocks`, `-mimir-ruler`, `-mimir-alertmanager` | ✓ | | ✓ | | |
+| `-tempo` | ✓ | | | ✓ | |
+| `-logs-archive` | ✓ | | | | write only, not `gdpr-audit/` |
 
-- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
-- `hcloud_token`
-- `hetzner_s3_access_key` and `hetzner_s3_secret_key`
-- `ssh_public_key`
-- `vault_hetzner_s3_access_key` and `vault_hetzner_s3_secret_key`
-- `vault_grafana_admin_password`
-- `vault_wireguard_server_private_key` and `vault_wireguard_server_public_key`
-- one `vault_wireguard_peers` entry
-
-## What is not secret
-
-These are still required, but they do not need to be treated as secrets:
-
-- `admin_allow_ipv4`
-- `admin_allow_ipv6`
-- `bucket_prefix`
-- `server_name`
-- `location`
-- `server_type`
-
+A side effect: the Hetzner Console can no longer list these buckets'
+objects. Use the admin key with `aws s3`.

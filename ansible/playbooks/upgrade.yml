@@ -1,0 +1,8 @@
+---
+# Kubernetes upgrade after bumping kube_version (deploy workflow:
+# kubespray=upgrade). Kubespray drains and upgrades one node at a time.
+- name: Upgrade the cluster (Kubespray)
+  ansible.builtin.import_playbook: kubernetes_sigs.kubespray.upgrade_cluster
+
+- name: Admin kubeconfig
+  ansible.builtin.import_playbook: kubeconfig.yml

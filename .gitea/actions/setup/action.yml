@@ -1,0 +1,170 @@
+name: Toolchain + credentials
+description: |
+  Installs pinned, checksum-verified tools and, optionally, writes the GCP
+  and SSH keys a job needs to files under $RUNNER_TEMP.
+
+  Every download is pinned and verified against a hard-coded SHA-256; bumping
+  a tool means changing its version AND hash together. Sources of the hashes:
+    go          go.dev/dl/?mode=json&include=all
+    pulumi      pulumi-<v>-checksums.txt on the GitHub release
+    helm        get.helm.sh/helm-<v>-linux-amd64.tar.gz.sha256sum
+    kubectl     dl.k8s.io/release/<v>/bin/linux/amd64/kubectl.sha256
+    kubeconform CHECKSUMS on the GitHub release
+    alloy       SHA256SUMS on the GitHub release
+    actionlint  actionlint_<v>_checksums.txt on the GitHub release
+    shellcheck  computed from the GitHub release tarball on 2026-10-23
+                (the project publishes no checksum file)
+    awscli      computed from the official zip on 2026-10-23 (AWS publishes
+                a PGP signature, no checksum)
+  The Ansible tools come from pip at the versions ansible/requirements.txt
+  pins (Kubespray's own pins).
+
+  Composite actions have no post step, so a job that passes a key must end
+  with the cleanup step shown in deploy.yml (`if: always()`).
+
+inputs:
+  tools:
+    description: Space-separated subset of "go pulumi helm kubectl kubeconform alloy shellcheck awscli ansible"
+    required: true
+  gcp-key:
+    description: JSON key of watchtower-dns-deployer@ (secrets.GCP_DNS_DEPLOYER_KEY). Omit for none.
+    required: false
+    default: ""
+  ssh-key:
+    description: Private key for root on the nodes (secrets.SSH_PRIVATE_KEY). Omit for none.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install tools
+      shell: bash
+      env:
+        TOOLS: ${{ inputs.tools }}
+        GO_VERSION: "1.27.3"
+        GO_SHA256: 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
+        PULUMI_VERSION: "3.272.0"
+        PULUMI_SHA256: 58d545f2b98761051922008ebd381ecef95484d7f7a5ff7faa15d7a780ea84f6
+        HELM_VERSION: "4.3.1"
+        HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
+        KUBECTL_VERSION: "1.36.5"
+        KUBECTL_SHA256: 33bc88a24c3b09cf55bfd59e6ca977881b61fc3f25ab65bc80c65b430248648e
+        KUBECONFORM_VERSION: "0.8.0"
+        KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+        ALLOY_VERSION: "1.21.2"
+        ALLOY_SHA256: 1eadb46a0640127184250173acd9b4145e4d590680db37ffe66fa8afd07f04cf
+        ACTIONLINT_VERSION: "1.7.12"
+        ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        SHELLCHECK_VERSION: "0.11.0"
+        SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        AWSCLI_VERSION: "2.38.5"
+        AWSCLI_SHA256: 5def7d1b7e55d892f9a381bb2cb2081a685712464be0d36d5d706af0ac48d0d3
+      run: |
+        set -euo pipefail
+        tools_dir="${RUNNER_TEMP}/tools"
+        bin="${tools_dir}/bin"
+        mkdir -p "$bin"
+        echo "$bin" >>"$GITHUB_PATH"
+
+        # fetch <url> <sha256> <dest>
+        fetch() {
+          curl -fsSL --retry 3 -o "$3" "$1"
+          echo "$2  $3" | sha256sum -c --quiet -
+        }
+
+        apt_deps="jq curl openssh-client unzip xz-utils"
+        [[ " $TOOLS " == *" ansible "* ]] && apt_deps+=" python3-venv git"
+        sudo=""
+        [[ "$(id -u)" == 0 ]] || sudo=sudo
+        export DEBIAN_FRONTEND=noninteractive
+        $sudo apt-get update -qq
+        # shellcheck disable=SC2086
+        $sudo apt-get install -y -qq --no-install-recommends $apt_deps >/dev/null
+
+        for tool in $TOOLS; do
+          case "$tool" in
+            go)
+              fetch "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" "$GO_SHA256" "${tools_dir}/go.tgz"
+              tar -C "$tools_dir" -xzf "${tools_dir}/go.tgz"
+              echo "${tools_dir}/go/bin" >>"$GITHUB_PATH"
+              # Never let a go.mod `toolchain` line download an unverified Go.
+              echo "GOTOOLCHAIN=local" >>"$GITHUB_ENV"
+              ;;
+            pulumi)
+              fetch "https://github.com/pulumi/pulumi/releases/download/v${PULUMI_VERSION}/pulumi-v${PULUMI_VERSION}-linux-x64.tar.gz" \
+                "$PULUMI_SHA256" "${tools_dir}/pulumi.tgz"
+              tar -C "$tools_dir" -xzf "${tools_dir}/pulumi.tgz"
+              echo "${tools_dir}/pulumi" >>"$GITHUB_PATH"
+              echo "PULUMI_SKIP_UPDATE_CHECK=true" >>"$GITHUB_ENV"
+              ;;
+            helm)
+              fetch "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" "$HELM_SHA256" "${tools_dir}/helm.tgz"
+              tar -C "$tools_dir" -xzf "${tools_dir}/helm.tgz"
+              install -m 0755 "${tools_dir}/linux-amd64/helm" "${bin}/helm"
+              ;;
+            kubectl)
+              fetch "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" "$KUBECTL_SHA256" "${bin}/kubectl"
+              chmod 0755 "${bin}/kubectl"
+              ;;
+            kubeconform)
+              fetch "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+                "$KUBECONFORM_SHA256" "${tools_dir}/kubeconform.tgz"
+              tar -C "$bin" -xzf "${tools_dir}/kubeconform.tgz" kubeconform
+              ;;
+            alloy)
+              fetch "https://github.com/grafana/alloy/releases/download/v${ALLOY_VERSION}/alloy-linux-amd64.zip" \
+                "$ALLOY_SHA256" "${tools_dir}/alloy.zip"
+              unzip -q -o "${tools_dir}/alloy.zip" -d "$tools_dir"
+              install -m 0755 "${tools_dir}/alloy-linux-amd64" "${bin}/alloy"
+              ;;
+            shellcheck)
+              fetch "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+                "$SHELLCHECK_SHA256" "${tools_dir}/shellcheck.txz"
+              tar -C "$tools_dir" -xJf "${tools_dir}/shellcheck.txz"
+              install -m 0755 "${tools_dir}/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" "${bin}/shellcheck"
+              ;;
+            actionlint)
+              fetch "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+                "$ACTIONLINT_SHA256" "${tools_dir}/actionlint.tgz"
+              tar -C "$bin" -xzf "${tools_dir}/actionlint.tgz" actionlint
+              ;;
+            awscli)
+              fetch "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip" "$AWSCLI_SHA256" "${tools_dir}/awscli.zip"
+              unzip -q -o "${tools_dir}/awscli.zip" -d "$tools_dir"
+              "${tools_dir}/aws/install" --install-dir "${tools_dir}/aws-cli" --bin-dir "$bin" >/dev/null
+              ;;
+            ansible)
+              python3 -m venv "${tools_dir}/ansible"
+              "${tools_dir}/ansible/bin/pip" install -q -r ansible/requirements.txt ansible-lint==26.10.1
+              echo "${tools_dir}/ansible/bin" >>"$GITHUB_PATH"
+              ;;
+            *)
+              echo "unknown tool: $tool" >&2
+              exit 1
+              ;;
+          esac
+        done
+
+    - name: Write the GCP key
+      if: inputs.gcp-key != ''
+      shell: bash
+      env:
+        KEY: ${{ inputs.gcp-key }}
+      run: |
+        set -euo pipefail
+        umask 077
+        printf '%s' "$KEY" >"${RUNNER_TEMP}/gcp-dns-deployer.json"
+        echo "GOOGLE_APPLICATION_CREDENTIALS=${RUNNER_TEMP}/gcp-dns-deployer.json" >>"$GITHUB_ENV"
+
+    - name: Write the SSH key
+      if: inputs.ssh-key != ''
+      shell: bash
+      env:
+        KEY: ${{ inputs.ssh-key }}
+      run: |
+        set -euo pipefail
+        umask 077
+        mkdir -p "${RUNNER_TEMP}/ssh"
+        printf '%s\n' "$KEY" >"${RUNNER_TEMP}/ssh/id_ed25519"
+        echo "ANSIBLE_PRIVATE_KEY_FILE=${RUNNER_TEMP}/ssh/id_ed25519" >>"$GITHUB_ENV"

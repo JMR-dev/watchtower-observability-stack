@@ -1,0 +1,10 @@
+---
+# Node baseline, before (and independent of) Kubespray. Idempotent and quick,
+# so the deploy workflow runs it every time.
+- name: Prepare watchtower nodes
+  hosts: k8s_cluster
+  become: true
+  roles:
+    - base
+    - fail2ban
+    - floating_ip

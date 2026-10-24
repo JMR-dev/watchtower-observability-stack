@@ -1,0 +1,7 @@
+# actionlint settings for the Gitea workflows (CI's shell job runs
+# `actionlint -config-file .gitea/actionlint.yaml`).
+self-hosted-runner:
+  # The gitea-runners GKE runner labels (the gitea repo's docs/runners.md).
+  labels:
+    - heavy
+    - docker

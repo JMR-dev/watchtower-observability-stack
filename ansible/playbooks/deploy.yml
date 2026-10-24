@@ -1,7 +1,0 @@
----
-# Re-render configs and quadlets only. Use after editing config templates.
-- name: Redeploy observability configs and quadlets
-  hosts: watchtower
-  become: true
-  roles:
-    - observability

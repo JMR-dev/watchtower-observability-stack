@@ -1,0 +1,23 @@
+---
+# Fetch the admin kubeconfig from the first control-plane node and point it
+# at the API's public name (in the certificate's SANs, firewalled to admin
+# and CI addresses). Kubespray writes it as root-only /etc/kubernetes/admin.conf.
+
+- name: Read admin.conf
+  ansible.builtin.slurp:
+    src: /etc/kubernetes/admin.conf
+  register: kubeconfig_admin
+  run_once: true
+  delegate_to: "{{ groups['kube_control_plane'][0] }}"
+
+- name: Write the kubeconfig locally
+  ansible.builtin.copy:
+    content: >-
+      {{ kubeconfig_admin.content | b64decode
+         | regex_replace('server: https://[^\n]+', 'server: ' + kubeconfig_server) }}
+    dest: "{{ kubeconfig_out }}"
+    mode: "0600"
+  run_once: true
+  delegate_to: localhost
+  become: false
+  no_log: true

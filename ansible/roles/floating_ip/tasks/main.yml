@@ -1,0 +1,23 @@
+---
+# Every node carries the VPN Floating IP as a second address on eth0, so
+# whichever node fipd has Hetzner route it to accepts the traffic at once.
+# A node the address is not routed to never sees packets for it.
+
+- name: Find the eth0 connection profile
+  ansible.builtin.command: nmcli -g GENERAL.CONNECTION device show eth0
+  register: floating_ip_connection
+  changed_when: false
+
+- name: Read the profile's static addresses
+  ansible.builtin.command: >-
+    nmcli -g ipv4.addresses connection show "{{ floating_ip_connection.stdout }}"
+  register: floating_ip_addresses
+  changed_when: false
+
+- name: Add the Floating IP to eth0
+  ansible.builtin.command: >-
+    nmcli connection modify "{{ floating_ip_connection.stdout }}"
+    +ipv4.addresses {{ watchtower_floating_ipv4 }}/32
+  when: (watchtower_floating_ipv4 + '/32') not in floating_ip_addresses.stdout
+  changed_when: true
+  notify: Reapply eth0

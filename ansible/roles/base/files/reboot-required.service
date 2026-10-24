@@ -1,0 +1,6 @@
+[Unit]
+Description=Flag a needed reboot for kured
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/reboot-required

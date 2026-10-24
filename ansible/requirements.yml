@@ -1,0 +1,10 @@
+---
+collections:
+  # Kubespray as a collection: playbooks are kubernetes_sigs.kubespray.<name>.
+  - name: https://github.com/kubernetes-sigs/kubespray.git
+    type: git
+    version: v2.32.0
+  - name: community.general
+    version: ">=10.0.0"
+  - name: ansible.posix
+    version: ">=2.0.0"

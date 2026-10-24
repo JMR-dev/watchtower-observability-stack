@@ -1,0 +1,21 @@
+---
+# Shape of the inventory the cloud stack exports (`pulumi stack output
+# inventory`), with documentation addresses. Used by CI's syntax checks.
+all:
+  vars:
+    ansible_user: root
+    ansible_python_interpreter: /usr/bin/python3
+    watchtower_floating_ipv4: 198.51.100.7
+  hosts:
+    watchtower-1: {ansible_host: 203.0.113.11, ip: 10.20.1.11, access_ip: 10.20.1.11, watchtower_public_ipv4: 203.0.113.11}
+    watchtower-2: {ansible_host: 203.0.113.12, ip: 10.20.1.12, access_ip: 10.20.1.12, watchtower_public_ipv4: 203.0.113.12}
+    watchtower-3: {ansible_host: 203.0.113.13, ip: 10.20.1.13, access_ip: 10.20.1.13, watchtower_public_ipv4: 203.0.113.13}
+  children:
+    kube_control_plane:
+      hosts: {watchtower-1: {}, watchtower-2: {}, watchtower-3: {}}
+    etcd:
+      hosts: {watchtower-1: {}, watchtower-2: {}, watchtower-3: {}}
+    kube_node:
+      hosts: {watchtower-1: {}, watchtower-2: {}, watchtower-3: {}}
+    k8s_cluster:
+      children: {kube_control_plane: {}, kube_node: {}}
