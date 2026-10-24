@@ -6,5 +6,6 @@
   become: true
   roles:
     - base
+    - firewall
     - fail2ban
     - floating_ip

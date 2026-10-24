@@ -1,0 +1,95 @@
+#!/usr/sbin/nft -f
+# Watchtower node firewall. Managed by Ansible (roles/firewall).
+#
+# The host layer under the Hetzner Cloud Firewall. It mirrors that firewall
+# from the same lists (the cloud stack's adminCidrs, ciCidrs and
+# wireguardAllowCidrs, handed over in the inventory), so a node stays
+# filtered if the cloud firewall is ever detached. Layers, outside in:
+#   1. Hetzner Cloud Firewall: SSH and the API from admin and CI, UDP 51820
+#   2. this ruleset: the same, plus everything from the other nodes
+#   3. fail2ban: per-address SSH bans in its own table, inet f2b-table
+#   4. Cilium network policies: pod to pod
+#
+# Only this table: kube-proxy, Cilium, portmap and fail2ban keep theirs, and
+# a packet has to get through every table's chain on a hook. The file swaps
+# the table in one transaction. watchtower-nftables.service loads it, never
+# nftables.service, whose reload and stop flush the whole ruleset,
+# Kubernetes' rules included.
+#
+#   systemctl reload watchtower-nftables
+#   nft --check --file /etc/nftables/watchtower.nft
+{% macro cidr_set(name, type, cidrs) %}
+    set {{ name }} {
+        type {{ type }}
+        flags interval
+        auto-merge
+{% if cidrs %}
+        elements = { {{ cidrs | join(', ') }} }
+{% endif %}
+    }
+{% endmacro %}
+
+table inet watchtower
+delete table inet watchtower
+
+table inet watchtower {
+{{ cidr_set('admin_v4', 'ipv4_addr', watchtower_admin_cidrs | reject('search', ':') | list) }}
+{{ cidr_set('admin_v6', 'ipv6_addr', watchtower_admin_cidrs | select('search', ':') | list) }}
+{# Pods are IPv4 only, so portmap only forwards WireGuard over IPv4. #}
+{{ cidr_set('wireguard_v4', 'ipv4_addr', watchtower_wireguard_cidrs | reject('search', ':') | list) }}
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        ct state established,related accept
+        iif "lo" accept
+
+        # Pods (lxc*) and Cilium's devices: cilium_host, cilium_vxlan, and
+        # cilium_wg0, where encrypted node traffic comes back in. Pods reach
+        # nodelocaldns (169.254.25.10) and Services (addresses on kube-ipvs0)
+        # through input, before IPVS rewrites them.
+        iifname "lxc*" accept
+        iifname "cilium_*" accept
+
+        # The other nodes, over the private network: etcd, the API, kubelet,
+        # Cilium's VXLAN, WireGuard and health checks.
+        ip saddr {{ watchtower_private_cidr }} accept
+
+        ct state invalid drop
+
+        # DHCP replies: both networks lease their IPv4 addresses.
+        udp sport 67 udp dport 68 accept
+
+        # The ICMPv6 that IPv6 needs to work at all (neighbour discovery, path
+        # MTU) is never rate-limited; pings are.
+        icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, mld-listener-query, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
+        icmpv6 type echo-request limit rate 20/second accept
+        icmp type echo-request limit rate 20/second accept
+
+        # SSH and the Kubernetes API from admin and CI addresses. No rate
+        # limit: one shared budget would let a scanner lock the deploy
+        # workflow out. fail2ban bans per address instead.
+        ip saddr @admin_v4 tcp dport { 22, 6443 } accept
+        ip6 saddr @admin_v6 tcp dport { 22, 6443 } accept
+
+        limit rate 5/minute log prefix "nft-drop-input: " level info
+        counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+
+        # Pod traffic, both ways. Cilium's policies filter it.
+        iifname "lxc*" accept
+        iifname "cilium_*" accept
+        ct state established,related accept
+        ip saddr {{ watchtower_private_cidr }} accept
+
+        # WireGuard peers to the edge pod. Portmap DNATs UDP {{ watchtower_wireguard_port }} on any of
+        # the node's addresses (the Floating IP included) to the pod before
+        # routing, so it is forwarded, not delivered.
+        ip saddr @wireguard_v4 ct status dnat udp dport {{ watchtower_wireguard_port }} accept
+
+        limit rate 5/minute log prefix "nft-drop-forward: " level info
+        counter drop
+    }
+}

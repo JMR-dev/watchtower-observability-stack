@@ -9,9 +9,11 @@
     name: epel-release
     state: present
 
+# fail2ban-server, not the fail2ban metapackage: that one pulls in
+# fail2ban-firewalld and with it firewalld, which roles/firewall keeps off.
 - name: Install fail2ban
   ansible.builtin.dnf:
-    name: fail2ban
+    name: fail2ban-server
     state: present
     update_cache: true
 

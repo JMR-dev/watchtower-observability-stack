@@ -3,6 +3,8 @@ package main
 import (
 	"github.com/pulumi/pulumi-hcloud/sdk/go/hcloud"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+
+	"watchtower-infra/internal/names"
 )
 
 type obj = map[string]interface{}
@@ -14,8 +16,10 @@ type obj = map[string]interface{}
 //   - nodes 4 and up are workers only, added with Kubespray's scale.yml
 //     (growing etcd is a different procedure);
 //   - Kubespray binds etcd and the API server to `ip`, the private address,
-//     and Ansible connects over `ansible_host`, the public one.
-func inventoryJSON(nodes []*node, fip *hcloud.FloatingIp) pulumi.StringOutput {
+//     and Ansible connects over `ansible_host`, the public one;
+//   - the nodes' own nftables ruleset (roles/firewall) mirrors the Hetzner
+//     firewall from the same address lists.
+func inventoryJSON(cfg *Config, nodes []*node, fip *hcloud.FloatingIp) pulumi.StringOutput {
 	var addrs []interface{}
 	for _, n := range nodes {
 		addrs = append(addrs, n.server.Ipv4Address)
@@ -44,6 +48,13 @@ func inventoryJSON(nodes []*node, fip *hcloud.FloatingIp) pulumi.StringOutput {
 				// Every node carries it on eth0, so whichever node Hetzner
 				// routes it to (fipd's choice) accepts the traffic.
 				"watchtower_floating_ipv4": vals[len(vals)-1].(string),
+				// The firewall rules: SSH and the API from admin and CI
+				// addresses, WireGuard from wireguardAllowCidrs, everything
+				// from the other nodes.
+				"watchtower_admin_cidrs":     append(append([]string{}, cfg.AdminCIDRs...), cfg.CICIDRs...),
+				"watchtower_wireguard_cidrs": cfg.WireGuardCIDRs,
+				"watchtower_wireguard_port":  names.PortWireGuard,
+				"watchtower_private_cidr":    names.NetworkCIDR,
 			},
 			"hosts": hosts,
 			"children": obj{

@@ -464,7 +464,7 @@ func inventory(t *testing.T, cfg map[string]string) map[string]interface{} {
 		if err != nil {
 			return err
 		}
-		inventoryJSON(nodes, fip).ApplyT(func(s string) string {
+		inventoryJSON(c, nodes, fip).ApplyT(func(s string) string {
 			rendered = s
 			wg.Done()
 			return s
@@ -517,6 +517,28 @@ func TestInventoryGroups(t *testing.T) {
 	}
 }
 
+// The node firewall (roles/firewall) gets the Hetzner firewall's address
+// lists: admin and CI together for SSH and the API, WireGuard's own, and the
+// private network the other nodes talk over.
+func TestInventoryFirewallVars(t *testing.T) {
+	inv := inventory(t, with(map[string]string{
+		"watchtower:adminCidrs":          `["198.51.100.0/24","2001:db8::/32"]`,
+		"watchtower:ciCidrs":             `["203.0.113.9/32"]`,
+		"watchtower:wireguardAllowCidrs": `["192.0.2.0/24"]`,
+	}))
+	vars := inv["all"].(map[string]interface{})["vars"].(map[string]interface{})
+	for key, want := range map[string]interface{}{
+		"watchtower_admin_cidrs":     []interface{}{"198.51.100.0/24", "2001:db8::/32", "203.0.113.9/32"},
+		"watchtower_wireguard_cidrs": []interface{}{"192.0.2.0/24"},
+		"watchtower_wireguard_port":  float64(names.PortWireGuard),
+		"watchtower_private_cidr":    names.NetworkCIDR,
+	} {
+		if !reflect.DeepEqual(vars[key], want) {
+			t.Errorf("%s = %v, want %v", key, vars[key], want)
+		}
+	}
+}
+
 func TestInventoryEncodeFailure(t *testing.T) {
 	marshalJSON = func(interface{}) ([]byte, error) { return nil, errors.New("encode failed") }
 	t.Cleanup(func() { marshalJSON = json.Marshal })
@@ -526,7 +548,7 @@ func TestInventoryEncodeFailure(t *testing.T) {
 		net, _ := newNetwork(ctx, c, p)
 		nodes, _ := newNodes(ctx, c, p, net)
 		fip, _ := newFloatingIP(ctx, c, p, nodes[0])
-		ctx.Export("inventory", inventoryJSON(nodes, fip))
+		ctx.Export("inventory", inventoryJSON(c, nodes, fip))
 		return nil
 	})
 	if err == nil || !strings.Contains(err.Error(), "encode failed") {

@@ -1,6 +1,6 @@
 ---
-# Node preparation (roles base, fail2ban, floating_ip). Kubespray's own
-# settings live in kubespray.yml (all hosts) and ../k8s_cluster/.
+# Node preparation (roles base, firewall, fail2ban, floating_ip). Kubespray's
+# own settings live in kubespray.yml (all hosts) and ../k8s_cluster/.
 
 timezone: Etc/UTC
 

@@ -124,8 +124,8 @@ subject within one month (Art. 12(3)).
 
 - WireGuard: one peer per client host, managed in wg-easy; revoked at once
   by disabling the peer.
-- Hetzner Cloud Firewall: SSH and the Kubernetes API from administrator and
-  CI addresses only.
+- Hetzner Cloud Firewall, mirrored on every node by an nftables ruleset: SSH
+  and the Kubernetes API from administrator and CI addresses only.
 - SSH: keys only, pinned host keys, fail2ban (sshd + recidive).
 - Cluster: Cilium default-deny network policies; Pod Security `restricted`
   except for the two workloads that need host access.

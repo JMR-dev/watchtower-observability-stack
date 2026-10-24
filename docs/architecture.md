@@ -17,6 +17,7 @@ endpoint `watchtower.jasonmross.dev`, which resolves to the in-tunnel address
             └────────────┬────────────┘
    ┌─────────────────────┼─────────────────────────────────────────┐
    │ watchtower-1..3: CPX42, AlmaLinux 10, SELinux enforcing       │
+   │ host firewall: nftables, mirroring the cloud firewall         │
    │ private network 10.20.1.0/24; Cilium (pod traffic encrypted   │
    │ with WireGuard); control plane + etcd + workloads on each     │
    │                                                               │
@@ -49,7 +50,7 @@ endpoint `watchtower.jasonmross.dev`, which resolves to the in-tunnel address
 | Hetzner | Network, 3 servers (spread placement), primary IPs, firewall, Floating IP, SSH host keys | `infra/cloud` (Pulumi) |
 | Storage | Buckets with lifecycle rules and per-key bucket policies | `infra/cloud/storage.go` |
 | DNS | Records in the zone `scripts/bootstrap.sh` created and delegated | `infra/cloud/dns.go` |
-| Nodes | Updates, journald, SELinux, fail2ban, wireguard module, Floating IP on eth0 | `ansible/roles` |
+| Nodes | Updates, journald, SELinux, nftables firewall, fail2ban, wireguard module, Floating IP on eth0 | `ansible/roles` |
 | Kubernetes | Kubespray 2.32: Kubernetes 1.36, containerd, Cilium, hcloud CCM, etcd encryption, audit log | `ansible/inventory/group_vars` |
 | Workloads | Charts and manifests | `infra/apps` |
 
@@ -101,7 +102,7 @@ endpoint `watchtower.jasonmross.dev`, which resolves to the in-tunnel address
 | Layer | Control |
 |---|---|
 | Edge | Hetzner Cloud Firewall: SSH and the API from admin/CI addresses only; WireGuard from `wireguardAllowCidrs` |
-| Host | SELinux enforcing; fail2ban (sshd, recidive); security updates nightly, reboots by kured one node at a time |
+| Host | nftables ruleset (no firewalld) mirroring the cloud firewall, from the same address lists, and admitting everything from the other nodes and the pods; SELinux enforcing; fail2ban (sshd, recidive); security updates nightly, reboots by kured one node at a time |
 | Cluster network | Cilium default-deny policies in every namespace we own; FQDN-scoped egress (S3, ACME, Cloud DNS, Hetzner API) |
 | Pod security | `restricted` everywhere except the edge pod (NET_ADMIN for wg0) and Fluent Bit (host logs), which run `spc_t` |
 | Credentials | One S3 key per component, fenced by bucket policies; the archive key can only write; the Hetzner token sits in fipd's namespace alone |

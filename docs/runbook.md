@@ -125,6 +125,25 @@ kubectl -n kube-system logs ds/kured --tail=50
 ssh root@<node> cat /var/run/reboot-required   # present = pending
 ```
 
+### Host firewall
+Each node runs a raw nftables ruleset in its own table, `inet watchtower`
+(`ansible/roles/firewall`), loaded by `watchtower-nftables.service`. It
+mirrors the Hetzner Cloud Firewall from the same `adminCidrs`, `ciCidrs` and
+`wireguardAllowCidrs`, and admits everything from the private network and
+the pods. Pod-to-pod traffic is Cilium's to filter. firewalld is masked.
+
+```bash
+nft list table inet watchtower
+journalctl -k -g 'nft-drop' --since -1h      # what it dropped (sampled)
+systemctl reload watchtower-nftables         # after editing the file by hand
+```
+
+**Never run `nft flush ruleset` on a node, and leave `nftables.service`
+masked** (its reload and stop do the same): it wipes every table, kube-proxy's,
+Cilium's and portmap's included. If a node's rules were flushed anyway, drain
+and reboot it rather than restarting agents one by one: portmap writes the
+edge pod's hostPort rule only when that pod starts.
+
 ### Adding workers
 Set `watchtower:nodeCount` above 3 and merge. `deploy.yml` creates the
 servers and runs Kubespray's `scale.yml` (workers only; etcd stays at three).
@@ -200,6 +219,7 @@ kubectl delete pv <name>         # then delete the volume in the Console
 | Ansible "Host key verification failed" | `known_hosts` stale or missing | Re-export `knownHosts` from the cloud stack |
 | Peers connect but get no handshake | Floating IP on the wrong node | See "The Floating IP" |
 | Caddy has no certificate | DNS-01 failing | `kubectl -n watchtower-edge logs deploy/edge -c caddy`; check the key and that the zone is delegated |
+| A node drops traffic it should accept | The address isn't in the lists the ruleset mirrors | `journalctl -k -g nft-drop` on the node; fix the cloud stack's CIDR config and merge; every deploy renders the ruleset again |
 | Pods blocked by SELinux | A workload needs host access it wasn't given | `ausearch -m avc -ts recent` on the node; do not switch SELinux to permissive — fix the pod's `seLinuxOptions` |
 | Loki "no org id" | Client without `X-Scope-OrgID` | Fix the Alloy config |
 | Ingester PVC pending | hcloud-csi or its token | `kubectl -n kube-system logs deploy/hcloud-csi-controller` |

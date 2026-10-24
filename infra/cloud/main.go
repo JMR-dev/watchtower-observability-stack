@@ -74,7 +74,7 @@ func program(ctx *pulumi.Context) error {
 		return err
 	}
 
-	ctx.Export("inventory", inventoryJSON(nodes, fip))
+	ctx.Export("inventory", inventoryJSON(cfg, nodes, fip))
 	ctx.Export("knownHosts", knownHosts(nodes))
 	ctx.Export("floatingIpv4", fip.IpAddress)
 	ctx.Export("buckets", buckets)
