@@ -1,0 +1,154 @@
+# grafana-community/loki, Distributed mode. Static values only: bucket names
+# and the S3 credential Secret are merged in by loki.go, and CI renders the
+# merged values with `helm template` and dry-runs the result against an API
+# server (scripts/check-manifests.sh).
+deploymentMode: Distributed
+
+defaults:
+  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for the Loki S3 key. With no
+  # keys in the config, Loki's S3 client takes them from the environment.
+  extraEnvFrom:
+    - secretRef:
+        name: loki-s3
+
+loki:
+  image:
+    tag: 3.7.9
+  auth_enabled: true
+  commonConfig:
+    # Three ingesters, one per node: a kured reboot leaves a 2-of-3 quorum
+    # and writes keep flowing.
+    replication_factor: 3
+  schemaConfig:
+    configs:
+      - from: "2026-10-01"
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+  storage:
+    type: s3
+    s3:
+      endpoint: nbg1.your-objectstorage.com
+      region: nbg1
+      s3ForcePathStyle: true
+      insecure: false
+  limits_config:
+    retention_period: 720h
+    max_query_lookback: 720h
+    max_query_length: 721h
+    ingestion_rate_mb: 16
+    ingestion_burst_size_mb: 32
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+    allow_structured_metadata: true
+    volume_enabled: true
+    # GDPR right to erasure goes through the delete API (scripts/gdpr-purge.sh).
+    deletion_mode: filter-and-delete
+  compactor:
+    retention_enabled: true
+    retention_delete_delay: 2h
+    retention_delete_worker_count: 150
+    compaction_interval: 10m
+    delete_request_store: s3
+  rulerConfig:
+    alertmanager_url: http://mimir.watchtower.svc.cluster.local:8080/alertmanager
+    enable_api: true
+  analytics:
+    reporting_enabled: false
+
+ingester:
+  replicas: 3
+  # Plain anti-affinity (the chart's default, one per node) instead of zone
+  # StatefulSets, which need the rollout operator.
+  zoneAwareReplication:
+    enabled: false
+  persistence:
+    enabled: true
+    # A claims list replaces the chart's default one whole, accessModes
+    # included, and the API server rejects a claim without them.
+    claims:
+      - name: data
+        accessModes: [ReadWriteOnce]
+        size: 10Gi
+        storageClass: hcloud-luks
+
+distributor:
+  replicas: 2
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    # The chart's anti-affinity puts one per node.
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+
+querier:
+  replicas: 2
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+
+queryFrontend:
+  replicas: 2
+
+queryScheduler:
+  replicas: 2
+
+indexGateway:
+  replicas: 2
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: hcloud-luks
+
+compactor:
+  replicas: 1
+  persistence:
+    enabled: true
+    # A claims list replaces the chart's default one whole, accessModes
+    # included, and the API server rejects a claim without them.
+    claims:
+      - name: data
+        accessModes: [ReadWriteOnce]
+        size: 10Gi
+        storageClass: hcloud-luks
+
+ruler:
+  enabled: true
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: hcloud-luks
+
+# Caddy on the edge pod routes to the components directly.
+gateway:
+  enabled: false
+
+resultsCache:
+  allocatedMemory: 256
+chunksCache:
+  allocatedMemory: 1024
+
+lokiCanary:
+  enabled: false
+test:
+  enabled: false
+minio:
+  enabled: false
+sidecar:
+  rules:
+    enabled: false
+
+# The chart's SimpleScalable targets default to 3 replicas each; Distributed
+# mode needs them at zero.
+write:
+  replicas: 0
+read:
+  replicas: 0
+backend:
+  replicas: 0

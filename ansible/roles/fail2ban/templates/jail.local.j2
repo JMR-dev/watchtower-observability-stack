@@ -1,39 +1,28 @@
-# /etc/fail2ban/jail.local — managed by Ansible.
-#
-# fail2ban manages its own nftables table (inet f2b-table), inserted at higher
-# priority than the watchtower ruleset, so bans take effect even when the
-# watchtower table accept-list rule has already matched.
+# /etc/fail2ban/jail.local — managed by Ansible (roles/fail2ban).
 
 [DEFAULT]
-# Backend reads from systemd journal — no /var/log/secure on AlmaLinux 10 by default.
+# AlmaLinux 10 logs sshd to the journal only.
 backend = systemd
 
 bantime  = {{ fail2ban_bantime }}
 findtime = {{ fail2ban_findtime }}
 maxretry = {{ fail2ban_maxretry }}
 
-# nftables-multiport creates: table inet f2b-table { set f2b-<jail> ... }
-banaction       = nftables-multiport
+# fail2ban's own nftables table; Kubernetes' and Cilium's are untouched.
+banaction          = nftables-multiport
 banaction_allports = nftables-allports
 
-# Whitelist trusted networks: WireGuard subnet, loopback, and the admin allow list.
-ignoreip = 127.0.0.1/8 ::1 {{ wireguard_subnet_v4 }}{% for c in admin_allow_ipv4 %} {{ c }}{% endfor %}{% for c in admin_allow_ipv6 %} {{ c }}{% endfor %}
+ignoreip = {{ fail2ban_ignoreip | join(' ') }}
 
-destemail = {{ fail2ban_destemail }}
-sender    = {{ fail2ban_sender }}
-mta       = sendmail
-
-# Action: ban only (mailing requires an MTA — disable if you don't run one).
 action = %(action_)s
 
 [sshd]
-enabled  = true
-port     = ssh
-mode     = aggressive
-maxretry = {{ fail2ban_maxretry }}
+enabled      = true
+port         = ssh
+mode         = aggressive
 journalmatch = _SYSTEMD_UNIT=sshd.service + _COMM=sshd
 
-# Long-term ban for repeat offenders. Watches fail2ban's own log.
+# Long-term ban for repeat offenders.
 [recidive]
 enabled   = true
 logpath   = /var/log/fail2ban.log
@@ -41,27 +30,3 @@ banaction = nftables-allports
 bantime   = {{ fail2ban_recidive_bantime }}
 findtime  = {{ fail2ban_recidive_findtime }}
 maxretry  = {{ fail2ban_recidive_maxretry }}
-
-# Coraza WAF audit log — bans WireGuard peer IPs (10.8.0.x) that trigger
-# WAF rules through Caddy.  Uses nftables-forward-allports because Podman
-# DNATs published ports, so traffic traverses FORWARD (not INPUT) and
-# INPUT-based ban actions never intercept it.
-#
-# ignoreip intentionally excludes wireguard_subnet_v4 so misbehaving VPN
-# clients can be banned.  The server's own address (127.0.0.1/::1) is still
-# whitelisted to prevent self-banning.
-#
-# Tune fail2ban_coraza_maxretry down (and SecRuleEngine to "On") once you
-# have reviewed the Coraza audit log and confirmed false-positive rate.
-[coraza-waf]
-enabled   = true
-port      = 0:65535
-protocol  = tcp
-logpath   = {{ observability_data_root }}/caddy/logs/coraza-audit-grafana.log
-backend   = auto
-filter    = coraza-waf
-banaction = nftables-forward-allports
-ignoreip  = 127.0.0.1/8 ::1
-maxretry  = {{ fail2ban_coraza_maxretry }}
-findtime  = {{ fail2ban_coraza_findtime }}
-bantime   = {{ fail2ban_coraza_bantime }}

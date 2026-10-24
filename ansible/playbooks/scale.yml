@@ -1,0 +1,8 @@
+---
+# Add worker nodes (nodeCount above 3 in the cloud stack). Kubespray's
+# scale.yml joins new kube_node hosts without touching the control plane.
+- name: Node baseline
+  ansible.builtin.import_playbook: prepare.yml
+
+- name: Add workers (Kubespray)
+  ansible.builtin.import_playbook: kubernetes_sigs.kubespray.scale

@@ -1,0 +1,10 @@
+---
+# Pod traffic between nodes is encrypted with WireGuard, node-to-node traffic
+# too. It rides the private network either way.
+cilium_encryption_enabled: true
+cilium_encryption_type: wireguard
+cilium_encryption_node_encryption: true
+
+# hostPort support (portmap): the edge pod takes UDP 51820 on its node.
+# Portmap's DNAT matches every local address, the Floating IP included.
+cilium_enable_portmap: true

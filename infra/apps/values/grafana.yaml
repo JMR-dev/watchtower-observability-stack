@@ -1,0 +1,75 @@
+# grafana-community/grafana. Tenant datasources are merged in by grafana.go
+# from watchtower:tenants; the admin password is the grafana-admin Secret.
+image:
+  tag: 13.2.4-distroless
+
+admin:
+  existingSecret: grafana-admin
+  userKey: admin-user
+  passwordKey: admin-password
+
+# One replica on a RWO volume (SQLite): Recreate, so a rollout never waits on
+# the old pod's volume.
+deploymentStrategy:
+  type: Recreate
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClassName: hcloud-luks
+  # On by default: the chart copies the live claim's bound volume into the
+  # template. The first deploy has none and every later one does, and since a
+  # claim's spec is immutable, Pulumi would replace (and empty) the volume.
+  lookupVolumeName: false
+
+# The chown init container runs as root, which restricted Pod Security
+# rejects; fsGroup gives the volume the right group instead.
+initChownData:
+  enabled: false
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 472
+  runAsGroup: 472
+  fsGroup: 472
+  seccompProfile:
+    type: RuntimeDefault
+
+# No sidecars, so no RBAC.
+rbac:
+  create: false
+testFramework:
+  enabled: false
+
+grafana.ini:
+  server:
+    domain: watchtower.jasonmross.dev
+    root_url: https://watchtower.jasonmross.dev/
+    enforce_domain: false
+  security:
+    disable_initial_admin_creation: false
+    cookie_secure: true
+    cookie_samesite: lax
+    allow_embedding: false
+    strict_transport_security: true
+    content_security_policy: true
+  users:
+    allow_sign_up: false
+    allow_org_create: false
+    auto_assign_org: false
+    viewers_can_edit: false
+  auth.anonymous:
+    enabled: false
+  analytics:
+    reporting_enabled: false
+    check_for_updates: false
+    check_for_plugin_updates: false
+    feedback_links_enabled: false
+  snapshots:
+    external_enabled: false
+  # stdout only: Fluent Bit ships it to the log archive.
+  log:
+    mode: console
+    level: info
+  unified_alerting:
+    enabled: true

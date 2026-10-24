@@ -1,57 +1,74 @@
 # GDPR Compliance
 
 This stack processes telemetry that is **likely to contain personal data**
-(IPs, user IDs, request bodies, emails). The deployment is hosted by Hetzner
-in Nuremberg, Germany — all data stays within the EU.
+(IPs, user IDs, request bodies, emails). Compute, telemetry storage, the log
+archive and the infrastructure state are all with Hetzner in Nuremberg,
+Germany, so personal data stays in the EU.
 
 ## Roles
 
 - **Data Controller:** the operator deploying this stack.
-- **Data Processor (infrastructure):** Hetzner Online GmbH (DE).
-- **Sub-processors:** none by default.
+- **Data Processor (infrastructure):** Hetzner Online GmbH (DE): servers,
+  volumes, Object Storage.
+- **Sub-processors:**
+  - Google (Cloud DNS) holds only the three DNS records of
+    `watchtower.jasonmross.dev`. No telemetry, no personal data.
+  - Let's Encrypt issues the TLS certificate (the domain name only).
 
 ## Legal basis (Art. 6)
 
-Document the basis for each tenant under
-`docs/gdpr-compliance.md` (per-tenant section to be filled in). Typical bases:
+Document the basis for each tenant (per-tenant section to be filled in).
+Typical bases:
 
 - **Art. 6(1)(f)** legitimate interest — operational logging.
-- **Art. 6(1)(b)** contract performance — telemetry necessary to deliver service.
+- **Art. 6(1)(b)** contract performance — telemetry necessary to deliver a service.
 
 ## Required documents
 
 | Document | Status | Notes |
 |----------|--------|-------|
-| Data Processing Agreement with Hetzner | sign in Cloud Console | required Art. 28 |
-| Record of Processing Activities (RoPA) | template below | required Art. 30 |
+| Data Processing Agreement with Hetzner | sign in the Console | Art. 28 |
+| Record of Processing Activities (RoPA) | template below | Art. 30 |
 | Data Protection Impact Assessment (DPIA) | required | Art. 35 — high-risk processing |
-| Breach response runbook | `docs/runbook.md` | Art. 33/34 |
+| Breach response runbook | below and `docs/runbook.md` | Art. 33/34 |
 
 ## Data residency
 
-All telemetry buckets live in `nbg1` (Hetzner, Nuremberg). The OpenTofu
-state lives in Cloudflare R2 — operators must configure R2 to use only EU
-jurisdictions (`Jurisdiction: EU`) when creating the state bucket, otherwise
-state metadata may be replicated outside the EU.
+| Data | Where |
+|---|---|
+| Telemetry (Loki, Mimir, Tempo buckets) | Hetzner Object Storage, nbg1 |
+| WALs, Grafana's database, wg-easy's database | Hetzner Volumes, nbg1 (LUKS) |
+| Log archive (container logs, journals, API audit) | Hetzner Object Storage, nbg1 |
+| Pulumi state | Hetzner Object Storage, nbg1 |
+| DNS records | Google Cloud DNS (global; no personal data) |
+| Credentials (API tokens, keys, passwords) | Google Secret Manager, payloads replicated to europe-west3 only (no personal data) |
 
 ## Retention register
 
-| Signal  | Application Retention | Bucket Lifecycle | Effective Erasure Window |
+| Data | Application retention | Bucket lifecycle (safety net) | Erasure window |
 |---------|----------------------|------------------|--------------------------|
-| Logs    | 30 days (Loki)       | 90 days (S3 lifecycle) | 30 days (compactor) |
-| Metrics | 90 days (Mimir)      | 365 days (S3 lifecycle)| 90 days (compactor) |
-| Traces  | 14 days (Tempo)      | 30 days (S3 lifecycle) | 14 days (compactor) |
+| Logs (Loki) | 30 days (compactor) | 60 days | 30 days, or hours via the delete API |
+| Metrics (Mimir) | 90 days (compactor) | 180 days | 90 days |
+| Traces (Tempo) | 30 days (backend scheduler) | 60 days | 30 days |
+| Log archive: container logs, node journals, API audit log | — | 90 days | 90 days |
+| GDPR erasure records (`gdpr-audit/`) | kept | none | — (evidence of erasure; no telemetry) |
 
-Bucket-level lifecycle is a **safety net** — application-level retention is
-the primary erasure mechanism. The wider lifecycle window allows
-application-level rollback in case of a misconfiguration.
+Application retention is the erasure mechanism; bucket lifecycle rules
+(Hetzner Object Storage supports them) are a safety net behind it.
+
+The **log archive** holds the stack's own logs: Caddy's access log and
+Coraza's audit log (client tunnel addresses, request paths), Grafana's log
+(user names), node journals (SSH source addresses) and the Kubernetes audit
+log. Tenant telemetry does not go there, only to Loki, Mimir and Tempo. The
+archive's write-only key means a compromised node cannot read or erase it;
+the 90-day lifecycle is its erasure.
 
 ## PII minimization
 
 ### Collector-side scrubbing
 
-Clients run Grafana Alloy with the redaction pipeline at
-`config/alloy/config.alloy.example`. Patterns redacted:
+Clients run Grafana Alloy with the redaction pipeline in
+`config/alloy/config.alloy.example`:
 
 - IPv4 / IPv6 addresses → `[REDACTED-IP*]`
 - Email addresses → `[REDACTED-EMAIL]`
@@ -62,9 +79,6 @@ Clients run Grafana Alloy with the redaction pipeline at
 - Lines containing `password=`, `ssn=`, `cvv=`, `cvc=` → **dropped**
 
 ### OTLP attribute scrubbing
-
-The `otelcol.processor.attributes` block hashes/deletes these attributes
-before traces reach Tempo:
 
 | Attribute | Action |
 |-----------|--------|
@@ -77,52 +91,64 @@ before traces reach Tempo:
 
 ### Label / cardinality discipline
 
-Mimir and Tempo do **not** support per-record deletion. To stay compliant,
-**no PII may ever appear in metric labels or trace resource attributes**.
-Tenants must use opaque identifiers (UUIDs hashed at the collector, opaque
-session IDs) — never emails, names, or phone numbers as label values.
+Mimir and Tempo do **not** support per-record deletion. **No PII may ever
+appear in metric labels or trace resource attributes.** Use opaque
+identifiers (hashed at the collector), never emails, names or phone numbers.
 
 ## Right to erasure (Art. 17)
 
-| Signal  | Mechanism | RTO |
-|---------|-----------|-----|
-| Logs    | Loki Delete API via `playbooks/gdpr-purge.yml` | hours |
-| Metrics | Retention only — short window + label discipline | ≤90 days |
-| Traces  | Retention only — 14-day window | ≤14 days |
+| Data | Mechanism | Time to effect |
+|---|---|---|
+| Logs | Loki delete API: `scripts/gdpr-purge.sh` | hours (2 h compactor delay) |
+| Metrics | Retention only — short window + label discipline | ≤ 90 days |
+| Traces | Retention only | ≤ 30 days |
+| Log archive | Lifecycle only | ≤ 90 days |
 
-Document each erasure in `/var/log/observability/gdpr-audit.log` (the playbook
-appends automatically). Notify the data subject within one month per Art. 12(3).
+Each erasure request is recorded in the log archive under `gdpr-audit/`
+(kept indefinitely, writable only with the admin key). Notify the data
+subject within one month (Art. 12(3)).
 
 ## Encryption
 
 | Layer | Mechanism |
 |-------|-----------|
-| In transit (client → server) | WireGuard (ChaCha20-Poly1305) |
-| In transit (server → S3) | TLS 1.2+ |
-| At rest (local WAL/Grafana DB) | LUKS2 |
-| At rest (S3) | Hetzner SSE |
+| Client → stack | WireGuard (ChaCha20-Poly1305), then TLS to Caddy |
+| Pod ↔ pod between nodes, node ↔ node | Cilium transparent encryption (WireGuard) |
+| Pod ↔ pod on the same node | None: the traffic never leaves the host, and Caddy reaches the backends over plain HTTP |
+| Stack → Object Storage | TLS |
+| Volumes (WALs, databases) | LUKS2 (hcloud-csi) |
+| Kubernetes Secrets | etcd encryption at rest |
+| Object Storage at rest | Hetzner's server-side encryption |
+| Secrets | None in the repo; Google Secret Manager (encrypted at rest), gopass locally |
 
 ## Access control & audit
 
-- WireGuard: each peer has its own key; revoke by removing from `wg0.conf`.
-- Host firewall: nftables with default-drop input policy. Service ports are
-  bound to `10.8.0.1` (wg0) and unreachable on the public interface. SSH and
-  WireGuard are restricted to administrator CIDRs (`admin_allow_ipv4` /
-  `admin_allow_ipv6`) and rate-limited at the kernel.
-- fail2ban: brute-force defense for SSH (jail `sshd`) plus a `recidive` jail
-  that long-bans repeat offenders. Bans are enforced via fail2ban's own
-  nftables table (`inet f2b-table`).
-- Grafana: `[auditing]` enabled — all dashboard / API actions logged to
-  `/var/log/grafana/audit.log` with rotation.
-- SSH: ed25519 keys only, root password auth disabled.
-- Tenant isolation: enforced by `X-Scope-OrgID` at Mimir/Loki/Tempo plus
-  Grafana Org RBAC.
+- WireGuard: one peer per client host, managed in wg-easy; revoked at once
+  by disabling the peer.
+- Hetzner Cloud Firewall, mirrored on every node by an nftables ruleset: SSH
+  and the Kubernetes API from administrator and CI addresses only.
+- SSH: keys only, pinned host keys, fail2ban (sshd + recidive).
+- Cluster: Cilium default-deny network policies; Pod Security `restricted`
+  except for the two workloads that need host access.
+- Object Storage: one key per component, fenced by bucket policies.
+- Grafana: org per tenant; login required; anonymous access off. (Grafana's
+  `[auditing]` is an Enterprise feature; user activity appears in Grafana's
+  own log, which the log archive keeps.)
+- Kubernetes API audit log, kept in the log archive for 90 days.
+- Tenant isolation: `X-Scope-OrgID` at Mimir/Loki/Tempo plus Grafana org RBAC.
 
 ## Breach response (Art. 33/34)
 
-72-hour notification to the **Bayerisches Landesamt für Datenschutzaufsicht
-(BayLDA)** — Bavaria's supervisory authority. Procedure documented in
-`docs/runbook.md` § Breach Response.
+1. **Detect** — Grafana alerts, the Kubernetes audit log, Hetzner abuse notices.
+2. **Contain** — revoke the affected WireGuard peer; rotate the affected
+   credentials (`docs/runbook.md`, "Credential rotation"); redeploy.
+3. **Assess** — which tenant, what data, what window. Use the log archive
+   (journals, API audit log, Caddy/Coraza logs).
+4. **Notify** — within 72 hours, the supervisory authority competent for the
+   controller (for a controller in Bavaria, the **BayLDA**,
+   https://www.lda.bayern.de/). If high risk to data subjects, notify them
+   directly (Art. 34).
+5. **Document** — keep a breach record with the above.
 
 ## RoPA template
 
@@ -132,6 +158,6 @@ For each tenant, fill in:
 - Categories of data subjects
 - Categories of personal data processed in telemetry
 - Recipients (none — internal only)
-- Transfers outside EEA (none)
+- Transfers outside the EEA (none)
 - Retention periods (per signal — see above)
 - Technical & organisational measures (this document)

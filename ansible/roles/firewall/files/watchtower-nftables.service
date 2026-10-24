@@ -1,0 +1,21 @@
+# Managed by Ansible (roles/firewall). Loads, replaces and removes only table
+# inet watchtower. The stock nftables.service runs `nft flush ruleset` on
+# reload and stop, which on a Kubernetes node takes kube-proxy's, Cilium's
+# and portmap's rules with it, so it stays masked.
+[Unit]
+Description=Watchtower node firewall (nftables table inet watchtower)
+Documentation=man:nft(8)
+Wants=network-pre.target
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ProtectSystem=full
+ProtectHome=true
+ExecStart=/usr/sbin/nft --file /etc/nftables/watchtower.nft
+ExecReload=/usr/sbin/nft --file /etc/nftables/watchtower.nft
+ExecStop=-/usr/sbin/nft delete table inet watchtower
+
+[Install]
+WantedBy=multi-user.target

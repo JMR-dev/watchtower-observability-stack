@@ -1,0 +1,291 @@
+# Deploy main:  images -> Hetzner (Pulumi) -> nodes (Ansible + Kubespray)
+#                -> cluster workloads (Pulumi) -> verify.
+#
+#   push to main       deploys; Kubespray runs only when its inputs changed
+#                      or the cloud stack created a node
+#   workflow_dispatch  kubespray=cluster|upgrade|scale|skip to force a mode;
+#                      allow_replace=true to let a preview replace or delete a
+#                      node, an IP, a bucket or a volume (check the runbook
+#                      first)
+#
+#   changes ─ guard ─ images ─ cloud ─ cluster
+#
+# Credentials: the repo Actions secret GCP_DEPLOYER_KEY (watchtower-deployer@).
+# Each job's setup step uses it to read the secrets that job needs from
+# Secret Manager, and the Pulumi programs read theirs with it. The image job
+# alone has a second one, REGISTRY_TOKEN (docs/required-secrets.md). Every
+# job that writes a key ends with the cleanup step, because composite actions
+# have no post hook. The Gitea runners reach SSH and the Kubernetes API from
+# their Cloud NAT address (34.26.149.196), which the Hetzner firewall admits.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      kubespray:
+        description: Kubespray run (auto = when its inputs changed or a node was created)
+        type: choice
+        options: [auto, cluster, upgrade, scale, skip]
+        default: auto
+      allow_replace:
+        description: Allow replacing or deleting nodes, IPs, buckets, volumes or namespaces
+        type: boolean
+        default: false
+
+# One deploy at a time, and never cancelled: a cancelled `pulumi up` leaves
+# pending operations, a cancelled Kubespray run a half-configured node.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  KUBESPRAY: ${{ inputs.kubespray || 'auto' }}
+  ALLOW_REPLACE: ${{ inputs.allow_replace || 'false' }}
+  REGISTRY: gitea.jasonmross.dev
+  REGISTRY_OWNER: jmr-dev
+  REGISTRY_USER: JMR-dev
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      cluster: ${{ steps.diff.outputs.cluster }}
+      kube_version: ${{ steps.diff.outputs.kube_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != push || -z "$BEFORE" || "$BEFORE" =~ ^0+$ ]] || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            # Nothing trustworthy to diff against: Kubespray decides from the
+            # dispatch input or the cloud stack's new nodes alone.
+            printf 'cluster=false\nkube_version=false\n' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files="$(git diff --name-only "$BEFORE" "$SHA")"
+          has() { grep -qE "$1" <<<"$files" && echo true || echo false; }
+          kv=false
+          if git diff "$BEFORE" "$SHA" -- ansible/inventory/group_vars/k8s_cluster/k8s-cluster.yml | grep -qE '^[-+]kube_version:'; then
+            kv=true
+          fi
+          {
+            echo "cluster=$(has '^ansible/(inventory/group_vars/|requirements\.(txt|yml)$)')"
+            echo "kube_version=$kv"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Deploy only from main
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "deploys only run from main (got $GITHUB_REF)" >&2
+            exit 1
+          fi
+          echo "Deploying ${GITHUB_SHA:0:12} (kubespray=${KUBESPRAY}, allow_replace=${ALLOW_REPLACE})"
+
+  images:
+    needs: guard
+    # docker build/push needs a Docker daemon; ubuntu-latest job pods have none.
+    runs-on: docker
+    timeout-minutes: 40
+    outputs:
+      caddy: ${{ steps.push.outputs.caddy }}
+      caddy_digest: ${{ steps.push.outputs.caddy_digest }}
+      fipd: ${{ steps.push.outputs.fipd }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Not GCP_DEPLOYER_KEY: jobs on the shared DinD runner can see each
+      # other's credentials, so this one gets only the push token, copied
+      # from Secret Manager (scripts/secret.sh gitea registry-push-token).
+      - name: Build, scan and push both images (or reuse this commit's)
+        id: push
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          sha="${GITHUB_SHA:0:12}"
+          printf '%s' "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
+          for image in caddy fipd; do
+            ref="${REGISTRY}/${REGISTRY_OWNER}/watchtower-${image}:${sha}"
+            if docker pull -q "$ref" >/dev/null 2>&1; then
+              echo "${ref} already built and scanned"
+            else
+              scripts/build-image.sh "$image" "$ref" "$sha"
+              docker push -q "$ref"
+            fi
+            # The cluster runs the digest, never a movable tag.
+            pinned="$(docker inspect --format '{{index .RepoDigests 0}}' "$ref")"
+            echo "${image}=${pinned}" >>"$GITHUB_OUTPUT"
+            [[ "$image" == caddy ]] && echo "caddy_digest=${pinned#*@}" >>"$GITHUB_OUTPUT"
+          done
+      - name: Remove registry credentials
+        if: always()
+        run: rm -f "${HOME}/.docker/config.json"
+
+  cloud:
+    needs: [changes, images]
+    # Room for the Pulumi providers, and on-demand: a preempted `pulumi up`
+    # leaves the stack with pending operations to clear by hand.
+    runs-on: heavy
+    timeout-minutes: 45
+    outputs:
+      new_control_plane: ${{ steps.plan.outputs.new_control_plane }}
+      new_workers: ${{ steps.plan.outputs.new_workers }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The state backend (the URL is in each Pulumi.yaml) and the MinIO
+      # provider both use the admin S3 key, each under its own names.
+      - uses: ./.gitea/actions/setup
+        with:
+          tools: go pulumi
+          gcp-key: ${{ secrets.GCP_DEPLOYER_KEY }}
+          secrets: |
+            PULUMI_CONFIG_PASSPHRASE=pulumi-passphrase
+            AWS_ACCESS_KEY_ID=s3-admin-access-key
+            AWS_SECRET_ACCESS_KEY=s3-admin-secret-key
+            MINIO_USER=s3-admin-access-key
+            MINIO_PASSWORD=s3-admin-secret-key
+            HCLOUD_TOKEN=hcloud-token
+      - name: Build the Pulumi program
+        working-directory: infra
+        env:
+          GOFLAGS: -p=2
+        run: go build -o bin/cloud ./cloud
+      - name: Preview, with a guard on replacing nodes, IPs and buckets
+        id: plan
+        working-directory: infra/cloud
+        run: |
+          set -euo pipefail
+          pulumi stack select prod
+          pulumi preview --diff
+          pulumi preview --json >"${RUNNER_TEMP}/preview.json"
+          ../../scripts/preview-guard.sh "${RUNNER_TEMP}/preview.json" \
+            '^(hcloud:index/(server:Server|primaryIp:PrimaryIp|floatingIp:FloatingIp|network:Network|networkSubnet:NetworkSubnet)|minio:index/s3Bucket:S3Bucket|tls:index/privateKey:PrivateKey)$'
+          created() { jq --arg re "$1" '[.steps[]? | select(.op == "create" and (.urn | test($re)))] | length' "${RUNNER_TEMP}/preview.json"; }
+          cp="$(created 'hcloud:index/server:Server::watchtower-[123]$')"
+          workers="$(created 'hcloud:index/server:Server::watchtower-([4-9]|[1-9][0-9])$')"
+          echo "new_control_plane=$([[ "$cp" -gt 0 ]] && echo true || echo false)" >>"$GITHUB_OUTPUT"
+          echo "new_workers=$([[ "$workers" -gt 0 ]] && echo true || echo false)" >>"$GITHUB_OUTPUT"
+      - name: pulumi up
+        working-directory: infra/cloud
+        run: pulumi up --yes --skip-preview --stack prod
+      - name: Remove keys
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/gcp-deployer.json" "${RUNNER_TEMP}/secrets" "${RUNNER_TEMP}/gcloud"
+
+  cluster:
+    needs: [changes, images, cloud]
+    # Kubespray's first run takes 30-60 minutes.
+    runs-on: heavy
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The apps program reads the workloads' secrets itself, with the key.
+      - uses: ./.gitea/actions/setup
+        with:
+          tools: go pulumi ansible awscli kubectl
+          gcp-key: ${{ secrets.GCP_DEPLOYER_KEY }}
+          secrets: |
+            PULUMI_CONFIG_PASSPHRASE=pulumi-passphrase
+            AWS_ACCESS_KEY_ID=s3-admin-access-key
+            AWS_SECRET_ACCESS_KEY=s3-admin-secret-key
+            HCLOUD_TOKEN=hcloud-token
+            HCLOUD_CCM_TOKEN=hcloud-ccm-token
+            @ANSIBLE_PRIVATE_KEY_FILE=ssh-private-key
+      - name: Inventory and pinned host keys from the cloud stack
+        working-directory: infra/cloud
+        run: |
+          set -euo pipefail
+          umask 077
+          pulumi stack select prod
+          pulumi stack output inventory >../../ansible/inventory/hosts.yml
+          pulumi stack output knownHosts >../../ansible/inventory/known_hosts
+          {
+            echo "ARCHIVE_BUCKET=$(pulumi stack output buckets --json | jq -r '."logs-archive"')"
+            # Outside the checkout, so no step can commit it.
+            echo "KUBECONFIG=${RUNNER_TEMP}/kubeconfig"
+            echo "KUBECONFIG_OUT=${RUNNER_TEMP}/kubeconfig"
+          } >>"$GITHUB_ENV"
+      - name: Decide the Kubespray run
+        env:
+          CLUSTER_CHANGED: ${{ needs.changes.outputs.cluster }}
+          KUBE_VERSION_CHANGED: ${{ needs.changes.outputs.kube_version }}
+          NEW_CONTROL_PLANE: ${{ needs.cloud.outputs.new_control_plane }}
+          NEW_WORKERS: ${{ needs.cloud.outputs.new_workers }}
+        run: |
+          set -euo pipefail
+          mode="$KUBESPRAY"
+          if [[ "$mode" == auto ]]; then
+            if [[ "$KUBE_VERSION_CHANGED" == true ]]; then
+              echo "kube_version changed: dispatch this workflow with kubespray=upgrade" >&2
+              exit 1
+            elif [[ "$NEW_CONTROL_PLANE" == true || "$CLUSTER_CHANGED" == true ]]; then
+              mode=cluster
+            elif [[ "$NEW_WORKERS" == true ]]; then
+              mode=scale
+            else
+              mode=skip
+            fi
+          fi
+          echo "Kubespray: ${mode}"
+          echo "KUBESPRAY_MODE=${mode}" >>"$GITHUB_ENV"
+      - name: Node baseline
+        working-directory: ansible
+        run: |
+          set -euo pipefail
+          ansible-galaxy collection install -r requirements.yml -p .collections >/dev/null
+          ansible-playbook playbooks/prepare.yml
+      - name: Kubespray
+        if: env.KUBESPRAY_MODE != 'skip'
+        working-directory: ansible
+        run: |
+          set -euo pipefail
+          case "$KUBESPRAY_MODE" in
+            cluster) ansible-playbook kubernetes_sigs.kubespray.cluster ;;
+            upgrade) ansible-playbook playbooks/upgrade.yml ;;
+            scale) ansible-playbook kubernetes_sigs.kubespray.scale ;;
+            *) echo "unknown mode $KUBESPRAY_MODE" >&2; exit 1 ;;
+          esac
+      - name: Fetch the admin kubeconfig
+        working-directory: ansible
+        run: ansible-playbook playbooks/kubeconfig.yml
+      - name: Build the Pulumi program
+        working-directory: infra
+        env:
+          GOFLAGS: -p=2
+        run: go build -o bin/apps ./apps
+      # Chart children's URN types carry the chart's: `...Chart$kubernetes:apps/v1:StatefulSet`.
+      # The guard's regex matches the child type after `$`, so the Loki
+      # ingesters are covered as well as Mimir.
+      - name: Preview, with a guard on stateful workloads and storage
+        working-directory: infra/apps
+        env:
+          CADDY: ${{ needs.images.outputs.caddy }}
+          FIPD: ${{ needs.images.outputs.fipd }}
+        run: |
+          set -euo pipefail
+          pulumi stack select prod
+          pulumi config set watchtower:caddyImage "$CADDY"
+          pulumi config set watchtower:fipdImage "$FIPD"
+          pulumi preview --diff
+          pulumi preview --json >"${RUNNER_TEMP}/preview.json"
+          ../../scripts/preview-guard.sh "${RUNNER_TEMP}/preview.json" \
+            '(^|\$)kubernetes:(core/v1:(Namespace|PersistentVolumeClaim)|apps/v1:StatefulSet|storage.k8s.io/v1:StorageClass)$'
+      - name: pulumi up
+        working-directory: infra/apps
+        run: pulumi up --yes --skip-preview --stack prod
+      - name: Verify
+        run: scripts/verify.sh "${{ needs.images.outputs.caddy_digest }}" "$ARCHIVE_BUCKET"
+      - name: Remove keys
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/gcp-deployer.json" "${RUNNER_TEMP}/secrets" "${RUNNER_TEMP}/gcloud" "${RUNNER_TEMP}/kubeconfig" ansible/inventory/known_hosts

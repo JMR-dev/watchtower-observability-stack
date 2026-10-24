@@ -1,11 +1,8 @@
 ---
-- name: Stop and disable firewalld (replaced by native nftables)
-  ansible.builtin.systemd:
-    name: firewalld
-    enabled: false
-    state: stopped
-    masked: true
-  failed_when: false
+# Host firewall: raw nftables in a table of our own (templates/watchtower.nft.j2),
+# loaded by a unit of our own. No firewalld: it rejects pod-to-pod traffic
+# addressed by pod IP unless the pod and Service ranges are trusted, which
+# breaks Loki's memberlist gossip among other things.
 
 - name: Install nftables
   ansible.builtin.dnf:
@@ -18,7 +15,7 @@
     state: directory
     mode: "0755"
 
-- name: Render watchtower nftables ruleset
+- name: Render the watchtower ruleset
   ansible.builtin.template:
     src: watchtower.nft.j2
     dest: /etc/nftables/watchtower.nft
@@ -26,21 +23,42 @@
     owner: root
     group: root
     validate: nft --check --file %s
-  notify: Reload nftables
+  notify: Reload watchtower-nftables
 
-- name: Point /etc/sysconfig/nftables.conf at the watchtower ruleset
+- name: Install the watchtower-nftables unit
   ansible.builtin.copy:
-    dest: /etc/sysconfig/nftables.conf
-    mode: "0640"
+    src: watchtower-nftables.service
+    dest: /etc/systemd/system/watchtower-nftables.service
+    mode: "0644"
     owner: root
     group: root
-    content: |
-      # Loaded at boot by nftables.service.
-      include "/etc/nftables/watchtower.nft"
-  notify: Reload nftables
 
-- name: Enable nftables.service
-  ansible.builtin.systemd:
-    name: nftables
+- name: Enable and start watchtower-nftables
+  ansible.builtin.systemd_service:
+    name: watchtower-nftables
     enabled: true
     state: started
+    daemon_reload: true
+
+# Masked, never stopped: its stop runs `nft flush ruleset`.
+- name: Mask nftables.service
+  ansible.builtin.systemd_service:
+    name: nftables
+    masked: true
+
+- name: Gather service facts
+  ansible.builtin.service_facts:
+
+# Only once our ruleset is loaded, so the node is never left unfiltered.
+- name: Stop firewalld
+  ansible.builtin.systemd_service:
+    name: firewalld
+    state: stopped
+  when: "'firewalld.service' in ansible_facts.services"
+
+# Masked whether or not it is installed: a later install would otherwise be
+# enabled by the distribution preset and start on the next reboot.
+- name: Mask firewalld
+  ansible.builtin.systemd_service:
+    name: firewalld
+    masked: true

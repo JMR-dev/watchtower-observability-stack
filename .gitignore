@@ -5,30 +5,26 @@
 *.priv
 secrets/
 **/secrets/
-*.vault
-.vault_pass
-.vault_password
-ansible/inventory/hosts.yml
-ansible/inventory/group_vars/**/vault.yml
-wireguard/wg0.conf
-wireguard/peers/
 .aws/
 .env
+*.json.key
+*.kubeconfig
 
-# OpenTofu / Terraform
-.terraform/
-.terraform.lock.hcl
-*.tfstate
-*.tfstate.*
-*.tfvars
-!*.tfvars.example
-crash.log
-crash.*.log
-override.tf
-override.tf.json
-backend.hcl
-*_override.tf
-*_override.tf.json
+# Generated from the cloud stack's outputs
+ansible/inventory/hosts.yml
+ansible/inventory/known_hosts
+
+# Ansible (and ansible-lint's cache)
+ansible/.collections/
+ansible/.ansible/
+ansible/.facts_cache/
+*.retry
+
+# Go / Pulumi
+infra/bin/
+fipd/fipd
+cover.out
+*.coverprofile
 
 # Editor / OS
 .DS_Store

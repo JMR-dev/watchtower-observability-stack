@@ -1,0 +1,146 @@
+package names
+
+import (
+	"os"
+	"regexp"
+	"strings"
+	"testing"
+)
+
+func TestNamesAreStable(t *testing.T) {
+	for got, want := range map[string]string{
+		BucketName("p", "loki"): "p-loki",
+		NodeName(2):             "watchtower-2",
+		PrivateIP(3):            "10.20.1.13",
+		VPNHost:                 "vpn.watchtower.jasonmross.dev",
+		APIHost:                 "api.watchtower.jasonmross.dev",
+	} {
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	}
+}
+
+// Every bucket's key must be a known component key, and only the log archive
+// may be write-only: Loki, Mimir and Tempo read back what they store.
+func TestBucketsUseKnownKeys(t *testing.T) {
+	known := map[string]bool{}
+	for _, k := range Keys {
+		known[k] = true
+	}
+	for _, b := range Buckets {
+		if !known[b.Key] {
+			t.Errorf("bucket %s uses unknown key %q", b.Suffix, b.Key)
+		}
+		if b.WriteOnly && b.Suffix != "logs-archive" {
+			t.Errorf("bucket %s is write-only", b.Suffix)
+		}
+	}
+}
+
+// Lifecycle is a safety net behind application retention, never ahead of it.
+func TestLifecycleNeverUndercutsRetention(t *testing.T) {
+	retention := map[string]int{
+		"loki":         RetentionLokiDays,
+		"mimir-blocks": RetentionMimirDays,
+		"tempo":        RetentionTempoDays,
+		"logs-archive": RetentionLogArchiveDays,
+	}
+	for _, b := range Buckets {
+		r, ok := retention[b.Suffix]
+		if !ok {
+			if b.LifecycleDays != 0 {
+				t.Errorf("bucket %s has lifecycle but no retention", b.Suffix)
+			}
+			continue
+		}
+		if b.LifecycleDays < r {
+			t.Errorf("bucket %s expires at %dd, before its %dd retention", b.Suffix, b.LifecycleDays, r)
+		}
+	}
+	if RetentionLogArchiveDays != 90 {
+		t.Errorf("log archive retention %d, want 90", RetentionLogArchiveDays)
+	}
+}
+
+// GDPR erasure records must outlive the logs they erased.
+func TestGDPRRecordsNeverExpire(t *testing.T) {
+	for _, b := range Buckets {
+		if b.Suffix != "logs-archive" {
+			continue
+		}
+		for _, p := range b.LifecyclePrefixes {
+			if p == ArchivePrefixGDPR {
+				t.Error("gdpr-audit/ expires")
+			}
+		}
+		if len(b.LifecyclePrefixes) != 3 {
+			t.Errorf("archive lifecycle prefixes %v", b.LifecyclePrefixes)
+		}
+	}
+}
+
+// scripts/secret-names.txt is what scripts/bootstrap.sh creates and grants;
+// a secret missing from it would fail the deploy that first reads it.
+func TestSecretListMatchesFile(t *testing.T) {
+	b, err := os.ReadFile("../../../scripts/secret-names.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inFile := map[string]bool{}
+	for _, line := range strings.Split(string(b), "\n") {
+		id := strings.TrimSpace(line)
+		if id == "" || strings.HasPrefix(id, "#") {
+			continue
+		}
+		if inFile[id] {
+			t.Errorf("%s is listed twice", id)
+		}
+		inFile[id] = true
+	}
+	inGo := map[string]bool{}
+	for _, id := range Secrets() {
+		if inGo[id] {
+			t.Errorf("Secrets() lists %s twice", id)
+		}
+		inGo[id] = true
+		if !inFile[id] {
+			t.Errorf("%s is missing from scripts/secret-names.txt", id)
+		}
+	}
+	for id := range inFile {
+		if !inGo[id] {
+			t.Errorf("scripts/secret-names.txt lists %s, which names.Secrets() does not", id)
+		}
+	}
+	// Secret Manager ids: letters, digits, dashes and underscores.
+	valid := regexp.MustCompile(`^[a-z0-9-]{1,255}$`)
+	for id := range inGo {
+		if !valid.MatchString(id) {
+			t.Errorf("secret id %q", id)
+		}
+	}
+}
+
+// Every secret the deploy workflow asks the setup action for must exist.
+func TestWorkflowReadsOnlyListedSecrets(t *testing.T) {
+	b, err := os.ReadFile("../../../.gitea/workflows/deploy.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	known := map[string]bool{}
+	for _, id := range Secrets() {
+		known[id] = true
+	}
+	// The setup action's `secrets:` lines: NAME=id or @NAME=id.
+	line := regexp.MustCompile(`(?m)^\s+@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)\s*$`)
+	matches := line.FindAllStringSubmatch(string(b), -1)
+	if len(matches) == 0 {
+		t.Fatal("deploy.yml reads no secrets through the setup action")
+	}
+	for _, m := range matches {
+		if !known[m[1]] {
+			t.Errorf("deploy.yml reads %s, which is not a known secret", m[1])
+		}
+	}
+}

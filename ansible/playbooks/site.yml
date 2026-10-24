@@ -1,13 +1,14 @@
 ---
-- name: Provision Watchtower observability stack
-  hosts: watchtower
-  become: true
-  gather_facts: true
+# Everything, in order: node baseline, the Kubernetes cluster (Kubespray's
+# cluster.yml), the kubeconfig. The deploy workflow runs the three parts
+# separately so Kubespray only runs when its inputs change.
+#
+#   cd ansible && ansible-playbook playbooks/site.yml
+- name: Node baseline
+  ansible.builtin.import_playbook: prepare.yml
 
-  roles:
-    - base
-    - luks
-    - firewall
-    - fail2ban
-    - wireguard
-    - observability
+- name: Kubernetes (Kubespray)
+  ansible.builtin.import_playbook: kubernetes_sigs.kubespray.cluster
+
+- name: Admin kubeconfig
+  ansible.builtin.import_playbook: kubeconfig.yml

@@ -1,0 +1,25 @@
+# hetzner/hcloud-csi. The token is the `hcloud` Secret in kube-system, which
+# Kubespray's hcloud cloud-controller role creates.
+controller:
+  hcloudToken:
+    existingSecret:
+      name: hcloud
+      key: token
+  image:
+    hcloudCSIDriver:
+      tag: v2.24.1
+node:
+  image:
+    hcloudCSIDriver:
+      tag: v2.24.1
+
+# The only StorageClass: LUKS-encrypted Hetzner Volumes. Retain, so deleting a
+# PVC (or the stack) never deletes telemetry WALs or Grafana's database; the
+# runbook covers cleaning up released volumes.
+storageClasses:
+  - name: hcloud-luks
+    defaultStorageClass: true
+    reclaimPolicy: Retain
+    extraParameters:
+      csi.storage.k8s.io/node-publish-secret-name: hcloud-luks
+      csi.storage.k8s.io/node-publish-secret-namespace: kube-system

@@ -1,5 +1,5 @@
 ---
-- name: Reload nftables
-  ansible.builtin.systemd:
-    name: nftables
+- name: Reload watchtower-nftables
+  ansible.builtin.systemd_service:
+    name: watchtower-nftables
     state: reloaded

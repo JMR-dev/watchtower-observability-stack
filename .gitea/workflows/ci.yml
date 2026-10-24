@@ -1,0 +1,146 @@
+# Status checks for every pull request. No secrets and no credentials:
+# nothing here can reach Hetzner, GCP or the cluster. Deploys are deploy.yml.
+#
+# Require these checks in the branch protection for main (Settings ->
+# Branches): go (infra), go (fipd), manifests, ansible, images (caddy),
+# images (fipd), shell, alloy.
+#
+# Runs on the GKE runners (gitea-496920/gitea-runners; the gitea repo's
+# docs/runners.md):
+#   ubuntu-latest  a job pod of its own
+#   heavy          a job pod alone on an e2-highmem-4: compiling the Pulumi
+#                  providers' Go SDKs needs the memory
+#   docker         the Docker-in-Docker runner; `docker build` runs there
+#
+# Actions are pinned to a full commit SHA, with the release in a comment.
+name: ci
+
+on:
+  pull_request:
+
+# A newer push to the PR supersedes the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: heavy
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [infra, fipd]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.gitea/actions/setup
+        with:
+          tools: go
+      - name: gofmt, vet, test (100% coverage), build
+        working-directory: ${{ matrix.module }}
+        # Two packages at a time: compiling several provider SDK packages at
+        # once (vet, test and build each compile) can exhaust the pod's memory.
+        env:
+          GOFLAGS: -p=2
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then echo "gofmt needed: $unformatted"; exit 1; fi
+          go vet ./...
+          go test -race -coverprofile="${RUNNER_TEMP}/cover.out" ./...
+          ../scripts/coverage-gate.sh "${RUNNER_TEMP}/cover.out"
+          if [[ "${{ matrix.module }}" == infra ]]; then
+            go build -o /dev/null ./cloud
+            go build -o /dev/null ./apps
+          else
+            go build -o /dev/null .
+          fi
+
+  manifests:
+    # heavy: the dump compiles the apps program's tests, which pull in the
+    # Pulumi Kubernetes SDK (see go).
+    runs-on: heavy
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.gitea/actions/setup
+        with:
+          tools: go helm kubectl kubeconform kube-apiserver etcd
+      - name: Every chart and every object the apps program builds, through kubeconform and an API server dry run
+        env:
+          GOFLAGS: -p=2
+        run: scripts/check-manifests.sh
+
+  ansible:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.gitea/actions/setup
+        with:
+          tools: ansible
+      - name: Syntax check every playbook (with Kubespray installed) and lint
+        working-directory: ansible
+        run: |
+          set -euo pipefail
+          ansible-galaxy collection install -r requirements.yml -p .collections >/dev/null
+          for playbook in playbooks/*.yml; do
+            ansible-playbook -i inventory/hosts.sample.yml "$playbook" --syntax-check
+          done
+          ansible-lint
+      - name: Render the node firewall and check it with nft
+        working-directory: ansible
+        run: |
+          set -euo pipefail
+          # The role's `validate: nft --check` only runs on the nodes, so a
+          # broken template would otherwise surface mid-deploy. Render it from
+          # the sample inventory, once as is and once with no IPv6 admin
+          # addresses (an empty set), and have the kernel check each in a
+          # network namespace of its own.
+          out="${RUNNER_TEMP}/nft"
+          mkdir -p "$out"
+          for variant in sample v4-only; do
+            extra=()
+            [[ $variant == v4-only ]] && extra=(-e '{"watchtower_admin_cidrs": ["192.0.2.0/24"]}')
+            ansible -i inventory/hosts.sample.yml watchtower-1 -c local -m ansible.builtin.template \
+              -a "src=roles/firewall/templates/watchtower.nft.j2 dest=${out}/${variant}.nft" "${extra[@]}" >/dev/null
+            unshare --user --map-root-user --net nft --check --file "${out}/${variant}.nft"
+            echo "${variant}: ok"
+          done
+
+  images:
+    # docker build needs a Docker daemon; ubuntu-latest job pods have none.
+    runs-on: docker
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [caddy, fipd]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build + Trivy scan (no push)
+        run: scripts/build-image.sh "${{ matrix.image }}" "watchtower-${{ matrix.image }}:ci-${GITHUB_SHA:0:12}" "${GITHUB_SHA:0:12}"
+
+  shell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.gitea/actions/setup
+        with:
+          tools: shellcheck actionlint
+      - name: shellcheck
+        run: shellcheck -x scripts/*.sh ansible/roles/base/files/*.sh
+      - name: actionlint (workflows, with shellcheck on their scripts)
+        run: actionlint -config-file .gitea/actionlint.yaml .gitea/workflows/*.yml
+
+  alloy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.gitea/actions/setup
+        with:
+          tools: alloy
+      - name: The client example parses and is formatted
+        run: diff -u config/alloy/config.alloy.example <(alloy fmt config/alloy/config.alloy.example)

@@ -1,25 +1,26 @@
 ---
+# Host baseline for a Kubespray node: security updates (rebooted by kured),
+# persistent journald (Fluent Bit ships it), SELinux enforcing, and the
+# kernel modules the edge pod needs.
+
 - name: Update all packages
   ansible.builtin.dnf:
     name: "*"
-    state: latest
+    state: latest # noqa package-latest -- first boot and maintenance runs want current packages
     update_cache: true
 
-- name: Install required packages
+- name: Install base packages
   ansible.builtin.dnf:
     name:
-      - podman
-      - wireguard-tools
-      - cryptsetup
-      - nftables
+      - dnf-automatic
+      - dnf-utils
       - python3-libselinux
       - policycoreutils-python-utils
       - container-selinux
+      - wireguard-tools
       - jq
       - bind-utils
       - tar
-      - rsync
-      - dnf-automatic
     state: present
 
 - name: Set timezone
@@ -32,6 +33,7 @@
     state: directory
     mode: "0755"
 
+# Persistent, so Fluent Bit's systemd input finds /var/log/journal.
 - name: Configure persistent journald with size cap
   ansible.builtin.copy:
     dest: /etc/systemd/journald.conf.d/persistent.conf
@@ -41,10 +43,27 @@
       Storage=persistent
       SystemMaxUse=2G
       SystemMaxFileSize=128M
-      MaxRetentionSec=30day
+      MaxRetentionSec=14day
   notify: Restart journald
 
-- name: Render dnf-automatic config (security updates, apply, reboot when needed)
+- name: Ensure SELinux enforcing
+  ansible.posix.selinux:
+    policy: targeted
+    state: enforcing
+
+# The edge pod's wg-easy creates wg0 in its own network namespace; loading
+# the module here means the pod needs neither SYS_MODULE nor /lib/modules.
+- name: Load the wireguard module at boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/wireguard.conf
+    mode: "0644"
+    content: "wireguard\n"
+  notify: Load wireguard
+
+# dnf-automatic installs security updates nightly and never reboots: a node
+# rebooting on its own would take its pods with it. kured reboots one node
+# at a time, after draining it, when the reboot-required timer below says so.
+- name: Render dnf-automatic config (security updates, apply, no reboot)
   ansible.builtin.copy:
     dest: /etc/dnf/automatic.conf
     mode: "0644"
@@ -58,65 +77,37 @@
       network_online_timeout = 60
       download_updates = yes
       apply_updates = yes
-      reboot = when-needed
-      reboot_command = "shutdown -r +5 'Rebooting for security updates'"
+      reboot = never
 
       [emitters]
       emit_via = stdio,motd
 
       [base]
-      # Don't auto-restart the container runtime / observability stack out from
-      # under us — operator applies these manually during a maintenance window.
-      exclude = podman* conmon crun containers-common netavark aardvark-dns container-selinux
-  notify: Restart dnf-automatic timer
+      # Kubespray manages the container runtime and Kubernetes binaries.
+      exclude = containerd* runc* cri-tools kubelet kubeadm kubectl
 
-- name: Ensure dnf-automatic-install timer override directory exists
-  ansible.builtin.file:
-    path: /etc/systemd/system/dnf-automatic-install.timer.d
-    state: directory
-    mode: "0755"
-
-- name: Pin dnf-automatic to 01:00 Central time (America/Chicago, honours DST)
-  ansible.builtin.copy:
-    dest: /etc/systemd/system/dnf-automatic-install.timer.d/override.conf
-    mode: "0644"
-    content: |
-      [Timer]
-      OnCalendar=
-      OnCalendar=*-*-* 01:00:00 America/Chicago
-      RandomizedDelaySec=30m
-      Persistent=true
-  notify:
-    - Reload systemd
-    - Restart dnf-automatic timer
-
-- name: Ensure override directory exists
-  ansible.builtin.file:
-    path: /etc/systemd/system/dnf-automatic-install.timer.d
-    state: directory
-    mode: "0755"
-
-- name: Disable the download-only timer (we use the install timer)
-  ansible.builtin.systemd:
-    name: dnf-automatic.timer
-    enabled: false
-    state: stopped
-  failed_when: false
-
-- name: Enable dnf-automatic-install.timer (downloads + applies + reboots)
+- name: Enable dnf-automatic-install.timer
   ansible.builtin.systemd:
     name: dnf-automatic-install.timer
     enabled: true
     state: started
+
+- name: Deploy reboot-required check
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: "{{ item.mode }}"
+    owner: root
+    group: root
+  loop:
+    - {src: reboot-required.sh, dest: /usr/local/sbin/reboot-required, mode: "0755"}
+    - {src: reboot-required.service, dest: /etc/systemd/system/reboot-required.service, mode: "0644"}
+    - {src: reboot-required.timer, dest: /etc/systemd/system/reboot-required.timer, mode: "0644"}
+  notify: Reload systemd
+
+- name: Enable the reboot-required timer
+  ansible.builtin.systemd:
+    name: reboot-required.timer
+    enabled: true
+    state: started
     daemon_reload: true
-
-- name: Ensure SELinux enforcing
-  ansible.posix.selinux:
-    policy: targeted
-    state: enforcing
-
-- name: Enable container manage cgroup boolean (rootful Podman + systemd)
-  ansible.posix.seboolean:
-    name: container_manage_cgroup
-    state: true
-    persistent: true

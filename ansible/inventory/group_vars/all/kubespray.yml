@@ -1,0 +1,29 @@
+---
+# Kubespray settings that apply to every host.
+
+# Hetzner cloud-controller-manager, deployed by Kubespray itself so nodes are
+# initialised before anything else schedules. The token is the separate
+# HCLOUD_CCM_TOKEN; the secret it lands in (kube-system/hcloud, keys token
+# and network) is also what hcloud-csi reads.
+cloud_provider: external
+external_cloud_provider: hcloud
+external_hcloud_cloud:
+  hcloud_api_token: "{{ lookup('ansible.builtin.env', 'HCLOUD_CCM_TOKEN') }}"
+  token_secret_name: hcloud
+  service_account_name: cloud-controller-manager
+  # Kubespray defaults to "latest"; pin it.
+  controller_image_tag: v1.39.2
+  # Nodes register with their private address as InternalIP. No routes:
+  # Cilium tunnels pod traffic itself.
+  with_networks: true
+  network_name: watchtower
+  network_routes_enabled: "false"
+  controller_extra_args: {}
+
+# SELinux stays enforcing (Kubespray's default is permissive). Pods that need
+# host access say so explicitly with spc_t; see infra/apps.
+preinstall_selinux_state: enforcing
+containerd_enable_selinux: true
+
+# Kubelets reach the API servers through a local proxy on every node.
+loadbalancer_apiserver_localhost: true

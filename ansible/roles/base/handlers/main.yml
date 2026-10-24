@@ -8,8 +8,7 @@
   ansible.builtin.systemd:
     daemon_reload: true
 
-- name: Restart dnf-automatic timer
-  ansible.builtin.systemd:
-    name: dnf-automatic-install.timer
-    state: restarted
-    enabled: true
+- name: Load wireguard
+  community.general.modprobe:
+    name: wireguard
+    state: present

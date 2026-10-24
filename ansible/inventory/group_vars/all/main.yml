@@ -1,80 +1,14 @@
-# Non-secret defaults shared across the stack.
-# Secret values live in group_vars/all/vault.yml (ansible-vault encrypted).
+---
+# Node preparation (roles base, firewall, fail2ban, floating_ip). Kubespray's
+# own settings live in kubespray.yml (all hosts) and ../k8s_cluster/.
 
-hetzner_location: nbg1
-timezone: Europe/Berlin
+timezone: Etc/UTC
 
-# Object storage
-s3_endpoint: "https://{{ hetzner_location }}.your-objectstorage.com"
-s3_region: "{{ hetzner_location }}"
-s3_bucket_mimir: watchtower-mimir
-s3_bucket_loki:  watchtower-loki
-s3_bucket_tempo: watchtower-tempo
+# Addresses fail2ban never bans: the Gitea Actions runners' egress (a ban
+# would break every deploy) and loopback. Add your own.
+fail2ban_ignoreip:
+  - 127.0.0.1/8
+  - "::1"
+  - 34.26.149.196/32
 
-# Indirection: real values come from vault.yml
-hetzner_s3_access_key: "{{ vault_hetzner_s3_access_key }}"
-hetzner_s3_secret_key: "{{ vault_hetzner_s3_secret_key }}"
-grafana_admin_password: "{{ vault_grafana_admin_password }}"
-wireguard_server_private_key: "{{ vault_wireguard_server_private_key }}"
-wireguard_server_public_key: "{{ vault_wireguard_server_public_key }}"
-wireguard_peers: "{{ vault_wireguard_peers }}"
-
-# WireGuard
-wireguard_interface: wg0
-wireguard_listen_port: 51820
-wireguard_subnet_v4: 10.8.0.0/24
-wireguard_server_address: 10.8.0.1/24
-wireguard_server_ip: 10.8.0.1
-
-# Public-facing interface (Hetzner CPX42 default).
-public_interface: eth0
-
-# CIDRs allowed to reach SSH (22/tcp) and WireGuard (51820/udp) at the host.
-# Mirror or tighten what you set in tofu/terraform.tfvars admin_allow_ipv4/v6.
-admin_allow_ipv4:
-  - 0.0.0.0/0
-admin_allow_ipv6:
-  - "::/0"
-
-# Local data
-observability_data_root: /var/lib/observability
-observability_secrets_dir: /etc/observability/secrets
-observability_config_dir: /etc/observability/config
-# observability_volume_id is injected per-host from the Ansible inventory.
-# Run `tofu output -json | jq -r '.ansible_inventory.value'` to regenerate hosts.yml.
-# Leave empty in dev/staging — the LUKS role will fall back to an 80 GB loop file.
-observability_volume_id: ""
-
-# When observability_volume_id is set, use the stable Hetzner by-id path.
-# When empty, the LUKS role falls back to a loop-backed image on the root disk (dev/staging only).
-luks_device_source: >-
-  {{ ((observability_volume_id | string) | length > 0)
-     | ternary('/dev/disk/by-id/scsi-0HC_Volume_' + (observability_volume_id | string), '/dev/sdb') }}
-luks_mapper_name: observability_data
-
-# Container images (pin in production)
-image_mimir:   "docker.io/grafana/mimir:2.14.3"
-image_loki:    "docker.io/grafana/loki:3.3.2"
-image_tempo:   "docker.io/grafana/tempo:2.7.1"
-image_grafana: "docker.io/grafana/grafana:11.4.0"
-image_caddy:   "localhost/watchtower-caddy:latest"
-
-# wg-easy — WireGuard peer management web UI.
-# image built from ghcr.io; pin the tag in production.
-image_wg_easy: "ghcr.io/wg-easy/wg-easy:14"
-wg_easy_web_port: 51821   # TCP — web UI, wg0 only (covered by iifname wg0 accept in nftables)
-wg_easy_wg_port: "{{ wireguard_listen_port }}"
-
-# Indirection for vault secret
-wg_easy_password_hash: "{{ vault_wg_easy_password_hash }}"
-
-# Retention (per signal)
-mimir_retention_days: 90
-loki_retention_days:  30
-tempo_retention_days: 30
-
-# Tenants — override in production
-tenants:
-  - slug: default
-    org_name: Default
-    grafana_admin_email: admin@example.com
+# watchtower_floating_ipv4 comes from the inventory (cloud stack output).

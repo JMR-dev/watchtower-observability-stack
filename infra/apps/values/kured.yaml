@@ -1,0 +1,16 @@
+# kubereboot/kured: drains and reboots one node at a time after
+# dnf-automatic installed a kernel or glibc update. The sentinel file is
+# written by the reboot-required timer from Ansible's base role (AlmaLinux has
+# no /var/run/reboot-required of its own).
+image:
+  tag: 1.23.0
+configuration:
+  period: 1h
+  concurrency: 1
+  rebootDays: [su]
+  startTime: "1am"
+  endTime: "5am"
+  timeZone: America/Chicago
+  rebootSentinel: /var/run/reboot-required
+  # A drain stuck on a PDB gives up instead of holding the lock forever.
+  drainTimeout: 30m
