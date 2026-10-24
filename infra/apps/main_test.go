@@ -372,12 +372,16 @@ func TestEdge(t *testing.T) {
 		t.Errorf("caddy env %v", env(caddy))
 	}
 	// Read-only root: Coraza exits at startup without a writable /tmp.
-	tmp := false
+	// scripts/build-image.sh validates the Caddyfile with exactly these
+	// writable paths; change both together.
+	var writable []string
 	for _, v := range dig(caddy, "volumeMounts").([]interface{}) {
-		tmp = tmp || (dig(v, "mountPath") == "/tmp" && dig(v, "readOnly") == nil)
+		if dig(v, "readOnly") == nil {
+			writable = append(writable, dig(v, "mountPath").(string))
+		}
 	}
-	if !tmp {
-		t.Errorf("caddy has no writable /tmp: %v", caddy["volumeMounts"])
+	if strings.Join(writable, " ") != "/data /config /tmp" {
+		t.Errorf("caddy writable mounts %v, want /data /config /tmp", writable)
 	}
 	// Measured start-up peak is about 320 MB.
 	if dig(wg, "resources.limits.memory") != "512Mi" {
