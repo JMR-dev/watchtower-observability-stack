@@ -533,6 +533,10 @@ func TestGrafanaDatasources(t *testing.T) {
 	if dig(v, "admin.existingSecret") != "grafana-admin" || dig(v, "initChownData.enabled") != false {
 		t.Errorf("grafana values %v", v)
 	}
+	// Otherwise the second deploy replaces the volume (spec.volumeName).
+	if dig(v, "persistence.lookupVolumeName") != false {
+		t.Error("grafana persistence.lookupVolumeName must be false")
+	}
 }
 
 func TestStorageClassEncryptedAndRetained(t *testing.T) {
