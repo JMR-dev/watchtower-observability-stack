@@ -105,7 +105,7 @@ endpoint `watchtower.jasonmross.dev`, which resolves to the in-tunnel address
 | Cluster network | Cilium default-deny policies in every namespace we own; FQDN-scoped egress (S3, ACME, Cloud DNS, Hetzner API) |
 | Pod security | `restricted` everywhere except the edge pod (NET_ADMIN for wg0) and Fluent Bit (host logs), which run `spc_t` |
 | Credentials | One S3 key per component, fenced by bucket policies; the archive key can only write; the Hetzner token sits in fipd's namespace alone |
-| Encryption | WireGuard (clients, and pod-to-pod), TLS on every endpoint, LUKS volumes, etcd secret encryption |
+| Encryption | WireGuard (clients, and pod-to-pod between nodes), TLS on every client-facing endpoint, LUKS volumes, etcd secret encryption. Caddy reaches the backends over plain HTTP, so a hop between two pods on the same node is not encrypted |
 | WAF | Coraza with the OWASP CRS on Grafana (detection-only until tuned) |
 
 ## Lifecycle

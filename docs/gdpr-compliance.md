@@ -112,7 +112,8 @@ subject within one month (Art. 12(3)).
 | Layer | Mechanism |
 |-------|-----------|
 | Client → stack | WireGuard (ChaCha20-Poly1305), then TLS to Caddy |
-| Pod ↔ pod, node ↔ node | Cilium transparent encryption (WireGuard) |
+| Pod ↔ pod between nodes, node ↔ node | Cilium transparent encryption (WireGuard) |
+| Pod ↔ pod on the same node | None: the traffic never leaves the host, and Caddy reaches the backends over plain HTTP |
 | Stack → Object Storage | TLS |
 | Volumes (WALs, databases) | LUKS2 (hcloud-csi) |
 | Kubernetes Secrets | etcd encryption at rest |
