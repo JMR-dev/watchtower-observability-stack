@@ -2,7 +2,7 @@
 # nothing here can reach Hetzner, GCP or the cluster. Deploys are deploy.yml.
 #
 # Require these checks in the branch protection for main (Settings ->
-# Branches): go (infra), go (fipd), charts, ansible, images (caddy),
+# Branches): go (infra), go (fipd), manifests, ansible, images (caddy),
 # images (fipd), shell, alloy.
 #
 # Runs on the GKE runners (gitea-496920/gitea-runners; the gitea repo's
@@ -56,16 +56,20 @@ jobs:
             go build -o /dev/null .
           fi
 
-  charts:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  manifests:
+    # heavy: the dump compiles the apps program's tests, which pull in the
+    # Pulumi Kubernetes SDK (see go).
+    runs-on: heavy
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.gitea/actions/setup
         with:
-          tools: helm kubeconform
-      - name: Render every chart with its values and validate the manifests
-        run: scripts/render-charts.sh
+          tools: go helm kubectl kubeconform kube-apiserver etcd
+      - name: Every chart and every object the apps program builds, through kubeconform and an API server dry run
+        env:
+          GOFLAGS: -p=2
+        run: scripts/check-manifests.sh
 
   ansible:
     runs-on: ubuntu-latest

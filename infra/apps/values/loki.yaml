@@ -1,6 +1,7 @@
 # grafana-community/loki, Distributed mode. Static values only: bucket names
-# and the S3 credential Secret are merged in by loki.go, and CI renders this
-# file with `helm template` (scripts/render-charts.sh) to validate it.
+# and the S3 credential Secret are merged in by loki.go, and CI renders the
+# merged values with `helm template` and dry-runs the result against an API
+# server (scripts/check-manifests.sh).
 deploymentMode: Distributed
 
 defaults:

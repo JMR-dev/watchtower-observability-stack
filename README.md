@@ -50,6 +50,14 @@ cd fipd  && go test -race -coverprofile=cover.out ./... && ../scripts/coverage-g
 
 Both modules hold 100% statement coverage; CI fails below it.
 
+```bash
+scripts/check-manifests.sh   # needs go, helm, kubectl, kubeconform, etcd, kube-apiserver
+```
+
+renders every chart and every object `infra/apps` builds and dry-runs them
+against a throwaway kube-apiserver of the cluster's version, as CI's
+`manifests` job does.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)

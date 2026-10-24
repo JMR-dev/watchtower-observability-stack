@@ -111,9 +111,12 @@ endpoint `watchtower.jasonmross.dev`, which resolves to the in-tunnel address
 
 ## Lifecycle
 
-- **`ci.yml`** checks every pull request: Go (100% coverage), chart renders,
-  Ansible syntax and lint, both images (build + Trivy), shellcheck,
-  actionlint, the Alloy example.
+- **`ci.yml`** checks every pull request: Go (100% coverage); every chart
+  and every object `infra/apps` builds, through kubeconform and a server-side
+  dry run against a throwaway kube-apiserver of the cluster's version;
+  Ansible syntax and lint, and the node firewall through `nft --check`; both
+  images (build, Trivy, and the Caddyfile validated as the edge pod runs it);
+  shellcheck, actionlint, the Alloy example.
 - **`deploy.yml`** on merge to main: images, `infra/cloud`, the node
   baseline, Kubespray when its inputs changed or a node was created,
   `infra/apps`, then `scripts/verify.sh`.

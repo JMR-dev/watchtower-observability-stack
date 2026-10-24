@@ -9,6 +9,11 @@ description: |
     pulumi      pulumi-<v>-checksums.txt on the GitHub release
     helm        get.helm.sh/helm-<v>-linux-amd64.tar.gz.sha256sum
     kubectl     dl.k8s.io/release/<v>/bin/linux/amd64/kubectl.sha256
+    kube-apiserver  dl.k8s.io/release/<v>/bin/linux/amd64/kube-apiserver.sha256
+                (the cluster's kube_version exactly; check-manifests.sh fails
+                when the two differ)
+    etcd        SHA256SUMS on the GitHub release (the version Kubespray
+                installs for this Kubernetes minor)
     kubeconform CHECKSUMS on the GitHub release
     alloy       SHA256SUMS on the GitHub release
     actionlint  actionlint_<v>_checksums.txt on the GitHub release
@@ -24,7 +29,7 @@ description: |
 
 inputs:
   tools:
-    description: Space-separated subset of "go pulumi helm kubectl kubeconform alloy shellcheck awscli ansible"
+    description: Space-separated subset of "go pulumi helm kubectl kubeconform kube-apiserver etcd alloy shellcheck awscli ansible"
     required: true
   gcp-key:
     description: JSON key of watchtower-dns-deployer@ (secrets.GCP_DNS_DEPLOYER_KEY). Omit for none.
@@ -50,6 +55,10 @@ runs:
         HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
         KUBECTL_VERSION: "1.36.5"
         KUBECTL_SHA256: 33bc88a24c3b09cf55bfd59e6ca977881b61fc3f25ab65bc80c65b430248648e
+        KUBE_APISERVER_VERSION: "1.36.4"
+        KUBE_APISERVER_SHA256: 90939ee07af61ac3701c665647f9ce27f2f988f5c7fff406aa5794fd3e6328a6
+        ETCD_VERSION: "3.6.14"
+        ETCD_SHA256: ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
         KUBECONFORM_VERSION: "0.8.0"
         KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
         ALLOY_VERSION: "1.21.2"
@@ -76,6 +85,8 @@ runs:
         apt_deps="jq curl openssh-client unzip xz-utils"
         # nftables: CI checks the node firewall template with nft.
         [[ " $TOOLS " == *" ansible "* ]] && apt_deps+=" python3-venv git nftables"
+        # openssl: check-manifests.sh makes the API server's signing key.
+        [[ " $TOOLS " == *" kube-apiserver "* ]] && apt_deps+=" openssl"
         sudo=""
         [[ "$(id -u)" == 0 ]] || sudo=sudo
         export DEBIAN_FRONTEND=noninteractive
@@ -107,6 +118,16 @@ runs:
             kubectl)
               fetch "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" "$KUBECTL_SHA256" "${bin}/kubectl"
               chmod 0755 "${bin}/kubectl"
+              ;;
+            kube-apiserver)
+              fetch "https://dl.k8s.io/release/v${KUBE_APISERVER_VERSION}/bin/linux/amd64/kube-apiserver" \
+                "$KUBE_APISERVER_SHA256" "${bin}/kube-apiserver"
+              chmod 0755 "${bin}/kube-apiserver"
+              ;;
+            etcd)
+              fetch "https://github.com/etcd-io/etcd/releases/download/v${ETCD_VERSION}/etcd-v${ETCD_VERSION}-linux-amd64.tar.gz" \
+                "$ETCD_SHA256" "${tools_dir}/etcd.tgz"
+              tar -C "$bin" -xzf "${tools_dir}/etcd.tgz" --strip-components=1 "etcd-v${ETCD_VERSION}-linux-amd64/etcd"
               ;;
             kubeconform)
               fetch "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
