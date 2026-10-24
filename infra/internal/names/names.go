@@ -32,7 +32,48 @@ const (
 	NodeLabelRole = "watchtower"
 	// FloatingIPLabel is the Hetzner label fipd finds the VPN Floating IP by.
 	FloatingIPLabel = "watchtower-vpn"
+
+	// GCPProject holds the DNS zone, the service accounts and every secret.
+	GCPProject = "watchtower-observe"
 )
+
+// Secret Manager secrets in GCPProject. Each is also in gopass as
+// watchtower/<id>, and scripts/secret-names.txt lists them all for
+// scripts/bootstrap.sh (a test keeps the two lists equal). Nothing secret is
+// stack config: the deploy workflow reads the first group, the programs read
+// the rest themselves while they run.
+const (
+	SecretPulumiPassphrase  = "pulumi-passphrase"
+	SecretHcloudToken       = "hcloud-token"
+	SecretHcloudCCMToken    = "hcloud-ccm-token"
+	SecretSSHPrivateKey     = "ssh-private-key"
+	SecretRegistryPushToken = "registry-push-token"
+
+	SecretGrafanaAdminPassword = "grafana-admin-password"
+	SecretWGEasyPassword       = "wg-easy-password"
+	SecretCaddyDNSKey          = "caddy-dns-key"
+	SecretLUKSPassphrase       = "luks-passphrase"
+	SecretRegistryPullToken    = "registry-pull-token"
+	SecretHcloudFIPToken       = "hcloud-fip-token"
+)
+
+// S3AccessKeySecret and S3SecretKeySecret name the two secrets holding one
+// Hetzner S3 credential: KeyAdmin or a Keys entry.
+func S3AccessKeySecret(key string) string { return "s3-" + key + "-access-key" }
+func S3SecretKeySecret(key string) string { return "s3-" + key + "-secret-key" }
+
+// Secrets lists every secret.
+func Secrets() []string {
+	out := []string{
+		SecretPulumiPassphrase, SecretHcloudToken, SecretHcloudCCMToken, SecretSSHPrivateKey, SecretRegistryPushToken,
+		SecretGrafanaAdminPassword, SecretWGEasyPassword, SecretCaddyDNSKey, SecretLUKSPassphrase,
+		SecretRegistryPullToken, SecretHcloudFIPToken,
+	}
+	for _, k := range append([]string{KeyAdmin}, Keys...) {
+		out = append(out, S3AccessKeySecret(k), S3SecretKeySecret(k))
+	}
+	return out
+}
 
 // Kubernetes namespaces.
 const (
@@ -90,6 +131,10 @@ const (
 	ArchivePrefixAudit      = "audit/"
 	ArchivePrefixGDPR       = "gdpr-audit/"
 )
+
+// KeyAdmin is the S3 key Pulumi, the deploy workflow and operators use; every
+// bucket admits it.
+const KeyAdmin = "admin"
 
 // Component S3 keys. Each is a separate Hetzner S3 credential.
 const (

@@ -31,6 +31,7 @@ const (
 	ilmType      = "minio:index/ilmPolicy:IlmPolicy"
 	recordType   = "gcp:dns/recordSet:RecordSet"
 	zoneToken    = "gcp:dns/getManagedZone:getManagedZone"
+	secretToken  = "gcp:secretmanager/getSecretVersion:getSecretVersion"
 	fipAddress   = "198.51.100.7"
 	nodeAddress  = "203.0.113.10"
 )
@@ -42,7 +43,6 @@ func baseConfig() map[string]string {
 		"watchtower:hetznerProjectId": "1234",
 		"watchtower:adminCidrs":       `["198.51.100.0/24"]`,
 		"watchtower:ciCidrs":          `["34.26.149.196/32"]`,
-		"watchtower:s3AccessKeys":     `{"admin":"ADMINKEY","loki":"LOKIKEY","mimir":"MIMIRKEY","tempo":"TEMPOKEY","logship":"LOGSHIPKEY"}`,
 	}
 }
 
@@ -58,8 +58,15 @@ func with(extra map[string]string) map[string]string {
 	return cfg
 }
 
+// secretValue is what the mocked Secret Manager holds: s3-loki-access-key is
+// "LOKIKEY", and so on.
+func secretValue(id string) string {
+	key := strings.TrimSuffix(strings.TrimPrefix(id, "s3-"), "-access-key")
+	return strings.ToUpper(key) + "KEY"
+}
+
 // newMocks hands out numeric IDs (Hetzner references resources by integer)
-// and answers the zone lookup.
+// and answers the zone and secret lookups.
 func newMocks(dnsName string) func() *pulumitest.Mocks {
 	return func() *pulumitest.Mocks {
 		var mu sync.Mutex
@@ -86,6 +93,10 @@ func newMocks(dnsName string) func() *pulumitest.Mocks {
 						"dnsName": resource.NewStringProperty(dnsName),
 					}, nil
 				},
+				secretToken: func(args resource.PropertyMap) (resource.PropertyMap, error) {
+					v := secretValue(pulumitest.Str(args, "secret"))
+					return resource.PropertyMap{"secretData": resource.NewStringProperty(v)}, nil
+				},
 			},
 		}
 	}
@@ -105,7 +116,6 @@ func opts(cfg map[string]string) pulumitest.Options {
 		Project: "watchtower-cloud",
 		Stack:   "prod",
 		Config:  cfg,
-		Secrets: []string{"watchtower:s3AccessKeys"},
 	}
 }
 
@@ -572,7 +582,6 @@ func TestConfigValidation(t *testing.T) {
 		"bad bucket prefix":   {with(map[string]string{"watchtower:bucketPrefix": "Bad_Prefix"}), "bucketPrefix"},
 		"zero project":        {with(map[string]string{"watchtower:hetznerProjectId": "0"}), "numeric project ID"},
 		"placeholder project": {with(map[string]string{"watchtower:hetznerProjectId": "REPLACE"}), "hetznerProjectId"},
-		"missing key":         {with(map[string]string{"watchtower:s3AccessKeys": `{"admin":"A"}`}), "s3AccessKeys.loki is missing"},
 		"missing ssh key":     {with(map[string]string{"watchtower:sshPublicKey": ""}), "watchtower:sshPublicKey"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -584,11 +593,51 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
-// The committed stack file must at least parse as config this program reads.
+// The bucket policies' key IDs come from Secret Manager in the stack's GCP
+// project, through the explicit provider.
+func TestSecretsComeFromSecretManager(t *testing.T) {
+	m := mustRun(t, baseConfig())
+	var got []string
+	for _, inv := range m.Invokes() {
+		if inv.Token != secretToken {
+			continue
+		}
+		got = append(got, pulumitest.Str(inv.Args, "secret"))
+		if pulumitest.Str(inv.Args, "project") != names.GCPProject || !strings.Contains(inv.Provider, "pulumi:providers:gcp::gcp") {
+			t.Errorf("secret lookup %+v", inv)
+		}
+	}
+	sort.Strings(got)
+	want := []string{"s3-admin-access-key", "s3-logship-access-key", "s3-loki-access-key", "s3-mimir-access-key", "s3-tempo-access-key"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("secrets read %v, want %v", got, want)
+	}
+}
+
+func TestEmptySecretFails(t *testing.T) {
+	m := goodZone()
+	m.Calls[secretToken] = func(args resource.PropertyMap) (resource.PropertyMap, error) {
+		v := secretValue(pulumitest.Str(args, "secret"))
+		if pulumitest.Str(args, "secret") == "s3-tempo-access-key" {
+			v = ""
+		}
+		return resource.PropertyMap{"secretData": resource.NewStringProperty(v)}, nil
+	}
+	err := pulumitest.Run(t, opts(baseConfig()), program, m)
+	if err == nil || !strings.Contains(err.Error(), "secret s3-tempo-access-key in watchtower-observe is empty") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// The committed stack file must at least parse as config this program reads,
+// and hold nothing secret: the repo is mirrored publicly.
 func TestStackFileKeys(t *testing.T) {
 	b, err := os.ReadFile("Pulumi.prod.yaml")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "secure:") {
+		t.Error("Pulumi.prod.yaml holds a secret; store it in Secret Manager (scripts/secret.sh put)")
 	}
 	for _, key := range []string{"bucketPrefix", "hetznerProjectId", "sshPublicKey", "adminCidrs", "ciCidrs", "deleteProtection: \"true\""} {
 		if !strings.Contains(string(b), "watchtower:"+key) {

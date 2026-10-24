@@ -72,7 +72,7 @@ func principal(projectID int, accessKey string) string {
 // stops, say, Loki's key from reading the log archive.
 func bucketPolicy(cfg *Config, bucket string, b names.Bucket) (string, error) {
 	resources := []string{"arn:aws:s3:::" + bucket, "arn:aws:s3:::" + bucket + "/*"}
-	admin := principal(cfg.HetznerProjectID, cfg.S3AccessKeys[AdminKey])
+	admin := principal(cfg.HetznerProjectID, cfg.S3AccessKeys[names.KeyAdmin])
 	owner := principal(cfg.HetznerProjectID, cfg.S3AccessKeys[b.Key])
 	doc := policyDoc{
 		Version: "2012-10-17",

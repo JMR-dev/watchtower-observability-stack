@@ -7,6 +7,7 @@ import (
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
+	"watchtower-infra/internal/gsm"
 	"watchtower-infra/internal/names"
 	"watchtower-infra/internal/stackcfg"
 )
@@ -40,8 +41,12 @@ type Config struct {
 	// Kubeconfig is the contents of the file KUBECONFIG names.
 	Kubeconfig string
 
-	// Secrets: plaintext in memory only; everything built from them is
-	// wrapped with pulumi.ToSecret.
+	// GCPProject holds the secrets below in Secret Manager.
+	GCPProject string
+
+	// Secrets: not config. readSecrets fills them in from Secret Manager.
+	// Plaintext in memory only; everything built from them is wrapped with
+	// pulumi.ToSecret.
 	S3Keys map[string]S3Key
 
 	GrafanaAdminPassword pulumi.StringOutput
@@ -68,17 +73,28 @@ func loadConfig(ctx *pulumi.Context) (*Config, error) {
 		RegistryUser:          r.String("registryUser", "JMR-dev"),
 		LokiIngesters:         r.Int("lokiIngesters", 3),
 		LokiReplicationFactor: r.Int("lokiReplicationFactor", 3),
-		GrafanaAdminPassword:  r.Secret("grafanaAdminPassword"),
-		WGEasyPassword:        r.Secret("wgEasyPassword"),
-		CaddyDNSKey:           r.Secret("caddyDnsKey"),
-		LUKSPassphrase:        r.Secret("luksPassphrase"),
-		RegistryToken:         r.Secret("registryToken"),
-		HcloudFipToken:        r.Secret("hcloudFipToken"),
+		GCPProject:            r.String("gcpProject", names.GCPProject),
 	}
 	r.Object("tenants", &cfg.Tenants, false)
-	r.SecretObject("s3Keys", &cfg.S3Keys)
 	cfg.validate(r)
 	return cfg, r.Err()
+}
+
+// readSecrets reads every secret the workloads need, through the explicit
+// gcp provider.
+func (c *Config) readSecrets(ctx *pulumi.Context, gcp pulumi.ProviderResource) error {
+	r := gsm.New(ctx, c.GCPProject, gcp)
+	c.S3Keys = map[string]S3Key{}
+	for _, k := range names.Keys {
+		c.S3Keys[k] = S3Key{AccessKey: r.Plain(names.S3AccessKeySecret(k)), SecretKey: r.Plain(names.S3SecretKeySecret(k))}
+	}
+	c.GrafanaAdminPassword = r.Secret(names.SecretGrafanaAdminPassword)
+	c.WGEasyPassword = r.Secret(names.SecretWGEasyPassword)
+	c.CaddyDNSKey = r.Secret(names.SecretCaddyDNSKey)
+	c.LUKSPassphrase = r.Secret(names.SecretLUKSPassphrase)
+	c.RegistryToken = r.Secret(names.SecretRegistryPullToken)
+	c.HcloudFipToken = r.Secret(names.SecretHcloudFIPToken)
+	return r.Err()
 }
 
 // validate fails the preview, not the apply.
@@ -114,11 +130,6 @@ func (c *Config) validate(r *stackcfg.Reader) {
 	}
 	if c.LokiReplicationFactor < 1 || c.LokiReplicationFactor > c.LokiIngesters {
 		r.Fail("lokiReplicationFactor %d must be between 1 and lokiIngesters (%d)", c.LokiReplicationFactor, c.LokiIngesters)
-	}
-	for _, k := range names.Keys {
-		if c.S3Keys[k].AccessKey == "" || c.S3Keys[k].SecretKey == "" {
-			r.Fail("s3Keys.%s needs accessKey and secretKey", k)
-		}
 	}
 }
 

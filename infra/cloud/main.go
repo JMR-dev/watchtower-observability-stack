@@ -8,8 +8,10 @@
 //
 // Credentials come from the environment, never from stack config, so none of
 // them lands in state: HCLOUD_TOKEN (hcloud), MINIO_USER / MINIO_PASSWORD (the
-// admin S3 key) and GOOGLE_APPLICATION_CREDENTIALS (a key whose only grant is
-// dns.admin on the one zone).
+// admin S3 key) and GOOGLE_APPLICATION_CREDENTIALS (watchtower-deployer@,
+// whose grants are dns.admin on the one zone and read access to each of the
+// stack's secrets). The S3 access key IDs the bucket policies name come from
+// Secret Manager.
 package main
 
 import (
@@ -22,6 +24,7 @@ import (
 	"github.com/pulumi/pulumi-tls/sdk/v5/go/tls"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
+	"watchtower-infra/internal/gsm"
 	"watchtower-infra/internal/names"
 )
 
@@ -47,6 +50,10 @@ func program(ctx *pulumi.Context) error {
 
 	p, err := newProviders(ctx, cfg)
 	if err != nil {
+		return err
+	}
+
+	if err := readSecrets(ctx, cfg, p); err != nil {
 		return err
 	}
 
@@ -115,6 +122,17 @@ func newProviders(ctx *pulumi.Context, cfg *Config) (*providers, error) {
 		return nil, err
 	}
 	return &providers{hcloud: hc, s3: s3, gcp: g, tls: t}, nil
+}
+
+// readSecrets fills in the access key IDs the bucket policies name: the admin
+// key's and each component's.
+func readSecrets(ctx *pulumi.Context, cfg *Config, p *providers) error {
+	r := gsm.New(ctx, cfg.GCPProject, p.gcp)
+	cfg.S3AccessKeys = map[string]string{}
+	for _, k := range append([]string{names.KeyAdmin}, names.Keys...) {
+		cfg.S3AccessKeys[k] = r.Plain(names.S3AccessKeySecret(k))
+	}
+	return r.Err()
 }
 
 // intID turns a Hetzner resource's Pulumi ID into the integer the API uses to

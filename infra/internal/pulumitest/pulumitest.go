@@ -34,8 +34,9 @@ type Resource struct {
 
 // Invoke is one function call (a data source lookup).
 type Invoke struct {
-	Token string
-	Args  resource.PropertyMap
+	Token    string
+	Args     resource.PropertyMap
+	Provider string
 }
 
 // CallFunc answers an invoke.
@@ -91,7 +92,7 @@ func (m *Mocks) Call(a pulumi.MockCallArgs) (resource.PropertyMap, error) {
 		return nil, fmt.Errorf("pulumitest: injected failure of invoke %s", a.Token)
 	}
 	m.mu.Lock()
-	m.invokes = append(m.invokes, Invoke{Token: a.Token, Args: a.Args})
+	m.invokes = append(m.invokes, Invoke{Token: a.Token, Args: a.Args, Provider: a.Provider})
 	m.mu.Unlock()
 	if fn, ok := m.Calls[a.Token]; ok {
 		return fn(a.Args)

@@ -28,8 +28,9 @@ type Config struct {
 
 	BucketPrefix     string
 	HetznerProjectID int
-	// S3AccessKeys maps "admin" and each names.Keys entry to the access key
-	// ID bucket policies name. Secret: the repo is mirrored publicly.
+	// S3AccessKeys maps names.KeyAdmin and each names.Keys entry to the
+	// access key ID bucket policies name. Not config: readSecrets fills it in
+	// from Secret Manager.
 	S3AccessKeys map[string]string
 
 	// DeleteProtection turns on Hetzner delete (and rebuild) protection for
@@ -39,9 +40,6 @@ type Config struct {
 	GCPProject string
 	DNSZone    string
 }
-
-// AdminKey is the S3 key Pulumi and operators use; every bucket admits it.
-const AdminKey = "admin"
 
 var (
 	bucketPrefixRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,40}[a-z0-9]$`)
@@ -61,13 +59,12 @@ func loadConfig(ctx *pulumi.Context) (*Config, error) {
 		BucketPrefix:     r.RequiredString("bucketPrefix"),
 		HetznerProjectID: r.RequiredInt("hetznerProjectId"),
 		DeleteProtection: r.Bool("deleteProtection", false),
-		GCPProject:       r.String("gcpProject", "watchtower-observe"),
+		GCPProject:       r.String("gcpProject", names.GCPProject),
 		DNSZone:          r.String("dnsZone", "watchtower"),
 	}
 	r.Object("adminCidrs", &cfg.AdminCIDRs, true)
 	r.Object("ciCidrs", &cfg.CICIDRs, false)
 	r.Object("wireguardAllowCidrs", &cfg.WireGuardCIDRs, false)
-	r.SecretObject("s3AccessKeys", &cfg.S3AccessKeys)
 	cfg.validate(r)
 	return cfg, r.Err()
 }
@@ -109,10 +106,5 @@ func (c *Config) validate(r *stackcfg.Reader) {
 	}
 	if c.HetznerProjectID <= 0 {
 		r.Fail("hetznerProjectId must be the numeric project ID")
-	}
-	for _, k := range append([]string{AdminKey}, names.Keys...) {
-		if c.S3AccessKeys[k] == "" {
-			r.Fail("s3AccessKeys.%s is missing", k)
-		}
 	}
 }

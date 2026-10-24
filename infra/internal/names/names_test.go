@@ -1,6 +1,11 @@
 package names
 
-import "testing"
+import (
+	"os"
+	"regexp"
+	"strings"
+	"testing"
+)
 
 func TestNamesAreStable(t *testing.T) {
 	for got, want := range map[string]string{
@@ -71,6 +76,71 @@ func TestGDPRRecordsNeverExpire(t *testing.T) {
 		}
 		if len(b.LifecyclePrefixes) != 3 {
 			t.Errorf("archive lifecycle prefixes %v", b.LifecyclePrefixes)
+		}
+	}
+}
+
+// scripts/secret-names.txt is what scripts/bootstrap.sh creates and grants;
+// a secret missing from it would fail the deploy that first reads it.
+func TestSecretListMatchesFile(t *testing.T) {
+	b, err := os.ReadFile("../../../scripts/secret-names.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inFile := map[string]bool{}
+	for _, line := range strings.Split(string(b), "\n") {
+		id := strings.TrimSpace(line)
+		if id == "" || strings.HasPrefix(id, "#") {
+			continue
+		}
+		if inFile[id] {
+			t.Errorf("%s is listed twice", id)
+		}
+		inFile[id] = true
+	}
+	inGo := map[string]bool{}
+	for _, id := range Secrets() {
+		if inGo[id] {
+			t.Errorf("Secrets() lists %s twice", id)
+		}
+		inGo[id] = true
+		if !inFile[id] {
+			t.Errorf("%s is missing from scripts/secret-names.txt", id)
+		}
+	}
+	for id := range inFile {
+		if !inGo[id] {
+			t.Errorf("scripts/secret-names.txt lists %s, which names.Secrets() does not", id)
+		}
+	}
+	// Secret Manager ids: letters, digits, dashes and underscores.
+	valid := regexp.MustCompile(`^[a-z0-9-]{1,255}$`)
+	for id := range inGo {
+		if !valid.MatchString(id) {
+			t.Errorf("secret id %q", id)
+		}
+	}
+}
+
+// Every secret the deploy workflow asks the setup action for must exist.
+func TestWorkflowReadsOnlyListedSecrets(t *testing.T) {
+	b, err := os.ReadFile("../../../.gitea/workflows/deploy.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	known := map[string]bool{}
+	for _, id := range Secrets() {
+		known[id] = true
+	}
+	// The setup action's `secrets:` lines: NAME=id or @NAME=id.
+	line := regexp.MustCompile(`(?m)^\s+@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)\s*$`)
+	matches := line.FindAllStringSubmatch(string(b), -1)
+	if len(matches) == 0 {
+		t.Fatal("deploy.yml reads no secrets through the setup action")
+	}
+	for _, m := range matches {
+		if !known[m[1]] {
+			t.Errorf("deploy.yml reads %s, which is not a known secret", m[1])
 		}
 	}
 }

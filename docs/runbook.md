@@ -6,54 +6,66 @@ Everything below runs from a workstation with `gopass`, `pulumi`, `kubectl`,
 
 ## First deploy
 
+Secrets go to Secret Manager and gopass together, through
+`scripts/secret.sh` ([required-secrets.md](required-secrets.md)). It needs
+gcloud logged in as the owner of `watchtower-observe` and an unlocked
+gopass.
+
 1. **Hetzner Console** (project of your choice):
-   - two API tokens, read/write: one for Pulumi, one for the
-     cloud-controller-manager; a third for fipd;
+   - three API tokens, read/write: one for Pulumi, one for the
+     cloud-controller-manager, one for fipd;
    - five S3 credentials: `admin`, `loki`, `mimir`, `tempo`, `logship`;
    - note the project ID from the Console URL (`/projects/<id>/servers`).
-2. **Keys you generate:**
+
+   **Gitea:** two tokens for the package registry, one `write:package`
+   (pushes) and one `read:package` (pulls).
+2. **Store every secret.** Paste each token or key at the hidden prompt;
+   generate the rest:
    ```bash
-   ssh-keygen -t ed25519 -N '' -C watchtower-root -f ./watchtower-root   # node SSH key
-   openssl rand -base64 48                                                # Pulumi passphrase
+   scripts/secret.sh put hcloud-token
+   scripts/secret.sh put hcloud-ccm-token
+   scripts/secret.sh put hcloud-fip-token
+   for k in admin loki mimir tempo logship; do
+     scripts/secret.sh put "s3-$k-access-key"
+     scripts/secret.sh put "s3-$k-secret-key"
+   done
+   scripts/secret.sh put registry-push-token   # write:package
+   scripts/secret.sh put registry-pull-token   # read:package
+   ssh-keygen -t ed25519 -N '' -C watchtower-root -f ./watchtower-root
+   scripts/secret.sh put ssh-private-key <./watchtower-root && shred -u ./watchtower-root
+   openssl rand -base64 48 | scripts/secret.sh put pulumi-passphrase
+   openssl rand -base64 24 | scripts/secret.sh put grafana-admin-password
+   openssl rand -base64 24 | scripts/secret.sh put wg-easy-password
+   openssl rand -base64 48 | scripts/secret.sh put luks-passphrase
    ```
-   Store everything in gopass under `watchtower/` (see
-   [required-secrets.md](required-secrets.md)) and shred the local copies.
 3. **Stack config.** In `infra/cloud/Pulumi.prod.yaml` set
-   `hetznerProjectId`, `sshPublicKey` (the `.pub` above) and tighten
+   `hetznerProjectId`, `sshPublicKey` (`watchtower-root.pub`) and tighten
    `adminCidrs`. Commit it.
-4. **Bootstrap** (state bucket, DNS zone and delegation, service accounts):
+4. **Bootstrap** (state bucket, DNS zone and delegation, service accounts,
+   the secrets' access grants), then the two GCP keys:
    ```bash
    source scripts/env.sh
    scripts/bootstrap.sh
    dig +short NS watchtower.jasonmross.dev   # four ns-cloud-* names
+   scripts/rotate-gcp-key.sh deployer        # Actions secret GCP_DEPLOYER_KEY + gopass
+   scripts/rotate-gcp-key.sh caddy           # secret caddy-dns-key
+   scripts/secret.sh gitea registry-push-token REGISTRY_TOKEN
+   scripts/secret.sh check                   # nothing missing
    ```
    Delete anything the leftover listing shows that the new stack doesn't own.
-5. **Initialise the stacks:**
+5. **Initialise the stacks** (`env.sh` again, now that the deployer key is
+   in gopass):
    ```bash
+   source scripts/env.sh
    cd infra && go build -o bin/cloud ./cloud && go build -o bin/apps ./apps
-   cd cloud && pulumi stack init prod --secrets-provider passphrase
-   for k in admin loki mimir tempo logship; do
-     pulumi config set --secret --path "watchtower:s3AccessKeys.$k" "<access key id>"
-   done
-   cd ../apps && pulumi stack init prod --secrets-provider passphrase
-   pulumi config set --secret watchtower:grafanaAdminPassword "$(openssl rand -base64 24)"
-   pulumi config set --secret watchtower:wgEasyPassword "$(openssl rand -base64 24)"
-   pulumi config set --secret watchtower:luksPassphrase "$(openssl rand -base64 48)"
-   pulumi config set --secret watchtower:registryToken "<Gitea token, read:package>"
-   pulumi config set --secret watchtower:hcloudFipToken "<fipd Hetzner token>"
-   for k in loki mimir tempo logship; do
-     pulumi config set --secret --path "watchtower:s3Keys.$k.accessKey" "<id>"
-     pulumi config set --secret --path "watchtower:s3Keys.$k.secretKey" "<secret>"
-   done
-   ../../scripts/rotate-gcp-key.sh caddy
+   (cd cloud && pulumi stack init prod --secrets-provider passphrase)
+   (cd apps && pulumi stack init prod --secrets-provider passphrase)
    ```
-   Store the Grafana and wg-easy passwords in gopass too
-   (`watchtower/grafana-admin-password`, `watchtower/wg-easy-password`).
-   Commit both `Pulumi.prod.yaml` files (secrets are encrypted).
-6. **Gitea:** add the repo Actions secrets from
-   [required-secrets.md](required-secrets.md) (`scripts/rotate-gcp-key.sh
-   deployer` sets `GCP_DNS_DEPLOYER_KEY`), and in Settings → Branches require
-   the `ci` checks on main.
+   Commit both `Pulumi.prod.yaml` files: `stack init` only adds the
+   `encryptionsalt`.
+6. **Gitea:** in Settings → Branches, protect main and require the `ci`
+   checks: `go (fipd)`, `go (infra)`, `manifests`, `ansible`,
+   `images (caddy)`, `images (fipd)`, `shell`, `alloy`.
 7. **Merge to main.** `deploy.yml` creates the nodes, runs Kubespray (30–60
    minutes the first time), deploys the workloads and verifies them.
 8. **First peer:** the TLS UI on `https://watchtower.jasonmross.dev:51821` is
@@ -188,15 +200,24 @@ their 90- and 30-day retention is the erasure window.
 
 ## Credential rotation
 
+Every secret but `GCP_DEPLOYER_KEY` is stored with `scripts/secret.sh put
+<id>`, which adds a new version in Secret Manager and replaces the gopass
+copy. The cluster gets it on the next deploy: push to main, or dispatch
+`deploy` with `kubespray=skip`.
+
 | Credential | How |
 |---|---|
-| `GCP_DNS_DEPLOYER_KEY` | `scripts/rotate-gcp-key.sh deployer` (every 90 days) |
-| Caddy DNS-01 key | `scripts/rotate-gcp-key.sh caddy`, commit, merge |
-| Hetzner tokens | new token in the Console → gopass → Gitea secret (or `watchtower:hcloudFipToken`) → delete the old one |
-| Component S3 keys | new key → `pulumi config set --secret` (both stacks: `s3AccessKeys` in cloud, `s3Keys` in apps) → merge → delete the old key |
-| Admin S3 key | new key → gopass and Gitea secrets → `s3AccessKeys.admin` in cloud → `scripts/bootstrap.sh` (state bucket policy) → merge → delete the old key |
-| Pulumi passphrase | `pulumi stack change-secrets-provider passphrase` per stack, then gopass and the Gitea secret |
-| Node SSH key | new key → `watchtower:sshPublicKey` and `/root/.ssh/authorized_keys` on every node → gopass and Gitea |
+| `GCP_DEPLOYER_KEY` | `scripts/rotate-gcp-key.sh deployer` (every 90 days) |
+| Caddy DNS-01 key | `scripts/rotate-gcp-key.sh caddy`, then deploy |
+| Hetzner tokens | new token in the Console → `secret.sh put hcloud-token` (or `hcloud-ccm-token`, `hcloud-fip-token`) → deploy → delete the old one |
+| Component S3 keys | new key → `secret.sh put s3-<key>-access-key` and `-secret-key` → deploy (both stacks read them) → delete the old key |
+| Admin S3 key | new key → `secret.sh put s3-admin-access-key` and `-secret-key` → `source scripts/env.sh && scripts/bootstrap.sh` (state bucket policy) → deploy → delete the old key |
+| Registry push token | new token → `secret.sh put registry-push-token` → `secret.sh gitea registry-push-token REGISTRY_TOKEN` → delete the old one |
+| Pulumi passphrase | `pulumi stack change-secrets-provider passphrase` per stack with the new one, then `secret.sh put pulumi-passphrase` |
+| Node SSH key | new key → `watchtower:sshPublicKey` and `/root/.ssh/authorized_keys` on every node → `secret.sh put ssh-private-key` |
+
+Old versions stay in Secret Manager's history until destroyed:
+`gcloud secrets versions destroy <n> --secret <id> --project watchtower-observe`.
 
 ## Released volumes
 

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -23,28 +24,18 @@ const (
 	secretType = "kubernetes:core/v1:Secret"
 	cnpType    = "kubernetes:cilium.io/v2:CiliumNetworkPolicy"
 	nsType     = "kubernetes:core/v1:Namespace"
+	secretTok  = "gcp:secretmanager/getSecretVersion:getSecretVersion"
 	caddyImg   = "gitea.jasonmross.dev/jmr-dev/watchtower-caddy@sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	fipdImg    = "gitea.jasonmross.dev/jmr-dev/watchtower-fipd:abc123"
 )
 
-var secretKeys = []string{
-	"watchtower:grafanaAdminPassword", "watchtower:wgEasyPassword", "watchtower:caddyDnsKey",
-	"watchtower:luksPassphrase", "watchtower:registryToken", "watchtower:hcloudFipToken", "watchtower:s3Keys",
-}
-
 func baseConfig() map[string]string {
-	cfg := map[string]string{
+	return map[string]string{
 		"watchtower:bucketPrefix": "test-wt",
 		"watchtower:caddyImage":   caddyImg,
 		"watchtower:fipdImage":    fipdImg,
 		"watchtower:tenants":      `[{"slug":"default","orgName":"Default"},{"slug":"team-alpha","orgName":"Team Alpha"}]`,
-		"watchtower:s3Keys": `{"loki":{"accessKey":"LA","secretKey":"LS"},"mimir":{"accessKey":"MA","secretKey":"MS"},` +
-			`"tempo":{"accessKey":"TA","secretKey":"TS"},"logship":{"accessKey":"GA","secretKey":"GS"}}`,
 	}
-	for _, k := range secretKeys[:6] {
-		cfg[k] = "secret-" + k
-	}
-	return cfg
 }
 
 func with(extra map[string]string) map[string]string {
@@ -60,10 +51,17 @@ func with(extra map[string]string) map[string]string {
 }
 
 func opts(cfg map[string]string) pulumitest.Options {
-	return pulumitest.Options{Project: "watchtower-apps", Stack: "prod", Config: cfg, Secrets: secretKeys}
+	return pulumitest.Options{Project: "watchtower-apps", Stack: "prod", Config: cfg}
 }
 
-func newMocks() *pulumitest.Mocks { return &pulumitest.Mocks{} }
+// newMocks answers every Secret Manager lookup with "secret-<id>".
+func newMocks() *pulumitest.Mocks {
+	return &pulumitest.Mocks{Calls: map[string]pulumitest.CallFunc{
+		secretTok: func(args resource.PropertyMap) (resource.PropertyMap, error) {
+			return resource.PropertyMap{"secretData": resource.NewStringProperty("secret-" + pulumitest.Str(args, "secret"))}, nil
+		},
+	}}
+}
 
 // kubeconfig writes a stand-in kubeconfig and points KUBECONFIG at it.
 func kubeconfig(t *testing.T) {
@@ -211,10 +209,16 @@ func TestDefaultProvidersDisabled(t *testing.T) {
 func TestExplicitProviderWithSecretKubeconfig(t *testing.T) {
 	m := mustRun(t)
 	for _, r := range m.Resources() {
-		if strings.HasPrefix(r.Type, "pulumi:providers:") {
+		switch r.Type {
+		case "pulumi:providers:kubernetes":
 			kc := r.Inputs["kubeconfig"]
 			if !kc.ContainsSecrets() || !strings.Contains(plain(kc).(string), "kind: Config") {
 				t.Errorf("provider %s kubeconfig %v", r.Name, kc)
+			}
+			continue
+		case "pulumi:providers:gcp":
+			if pulumitest.Str(r.Inputs, "project") != names.GCPProject {
+				t.Errorf("gcp provider project %v", r.Inputs["project"])
 			}
 			continue
 		}
@@ -613,6 +617,76 @@ func TestPoliciesDefaultDeny(t *testing.T) {
 }
 
 // The two stacks must name the same buckets.
+// Every secret the workloads get comes from Secret Manager in the stack's GCP
+// project, through the explicit provider, and reaches the right Secret.
+func TestSecretsComeFromSecretManager(t *testing.T) {
+	m := mustRun(t)
+	var got []string
+	for _, inv := range m.Invokes() {
+		if inv.Token != secretTok {
+			continue
+		}
+		got = append(got, pulumitest.Str(inv.Args, "secret"))
+		if pulumitest.Str(inv.Args, "project") != names.GCPProject || !strings.Contains(inv.Provider, "pulumi:providers:gcp::gcp") {
+			t.Errorf("secret lookup %+v", inv)
+		}
+	}
+	want := []string{
+		names.SecretGrafanaAdminPassword, names.SecretWGEasyPassword, names.SecretCaddyDNSKey,
+		names.SecretLUKSPassphrase, names.SecretRegistryPullToken, names.SecretHcloudFIPToken,
+	}
+	for _, k := range names.Keys {
+		want = append(want, names.S3AccessKeySecret(k), names.S3SecretKeySecret(k))
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("secrets read %v, want %v", got, want)
+	}
+
+	for name, keys := range map[string]map[string]string{
+		"grafana-admin": {"admin-password": "secret-" + names.SecretGrafanaAdminPassword},
+		"fipd-hcloud":   {"HCLOUD_TOKEN": "secret-" + names.SecretHcloudFIPToken},
+		"loki-s3": {
+			"AWS_ACCESS_KEY_ID":     "secret-" + names.S3AccessKeySecret(names.KeyLoki),
+			"AWS_SECRET_ACCESS_KEY": "secret-" + names.S3SecretKeySecret(names.KeyLoki),
+		},
+	} {
+		data := dig(inputs(m.Named(t, name)), "stringData").(map[string]interface{})
+		for k, v := range keys {
+			if data[k] != v {
+				t.Errorf("%s %s = %v, want %s", name, k, data[k], v)
+			}
+		}
+	}
+}
+
+func TestMissingSecretFails(t *testing.T) {
+	kubeconfig(t)
+	m := newMocks()
+	m.Calls[secretTok] = func(args resource.PropertyMap) (resource.PropertyMap, error) {
+		if pulumitest.Str(args, "secret") == names.SecretLUKSPassphrase {
+			return nil, errors.New("NOT_FOUND: Secret [luks-passphrase] not found or has no versions")
+		}
+		return resource.PropertyMap{"secretData": resource.NewStringProperty("x")}, nil
+	}
+	err := pulumitest.Run(t, opts(baseConfig()), program, m)
+	if err == nil || !strings.Contains(err.Error(), "secret luks-passphrase: ") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// Nothing secret is committed: the repo is mirrored publicly.
+func TestStackFileHoldsNoSecrets(t *testing.T) {
+	b, err := os.ReadFile("Pulumi.prod.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "secure:") {
+		t.Error("Pulumi.prod.yaml holds a secret; store it in Secret Manager (scripts/secret.sh put)")
+	}
+}
+
 func TestBucketPrefixMatchesCloudStack(t *testing.T) {
 	prefix := func(path string) string {
 		b, err := os.ReadFile(path)
@@ -701,7 +775,6 @@ func TestConfigValidation(t *testing.T) {
 		"no tenants":       {with(map[string]string{"watchtower:tenants": `[]`}), "", "tenants must not be empty"},
 		"floating image":   {with(map[string]string{"watchtower:caddyImage": "caddy"}), "", "caddyImage"},
 		"rf over replicas": {with(map[string]string{"watchtower:lokiReplicationFactor": "4"}), "", "lokiReplicationFactor"},
-		"missing s3 key":   {with(map[string]string{"watchtower:s3Keys": `{"loki":{"accessKey":"a"}}`}), "", "s3Keys.loki"},
 		"missing image":    {with(map[string]string{"watchtower:fipdImage": ""}), "", "watchtower:fipdImage"},
 	} {
 		t.Run(name, func(t *testing.T) {

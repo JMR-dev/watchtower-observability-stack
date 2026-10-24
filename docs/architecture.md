@@ -94,8 +94,11 @@ endpoint `watchtower.jasonmross.dev`, which resolves to the in-tunnel address
 - **Pinned SSH host keys.** The cloud stack generates each node's host key
   and hands it over through cloud-init, so Ansible connects with strict host
   key checking from the first run, CI included.
-- **No secrets in state in plaintext.** Credentials for the providers come
-  from the environment; app secrets are passphrase-encrypted stack config.
+- **No secrets in the repo, none in plaintext in state.** Every secret lives
+  in Secret Manager (`watchtower-observe`, payloads in europe-west3) with a
+  gopass copy. The deploy workflow holds one key, reads its credentials with
+  it, and the programs read the rest while they run; what they build from
+  them is encrypted in state.
 
 ## Security layers
 
@@ -105,7 +108,7 @@ endpoint `watchtower.jasonmross.dev`, which resolves to the in-tunnel address
 | Host | nftables ruleset (no firewalld) mirroring the cloud firewall, from the same address lists, and admitting everything from the other nodes and the pods; SELinux enforcing; fail2ban (sshd, recidive); security updates nightly, reboots by kured one node at a time |
 | Cluster network | Cilium default-deny policies in every namespace we own; FQDN-scoped egress (S3, ACME, Cloud DNS, Hetzner API) |
 | Pod security | `restricted` everywhere except the edge pod (NET_ADMIN for wg0) and Fluent Bit (host logs), which run `spc_t` |
-| Credentials | One S3 key per component, fenced by bucket policies; the archive key can only write; the Hetzner token sits in fipd's namespace alone |
+| Credentials | One S3 key per component, fenced by bucket policies; the archive key can only write; the Hetzner token sits in fipd's namespace alone. Every secret in Secret Manager, read by the deployer through a grant per secret; the image job on the shared DinD runner never holds the deployer key |
 | Encryption | WireGuard (clients, and pod-to-pod between nodes), TLS on every client-facing endpoint, LUKS volumes, etcd secret encryption. Caddy reaches the backends over plain HTTP, so a hop between two pods on the same node is not encrypted |
 | WAF | Coraza with the OWASP CRS on Grafana (detection-only until tuned) |
 

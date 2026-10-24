@@ -1,5 +1,6 @@
-# Production stack. Public values only, except the access key IDs, which are
-# set with `pulumi config set --secret --path` (the repo is mirrored publicly).
+# Production stack. Public values only: the repo is mirrored publicly, and
+# every secret (the S3 access key IDs the bucket policies name included) is
+# read from Secret Manager at deploy time (scripts/secret-names.txt).
 # `pulumi stack init prod --secrets-provider passphrase` adds encryptionsalt.
 config:
   watchtower:location: nbg1
@@ -25,7 +26,6 @@ config:
   watchtower:wireguardAllowCidrs:
     - 0.0.0.0/0
     - ::/0
+  # Holds the DNS zone and the secrets.
   watchtower:gcpProject: watchtower-observe
   watchtower:dnsZone: watchtower
-  # pulumi config set --secret --path 'watchtower:s3AccessKeys.admin' <id>
-  # (and .loki, .mimir, .tempo, .logship)

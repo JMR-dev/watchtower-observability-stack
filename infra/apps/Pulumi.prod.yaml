@@ -1,8 +1,7 @@
-# Production stack. Secrets are set with `pulumi config set --secret`
-# (passphrase provider; the passphrase is 32+ random bytes, because this repo
-# is mirrored publicly). caddyImage and fipdImage are passed by the deploy
-# workflow (`-c watchtower:caddyImage=...@sha256:...`); they are not stored
-# here.
+# Production stack. Public values only: the repo is mirrored publicly, and
+# every secret the workloads get is read from Secret Manager in gcpProject at
+# deploy time (scripts/secret-names.txt). caddyImage and fipdImage are set by
+# the deploy workflow to the digests it just built; they are not committed.
 config:
   # Must match ../cloud/Pulumi.prod.yaml.
   watchtower:bucketPrefix: jmr-watchtower
@@ -12,11 +11,4 @@ config:
   watchtower:tenants:
     - slug: default
       orgName: Default
-  # Secrets (pulumi config set --secret <key> ...):
-  #   watchtower:grafanaAdminPassword
-  #   watchtower:wgEasyPassword        first-start wg-easy admin password
-  #   watchtower:caddyDnsKey           JSON key of watchtower-caddy-dns01@
-  #   watchtower:luksPassphrase        hcloud-csi volume encryption
-  #   watchtower:registryToken         Gitea token, read:package
-  #   watchtower:hcloudFipToken        Hetzner token for fipd
-  #   watchtower:s3Keys                --path s3Keys.<loki|mimir|tempo|logship>.<accessKey|secretKey>
+  watchtower:gcpProject: watchtower-observe

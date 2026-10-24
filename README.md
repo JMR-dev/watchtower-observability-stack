@@ -24,7 +24,7 @@ and Grafana, reachable only through WireGuard at the private endpoint
 | `fipd/` | The Floating IP controller: keeps the VPN address on the edge pod's node |
 | `ansible/` | Node baseline roles and the Kubespray playbooks |
 | `build/caddy/` | The edge image: Caddy + Coraza WAF + Cloud DNS DNS-01 |
-| `scripts/` | Bootstrap, key rotation, image builds, deploy verification, tenant onboarding, GDPR erasure |
+| `scripts/` | Bootstrap, secrets (`secret-names.txt` lists them all), key rotation, image builds, deploy verification, tenant onboarding, GDPR erasure |
 | `config/alloy/` | Client-side Alloy config with PII scrubbing |
 | `docs/` | Architecture, runbook, secrets, multi-tenancy, GDPR |
 
@@ -33,11 +33,14 @@ and Grafana, reachable only through WireGuard at the private endpoint
 The first deploy is in [docs/runbook.md](docs/runbook.md#first-deploy). In short:
 
 ```bash
+scripts/secret.sh put <id>            # each secret -> Secret Manager + gopass
 source scripts/env.sh                 # credentials from gopass
-scripts/bootstrap.sh                  # state bucket, DNS zone + delegation, service accounts
+scripts/bootstrap.sh                  # state bucket, DNS zone + delegation, service accounts, secret grants
+scripts/rotate-gcp-key.sh deployer    # the deploy's one GCP key -> Gitea
+scripts/secret.sh check               # nothing missing
 (cd infra && go build -o bin/cloud ./cloud && go build -o bin/apps ./apps)
-(cd infra/cloud && pulumi stack init prod --secrets-provider passphrase)   # then set config
-(cd infra/apps && pulumi stack init prod --secrets-provider passphrase)    # then set secrets
+(cd infra/cloud && pulumi stack init prod --secrets-provider passphrase)
+(cd infra/apps && pulumi stack init prod --secrets-provider passphrase)
 git push   # via a PR; merging to main runs deploy.yml
 ```
 

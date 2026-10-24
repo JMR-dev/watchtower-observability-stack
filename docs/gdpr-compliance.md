@@ -41,6 +41,7 @@ Typical bases:
 | Log archive (container logs, journals, API audit) | Hetzner Object Storage, nbg1 |
 | Pulumi state | Hetzner Object Storage, nbg1 |
 | DNS records | Google Cloud DNS (global; no personal data) |
+| Credentials (API tokens, keys, passwords) | Google Secret Manager, payloads replicated to europe-west3 only (no personal data) |
 
 ## Retention register
 
@@ -118,7 +119,7 @@ subject within one month (Art. 12(3)).
 | Volumes (WALs, databases) | LUKS2 (hcloud-csi) |
 | Kubernetes Secrets | etcd encryption at rest |
 | Object Storage at rest | Hetzner's server-side encryption |
-| Secrets in the repo | Pulumi passphrase encryption |
+| Secrets | None in the repo; Google Secret Manager (encrypted at rest), gopass locally |
 
 ## Access control & audit
 

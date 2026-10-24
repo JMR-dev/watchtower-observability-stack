@@ -3,6 +3,9 @@
 //
 // It uses the SDK's Try* readers throughout: the Require* ones panic on a
 // missing key, which ends the program without a useful message.
+//
+// It has no secret readers on purpose: secrets come from Secret Manager
+// (package gsm), never from stack config committed to a public mirror.
 package stackcfg
 
 import (
@@ -69,21 +72,6 @@ func (r *Reader) Object(key string, out any, required bool) {
 	get(r, key, struct{}{}, required, func(k string) (struct{}, error) {
 		return struct{}{}, r.c.TryObject(k, out)
 	})
-}
-
-// SecretObject decodes a required secret key into out. The decoded value is
-// plaintext in memory; callers must wrap anything derived from it with
-// pulumi.ToSecret before it reaches a resource or an export.
-func (r *Reader) SecretObject(key string, out any) {
-	get(r, key, struct{}{}, true, func(k string) (struct{}, error) {
-		_, err := r.c.TrySecretObject(k, out)
-		return struct{}{}, err
-	})
-}
-
-// Secret returns a required secret string as a secret output.
-func (r *Reader) Secret(key string) pulumi.StringOutput {
-	return get(r, key, pulumi.StringOutput{}, true, r.c.TrySecret)
 }
 
 // Fail records a validation error.

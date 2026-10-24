@@ -18,9 +18,13 @@
 #      The zone is not a Pulumi resource so `pulumi destroy` can never take
 #      DNS down.
 #   4. Creates two service accounts with grants scoped to that one zone:
-#      watchtower-dns-deployer (Pulumi writes the records) and
+#      watchtower-deployer (the deploy: Pulumi writes the records) and
 #      watchtower-caddy-dns01 (Caddy answers DNS-01). Keys are made by
 #      scripts/rotate-gcp-key.sh.
+#   5. Creates every secret in scripts/secret-names.txt in Secret Manager,
+#      empty, with its payload replicated to europe-west3 only, and lets
+#      watchtower-deployer read each one: a grant per secret, never
+#      secretAccessor on the project. Values go in with scripts/secret.sh.
 #
 # Needs: gcloud (as the owner of both GCP projects), hcloud, aws, jq, and the
 # environment scripts/env.sh exports (HCLOUD_TOKEN, AWS_ACCESS_KEY_ID /
@@ -57,7 +61,7 @@ done
 s3() { aws --endpoint-url "$S3_ENDPOINT" --region "$S3_REGION" "$@"; }
 
 # ---------------------------------------------------------------------------
-log "1/4 Hetzner leftovers (read-only)"
+log "1/5 Hetzner leftovers (read-only)"
 # ---------------------------------------------------------------------------
 for kind in server volume primary-ip floating-ip firewall ssh-key network placement-group; do
   printf -- '--- %s\n' "$kind"
@@ -78,7 +82,7 @@ for suffix in loki mimir-blocks mimir-ruler mimir-alertmanager tempo logs-archiv
 done
 
 # ---------------------------------------------------------------------------
-log "2/4 Pulumi state bucket s3://${STATE_BUCKET}"
+log "2/5 Pulumi state bucket s3://${STATE_BUCKET}"
 # ---------------------------------------------------------------------------
 if ! s3 s3api head-bucket --bucket "$STATE_BUCKET" >/dev/null 2>&1; then
   s3 s3api create-bucket --bucket "$STATE_BUCKET" >/dev/null
@@ -98,9 +102,9 @@ policy="$(jq -n --arg b "$STATE_BUCKET" --arg p "arn:aws:iam:::user/p${PROJECT_I
 s3 s3api put-bucket-policy --bucket "$STATE_BUCKET" --policy "$policy"
 
 # ---------------------------------------------------------------------------
-log "3/4 Cloud DNS zone ${ZONE} (${DOMAIN}.), delegated from ${PARENT_ZONE}"
+log "3/5 Cloud DNS zone ${ZONE} (${DOMAIN}.), delegated from ${PARENT_ZONE}"
 # ---------------------------------------------------------------------------
-gcloud services enable dns.googleapis.com iam.googleapis.com --project "$GCP_PROJECT"
+gcloud services enable dns.googleapis.com iam.googleapis.com secretmanager.googleapis.com --project "$GCP_PROJECT"
 
 shard() { tr ';,' '\n' | sed -n 's/^ns-cloud-\([a-e]\)[0-9].*/\1/p' | sort -u; }
 parent_ns="$(gcloud dns managed-zones describe "$PARENT_ZONE" --project "$PARENT_PROJECT" --format='value(nameServers)')"
@@ -145,7 +149,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-log "4/4 Service accounts, scoped to zone ${ZONE}"
+log "4/5 Service accounts, scoped to zone ${ZONE}"
 # ---------------------------------------------------------------------------
 # IAM is eventually consistent and policy writes are read-modify-write;
 # retry the errors that come from that, fail on anything else.
@@ -172,8 +176,9 @@ ensure_sa() {
     --member "serviceAccount:${email}" --role roles/dns.admin
 }
 
-ensure_sa watchtower-dns-deployer "Pulumi (infra/cloud) writes the records in ${DOMAIN}; key in the GCP_DNS_DEPLOYER_KEY Gitea secret"
-ensure_sa watchtower-caddy-dns01 "Caddy in the edge pod answers ACME DNS-01 for ${DOMAIN}; key in the apps stack config"
+DEPLOYER="watchtower-deployer@${GCP_PROJECT}.iam.gserviceaccount.com"
+ensure_sa watchtower-deployer "The deploy workflow: reads the stack's secrets and writes the records in ${DOMAIN}; key in the GCP_DEPLOYER_KEY Gitea secret"
+ensure_sa watchtower-caddy-dns01 "Caddy in the edge pod answers ACME DNS-01 for ${DOMAIN}; key in the caddy-dns-key secret"
 # googleclouddns finds its zone by LISTING the project's zones, a
 # project-level permission no zone binding confers (gitea pkg/dns/dns.go).
 # dns.reader is read-only; every write stays scoped to the zone.
@@ -181,15 +186,26 @@ retry_iam gcloud projects add-iam-policy-binding "$GCP_PROJECT" \
   --member "serviceAccount:watchtower-caddy-dns01@${GCP_PROJECT}.iam.gserviceaccount.com" \
   --role roles/dns.reader --condition None
 
+# ---------------------------------------------------------------------------
+log "5/5 Secret Manager: every secret, readable by watchtower-deployer"
+# ---------------------------------------------------------------------------
+mapfile -t secret_ids < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "${repo_root}/scripts/secret-names.txt")
+"${repo_root}/scripts/secret.sh" ensure "${secret_ids[@]}"
+for id in "${secret_ids[@]}"; do
+  retry_iam gcloud secrets add-iam-policy-binding "$id" --project "$GCP_PROJECT" \
+    --member "serviceAccount:${DEPLOYER}" --role roles/secretmanager.secretAccessor
+done
+
 cat <<EOF
 
 Done.
   State bucket : s3://${STATE_BUCKET} (admin key only)
   DNS          : zone ${ZONE} (${DOMAIN}.), delegated from ${PARENT_ZONE} in ${PARENT_PROJECT}
+  Secrets      : ${#secret_ids[@]} in ${GCP_PROJECT}, each readable by ${DEPLOYER}
 
 Next (docs/runbook.md, "First deploy"):
   1. dig +short NS ${DOMAIN}
-  2. scripts/rotate-gcp-key.sh deployer    # Gitea secret GCP_DNS_DEPLOYER_KEY
-  3. Initialise both stacks and set the apps secrets, then
-     scripts/rotate-gcp-key.sh caddy       # apps config watchtower:caddyDnsKey
+  2. scripts/rotate-gcp-key.sh deployer    # Gitea secret GCP_DEPLOYER_KEY
+     scripts/rotate-gcp-key.sh caddy       # secret caddy-dns-key
+  3. scripts/secret.sh check               # every secret has a value
 EOF

@@ -1,7 +1,7 @@
 name: Toolchain + credentials
 description: |
   Installs pinned, checksum-verified tools and, optionally, writes the GCP
-  and SSH keys a job needs to files under $RUNNER_TEMP.
+  key and reads the secrets a job needs from Secret Manager.
 
   Every download is pinned and verified against a hard-coded SHA-256; bumping
   a tool means changing its version AND hash together. Sources of the hashes:
@@ -21,22 +21,35 @@ description: |
                 (the project publishes no checksum file)
     awscli      computed from the official zip on 2026-10-23 (AWS publishes
                 a PGP signature, no checksum)
+    gcloud      computed from the official tarball on 2026-10-24 (Google
+                publishes no checksum for the current release)
   The Ansible tools come from pip at the versions ansible/requirements.txt
   pins (Kubespray's own pins).
+
+  Secrets: every line of `secrets` is NAME=id or @NAME=id, an id from
+  scripts/secret-names.txt. NAME=id exports the value as NAME (one line
+  only); @NAME=id writes it to a 0600 file and exports its path as NAME (for
+  key files). Every line of every value is masked in the log first. Reading
+  needs `gcp-key` and installs gcloud.
 
   Composite actions have no post step, so a job that passes a key must end
   with the cleanup step shown in deploy.yml (`if: always()`).
 
 inputs:
   tools:
-    description: Space-separated subset of "go pulumi helm kubectl kubeconform kube-apiserver etcd alloy shellcheck awscli ansible"
-    required: true
-  gcp-key:
-    description: JSON key of watchtower-dns-deployer@ (secrets.GCP_DNS_DEPLOYER_KEY). Omit for none.
+    description: Space-separated subset of "go pulumi helm kubectl kubeconform kube-apiserver etcd alloy shellcheck awscli ansible gcloud"
     required: false
     default: ""
-  ssh-key:
-    description: Private key for root on the nodes (secrets.SSH_PRIVATE_KEY). Omit for none.
+  gcp-key:
+    description: JSON key of watchtower-deployer@ (secrets.GCP_DEPLOYER_KEY). Omit for none.
+    required: false
+    default: ""
+  gcp-project:
+    description: Project holding the secrets.
+    required: false
+    default: watchtower-observe
+  secrets:
+    description: NAME=id or @NAME=id lines; see above. Omit for none.
     required: false
     default: ""
 
@@ -47,6 +60,7 @@ runs:
       shell: bash
       env:
         TOOLS: ${{ inputs.tools }}
+        SECRETS: ${{ inputs.secrets }}
         GO_VERSION: "1.27.3"
         GO_SHA256: 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
         PULUMI_VERSION: "3.272.0"
@@ -69,8 +83,14 @@ runs:
         SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
         AWSCLI_VERSION: "2.38.5"
         AWSCLI_SHA256: 5def7d1b7e55d892f9a381bb2cb2081a685712464be0d36d5d706af0ac48d0d3
+        GCLOUD_VERSION: "590.0.1"
+        GCLOUD_SHA256: d1ae7be7e12c4e7d8286fab4774f5441020aca89dc7793ddacbace8d11d20f06
       run: |
         set -euo pipefail
+        # Reading secrets needs gcloud.
+        if [[ -n "${SECRETS//[[:space:]]/}" && " $TOOLS " != *" gcloud "* ]]; then
+          TOOLS+=" gcloud"
+        fi
         tools_dir="${RUNNER_TEMP}/tools"
         bin="${tools_dir}/bin"
         mkdir -p "$bin"
@@ -156,6 +176,19 @@ runs:
               unzip -q -o "${tools_dir}/awscli.zip" -d "$tools_dir"
               "${tools_dir}/aws/install" --install-dir "${tools_dir}/aws-cli" --bin-dir "$bin" >/dev/null
               ;;
+            gcloud)
+              fetch "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-${GCLOUD_VERSION}-linux-x86_64.tar.gz" \
+                "$GCLOUD_SHA256" "${tools_dir}/gcloud.tgz"
+              tar -C "$tools_dir" -xzf "${tools_dir}/gcloud.tgz"
+              echo "${tools_dir}/google-cloud-sdk/bin" >>"$GITHUB_PATH"
+              # Config (and any credential gcloud caches) under RUNNER_TEMP,
+              # never the job's HOME.
+              {
+                echo "CLOUDSDK_CONFIG=${RUNNER_TEMP}/gcloud"
+                echo "CLOUDSDK_CORE_DISABLE_PROMPTS=1"
+                echo "CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=1"
+              } >>"$GITHUB_ENV"
+              ;;
             ansible)
               python3 -m venv "${tools_dir}/ansible"
               "${tools_dir}/ansible/bin/pip" install -q -r ansible/requirements.txt ansible-lint==26.10.1
@@ -176,17 +209,51 @@ runs:
       run: |
         set -euo pipefail
         umask 077
-        printf '%s' "$KEY" >"${RUNNER_TEMP}/gcp-dns-deployer.json"
-        echo "GOOGLE_APPLICATION_CREDENTIALS=${RUNNER_TEMP}/gcp-dns-deployer.json" >>"$GITHUB_ENV"
+        printf '%s' "$KEY" >"${RUNNER_TEMP}/gcp-deployer.json"
+        echo "GOOGLE_APPLICATION_CREDENTIALS=${RUNNER_TEMP}/gcp-deployer.json" >>"$GITHUB_ENV"
 
-    - name: Write the SSH key
-      if: inputs.ssh-key != ''
+    - name: Read secrets from Secret Manager
+      if: inputs.secrets != ''
       shell: bash
       env:
-        KEY: ${{ inputs.ssh-key }}
+        SECRETS: ${{ inputs.secrets }}
+        PROJECT: ${{ inputs.gcp-project }}
       run: |
         set -euo pipefail
+        key="${RUNNER_TEMP}/gcp-deployer.json"
+        [[ -s "$key" ]] || { echo "reading secrets needs gcp-key" >&2; exit 1; }
+        # By path and with its environment spelled out: what earlier steps
+        # of this action wrote to GITHUB_PATH and GITHUB_ENV is not relied on.
+        gcloud="${RUNNER_TEMP}/tools/google-cloud-sdk/bin/gcloud"
+        export CLOUDSDK_CONFIG="${RUNNER_TEMP}/gcloud" CLOUDSDK_CORE_DISABLE_PROMPTS=1 \
+          CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$key"
         umask 077
-        mkdir -p "${RUNNER_TEMP}/ssh"
-        printf '%s\n' "$KEY" >"${RUNNER_TEMP}/ssh/id_ed25519"
-        echo "ANSIBLE_PRIVATE_KEY_FILE=${RUNNER_TEMP}/ssh/id_ed25519" >>"$GITHUB_ENV"
+        dir="${RUNNER_TEMP}/secrets"
+        mkdir -p "$dir"
+        while read -r line; do
+          [[ -n "$line" ]] || continue
+          if [[ ! "$line" =~ ^(@?)([A-Z][A-Z0-9_]*)=([a-z0-9-]+)$ ]]; then
+            echo "bad secrets line: ${line}" >&2
+            exit 1
+          fi
+          as_file="${BASH_REMATCH[1]}" name="${BASH_REMATCH[2]}" id="${BASH_REMATCH[3]}"
+          file="${dir}/${id}"
+          "$gcloud" secrets versions access latest --secret "$id" --project "$PROJECT" --out-file "$file"
+          # Masked before anything could print it.
+          while IFS= read -r l || [[ -n "$l" ]]; do
+            l="${l%$'\r'}"
+            [[ -z "$l" ]] || echo "::add-mask::${l}"
+          done <"$file"
+          if [[ -n "$as_file" ]]; then
+            echo "${name}=${file}" >>"$GITHUB_ENV"
+            continue
+          fi
+          value="$(cat "$file")"
+          value="${value%$'\r'}"
+          rm -f "$file"
+          if [[ -z "$value" || "$value" == *$'\n'* ]]; then
+            echo "${id} is empty or more than one line; read a key file as @${name}=${id}" >&2
+            exit 1
+          fi
+          echo "${name}=${value}" >>"$GITHUB_ENV"
+        done <<<"$SECRETS"

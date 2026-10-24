@@ -4,17 +4,16 @@
 #
 #   source scripts/env.sh
 #
-# CI gets the same values from the repo's Actions secrets instead.
-# gopass paths (create them once; docs/required-secrets.md):
-#   watchtower/hcloud-token          Hetzner API token (Pulumi)
-#   watchtower/hcloud-ccm-token      Hetzner API token (cloud-controller-manager)
-#   watchtower/s3-admin-access-key   Hetzner S3 admin key
-#   watchtower/s3-admin-secret-key
-#   watchtower/pulumi-passphrase     32+ random bytes
-#   watchtower/gcp-dns-deployer-key  JSON key of watchtower-dns-deployer@
-#   watchtower/ssh-private-key       ed25519 key for root on the nodes
+# gopass holds the local copy of every secret as watchtower/<id>, with the
+# same ids as Secret Manager (scripts/secret-names.txt; scripts/secret.sh put
+# writes both). CI reads the same values from Secret Manager instead. One
+# entry exists only here and in Gitea: watchtower/gcp-deployer-key, the JSON
+# key of watchtower-deployer@ (scripts/rotate-gcp-key.sh deployer), which
+# Pulumi uses to read the rest.
 
+# -o prints only an entry's first line; -n prints all of it, for key files.
 _wt_get() { gopass show -o "watchtower/$1"; }
+_wt_file() { gopass show -n "watchtower/$1"; }
 
 if ! gopass ls watchtower >/dev/null 2>&1; then
   echo "gopass is locked or has no watchtower/ entries; unlock it and retry" >&2
@@ -33,13 +32,17 @@ export MINIO_USER="$AWS_ACCESS_KEY_ID" MINIO_PASSWORD="$AWS_SECRET_ACCESS_KEY"
 
 _wt_dir="${XDG_RUNTIME_DIR:-/tmp}/watchtower-$UID"
 mkdir -p "$_wt_dir" && chmod 0700 "$_wt_dir"
-(umask 077 && _wt_get gcp-dns-deployer-key >"$_wt_dir/gcp-dns-deployer.json")
-export GOOGLE_APPLICATION_CREDENTIALS="$_wt_dir/gcp-dns-deployer.json"
+if (umask 077 && _wt_file gcp-deployer-key >"$_wt_dir/gcp-deployer.json" 2>/dev/null); then
+  export GOOGLE_APPLICATION_CREDENTIALS="$_wt_dir/gcp-deployer.json"
+else
+  rm -f "$_wt_dir/gcp-deployer.json"
+  echo "no watchtower/gcp-deployer-key yet (scripts/rotate-gcp-key.sh deployer); pulumi can't read secrets until it exists" >&2
+fi
 
 if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
-  _wt_get ssh-private-key | ssh-add - >/dev/null 2>&1 || echo "could not add the node SSH key to ssh-agent" >&2
+  _wt_file ssh-private-key | ssh-add - >/dev/null 2>&1 || echo "could not add the node SSH key to ssh-agent" >&2
 fi
 
 export KUBECONFIG="${KUBECONFIG_OUT:-$HOME/.kube/watchtower}"
-unset -f _wt_get
+unset -f _wt_get _wt_file
 unset _wt_dir
