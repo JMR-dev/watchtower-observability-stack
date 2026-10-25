@@ -6,7 +6,7 @@ Tenant isolation is enforced at two layers:
 1. **Storage** — Mimir, Loki and Tempo route every read and write by the
    `X-Scope-OrgID` header. Each tenant has a unique slug.
 2. **Grafana** — the main org has one datasource set per tenant
-   (`watchtower:tenants` in `infra/apps/Pulumi.prod.yaml`), and
+   (`watchtower_tenants` in `ansible/inventory/group_vars/all/tenants.yml`), and
    `scripts/onboard-tenant.sh` gives a tenant an org of its own whose
    datasources send only its header.
 
@@ -22,14 +22,16 @@ there.
 
 ## Onboarding
 
-1. Add the tenant to `watchtower:tenants` in `infra/apps/Pulumi.prod.yaml`
-   and merge (the main org's datasources).
+1. Add the tenant (`slug`, `org_name`) to `watchtower_tenants` in
+   `ansible/inventory/group_vars/all/tenants.yml` and merge (the main org's
+   datasources).
 2. From a WireGuard peer:
    ```bash
    scripts/onboard-tenant.sh team-alpha 'Team Alpha'
    ```
    This creates the Grafana org "Team Alpha" with Mimir, Loki and Tempo
-   datasources that send `X-Scope-OrgID: team-alpha`.
+   datasources that send `X-Scope-OrgID: team-alpha`. The three Grafanas
+   share one database, so one call reaches all of them.
 3. Add a WireGuard peer for each of the tenant's hosts (wg-easy UI) and hand
    over `config/alloy/config.alloy.example` with `TENANT_SLUG` replaced.
 
@@ -62,13 +64,17 @@ loki.write "default" {
    `scripts/gdpr-purge.sh team-alpha '{job=~".+"}' 2020-01-01T00:00:00Z`
 2. Revoke the tenant's WireGuard peers in wg-easy and stop their Alloy.
 3. Delete the tenant's Grafana org (Grafana API or UI), and remove it from
-   `watchtower:tenants`.
+   `watchtower_tenants`.
 4. Mimir and Tempo have no per-tenant delete: their data ages out after 90
    and 30 days.
 
 ## Per-tenant overrides
 
-- **Mimir**: the `runtime.yaml` key of the `mimir-config` ConfigMap
-  (`infra/apps/mimir.go`) is hot-reloaded; add `overrides: {<tenant>: {...}}`.
-- **Loki**: `loki.runtimeConfig` in `infra/apps/values/loki.yaml`.
-- **Tempo**: `tempo.per_tenant_overrides` in `infra/apps/values/tempo.yaml`.
+All through the roles and a deploy:
+
+- **Mimir**: `ansible/roles/mimir/templates/runtime.yaml.j2`, which Mimir
+  rereads without a restart; add `overrides: {<tenant>: {...}}`.
+- **Loki**: `limits_config` in `ansible/roles/loki/templates/loki.yaml.j2` for
+  everyone; for one tenant, add a `runtime_config` file the same way Mimir's
+  is done.
+- **Tempo**: `overrides` in `ansible/roles/tempo/templates/tempo.yaml.j2`.

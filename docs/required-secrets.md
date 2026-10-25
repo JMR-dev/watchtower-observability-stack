@@ -24,24 +24,25 @@ scripts/secret.sh check
 
 ## Who reads what
 
-- **The deploy workflow** has one Actions secret, `GCP_DEPLOYER_KEY`, a JSON
-  key of `watchtower-deployer@watchtower-observe`. Each job's setup step uses
-  it to read that job's secrets from Secret Manager into masked environment
-  variables. The Pulumi programs read theirs with the same key while they
-  run.
-- `watchtower-deployer@` can read each listed secret through a grant on that
-  secret, never `secretAccessor` on the project. It also has `dns.admin` on
-  the one zone, so the cloud stack can write its records.
-- **The image job** is the one exception. It runs on the shared DinD runner,
-  where jobs can see each other's credentials, so it never gets the
-  deployer key. It gets only the push token, as the Actions secret
-  `REGISTRY_TOKEN`, copied from Secret Manager with
-  `scripts/secret.sh gitea registry-push-token REGISTRY_TOKEN`.
-- **The cluster** never touches Google: the apps program turns what it read
-  into Kubernetes Secrets, which are encrypted in Pulumi state and in etcd.
-
-A new version reaches the cluster on the next deploy: push to main, or
-dispatch `deploy` with `kubespray=skip`.
+- **The deploy workflow** has one Actions secret for Secret Manager,
+  `GCP_DEPLOYER_KEY`, a JSON key of `watchtower-deployer@watchtower-observe`.
+  The cloud and hosts jobs' setup step uses it to read that job's secrets
+  into masked environment variables (key files as 0600 files). The Pulumi
+  program reads the access key IDs for its bucket policies with the same
+  key while it runs.
+- `watchtower-deployer@` can read each listed secret but `gar-push-key`,
+  through a grant on that secret, never `secretAccessor` on the project. It
+  also has `dns.admin` on the one zone, so the cloud stack can write its
+  records.
+- **The image jobs** run on the shared DinD runners, where jobs can see
+  each other's credentials, so they never get the deployer key. They get
+  only `GAR_PUSH_KEY`, which can push to the one Artifact Registry repo,
+  copied from Secret Manager by `scripts/rotate-gcp-key.sh pusher`.
+- **The hosts** get theirs from Ansible, as podman secrets (root-only, out
+  of unit files and container listings): the cluster S3 key, the LUKS key,
+  the pull key, Grafana's, Postgres's and Patroni's passwords, wg-easy's
+  first-start password and Caddy's DNS-01 key. A new value reaches them on
+  the next deploy, and only the containers that use it restart.
 
 Why a long-lived key: the Gitea runner cluster keeps Actions jobs away from
 GKE Workload Identity on purpose (instance-wide runners, metadata server
@@ -54,53 +55,55 @@ every 90 days.
 | Secret | Local copy | Notes |
 |---|---|---|
 | `GCP_DEPLOYER_KEY` | gopass `watchtower/gcp-deployer-key` | Not in Secret Manager: it is the key to it. `scripts/rotate-gcp-key.sh deployer` creates it, stores it in both places and deletes older keys |
-| `REGISTRY_TOKEN` | Secret Manager and gopass `registry-push-token` | Gitea token, `write:package`; `scripts/secret.sh gitea registry-push-token REGISTRY_TOKEN` |
+| `GAR_PUSH_KEY` | Secret Manager and gopass `gar-push-key` | JSON key of `watchtower-image-pusher@`, writer on the `watchtower` repo only; `scripts/rotate-gcp-key.sh pusher` |
 
 ## Secret Manager (and gopass)
 
-### Read by the deploy workflow
+### Read by the cloud job
 
 | Id | What | Used by |
 |---|---|---|
-| `pulumi-passphrase` | At least 32 random bytes (`openssl rand -base64 48`) | Both stacks' state encryption |
-| `s3-admin-access-key`, `s3-admin-secret-key` | Hetzner S3 credential `admin` | Pulumi backend, MinIO provider, `verify.sh`; the only key the state bucket admits. The cloud program also reads the access key ID for the bucket policies |
-| `hcloud-token` | Hetzner API token, read/write | Pulumi `cloud`, `verify.sh` |
-| `hcloud-ccm-token` | Hetzner API token, read/write; separate so it can be rotated alone | Kubespray → `kube-system/hcloud` (CCM and hcloud-csi) |
-| `ssh-private-key` | ed25519, root on the nodes (public half: `watchtower:sshPublicKey`) | Ansible |
-| `registry-push-token` | Gitea token, `write:package` | Copied to the `REGISTRY_TOKEN` Actions secret |
+| `pulumi-passphrase` | At least 32 random bytes (`openssl rand -base64 48`) | The stack's state encryption |
+| `hcloud-token` | Hetzner API token, read/write (Hetzner tokens are project-wide) | Pulumi |
+| `s3-admin-access-key`, `s3-admin-secret-key` | Hetzner S3 credential `admin` | Pulumi backend, MinIO provider, `verify.sh`; the only key the state bucket admits |
 
-### Read by the apps program
+### Read by the hosts job, installed on the hosts
 
 | Id | What |
 |---|---|
+| `ssh-private-key` | ed25519, root on the hosts (public half: `watchtower:sshPublicKey`); Ansible connects with it |
+| `s3-cluster-access-key`, `s3-cluster-secret-key` | Hetzner S3 credential `cluster`: Loki, Mimir, Tempo and Fluent Bit. The cloud program reads the access key ID too, for the bucket policies |
+| `luks-passphrase` | Encrypts every host's data volume. **Losing it loses the volumes' data** |
+| `gar-pull-key` | JSON key of `watchtower-image-puller@`, reader on the `watchtower` repo; the hosts pull Caddy and Patroni with it. `scripts/rotate-gcp-key.sh puller` |
 | `grafana-admin-password` | Grafana's `admin`; `scripts/onboard-tenant.sh` reads the gopass copy |
+| `grafana-secret-key` | The same on all three Grafanas: it encrypts datasource secrets in the shared database |
+| `grafana-db-password` | Grafana's Postgres role |
+| `postgres-superuser-password`, `postgres-replication-password` | Patroni's `postgres` and `replicator` |
+| `patroni-restapi-password` | Patroni's REST API (switchover, restart) |
 | `wg-easy-password` | wg-easy's first-start admin password |
 | `caddy-dns-key` | JSON key of `watchtower-caddy-dns01@` (DNS-01); `scripts/rotate-gcp-key.sh caddy` |
-| `luks-passphrase` | Encrypts every hcloud-csi volume. **Losing it loses the volumes' data** |
-| `registry-pull-token` | Gitea token, `read:package`, for image pulls |
-| `hcloud-fip-token` | Hetzner token for fipd only |
-| `s3-{loki,mimir,tempo,logship}-access-key` | Each component's S3 key ID. The cloud program reads these too, for the bucket policies |
-| `s3-{loki,mimir,tempo,logship}-secret-key` | Its secret |
+
+### Owner only
+
+| Id | What |
+|---|---|
+| `gar-push-key` | The `GAR_PUSH_KEY` Actions secret's source. Never granted to the deployer, so a leaked deployer key can't push images |
 
 ## Stack config
 
-Both `Pulumi.prod.yaml` files hold public values only, and a test fails if
-either gains a `secure:` value. `watchtower:caddyImage` and
-`watchtower:fipdImage` are not committed: `deploy.yml` sets them to the
-digests it just built.
+`infra/cloud/Pulumi.prod.yaml` holds public values only, and a test fails if
+it gains a `secure:` value.
 
 ## What each S3 key can reach
 
 Bucket policies (Hetzner's `p<project>:<key>` principals) deny every key but
-the admin key and the bucket's own:
+the admin key and the cluster key:
 
-| Bucket | Admin | loki | mimir | tempo | logship |
-|---|---|---|---|---|---|
-| `-pulumi-state` | ✓ | | | | |
-| `-loki` | ✓ | ✓ | | | |
-| `-mimir-blocks`, `-mimir-ruler`, `-mimir-alertmanager` | ✓ | | ✓ | | |
-| `-tempo` | ✓ | | | ✓ | |
-| `-logs-archive` | ✓ | | | | write only, not `gdpr-audit/` |
+| Bucket | Admin | Cluster |
+|---|---|---|
+| `-pulumi-state` | ✓ | |
+| `-loki`, `-mimir-blocks`, `-mimir-ruler`, `-mimir-alertmanager`, `-tempo` | ✓ | ✓ |
+| `-logs-archive` | ✓ | write only, not `gdpr-audit/` |
 
 A side effect: the Hetzner Console can no longer list these buckets'
 objects. Use the admin key with `aws s3`.

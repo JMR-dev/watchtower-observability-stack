@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 #
-# Caddy for the edge pod, built with xcaddy:
+# Caddy for the proxy (amd64), built with xcaddy:
 #   - coraza-caddy + the OWASP Core Rule Set, embedded at build time (WAF);
 #   - caddy-dns/googleclouddns, for ACME DNS-01 against the Cloud DNS zone
 #     watchtower.jasonmross.dev (the endpoint is private, so HTTP-01 cannot
 #     work).
 # The runtime image ships only the binary and CA certificates, and runs as
-# UID 1000. scripts/build-caddy.sh builds it, validates the Caddyfile with it
-# and scans it with Trivy.
+# UID 1000. scripts/build-image.sh builds it, validates the proxy's rendered
+# Caddyfile with it and scans it with Trivy.
 #
 # Base images are pinned by digest; bump the tag and digest together.
 
