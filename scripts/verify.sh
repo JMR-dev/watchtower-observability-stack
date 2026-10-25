@@ -1,133 +1,136 @@
 #!/usr/bin/env bash
-# Prove a deploy worked; deploy.yml's last job. Fails unless:
-#   1. every workload finished rolling out;
-#   2. Loki, Mimir, Tempo and Grafana report ready;
-#   3. a log line pushed through Loki's distributor can be queried back;
-#   4. the edge pod runs the Caddy image this deploy built (by digest);
-#   5. the VPN Floating IP is routed to the edge pod's node;
+# Prove a deploy worked; the hosts job's last step. Fails unless:
+#   1. Grafana, Loki, Mimir and Tempo answer through Caddy on the tunnel
+#      address, over TLS with a valid certificate for the domain;
+#   2. a log line pushed through Caddy comes back from a Loki query;
+#   3. an OTLP span pushed through Caddy comes back from Tempo;
+#   4. the proxy runs the Caddy image this deploy built (by digest);
+#   5. the clusters are whole: Loki's and Mimir's ingester rings have every
+#      node ACTIVE, Kafka has no under-replicated partition, Patroni has a
+#      leader and every replica streaming;
 #   6. Fluent Bit has written today's container logs to the archive.
 #
 #   scripts/verify.sh <caddy-image-digest> <logs-archive-bucket>
 #
-# Needs: kubectl (KUBECONFIG), curl, jq, aws (admin S3 key in AWS_*),
-# HCLOUD_TOKEN.
+# Runs from the deploy runner over SSH, with the inventory and pinned host
+# keys the job wrote (ansible/inventory/{hosts.yml,known_hosts}) and the key
+# in ANSIBLE_PRIVATE_KEY_FILE. The checks through Caddy run on the proxy
+# itself, against 10.8.0.1, so they cover TLS, Caddy's routing and every
+# backend without a VPN peer. Needs: ssh, jq, aws (admin S3 key in AWS_*).
 
 set -euo pipefail
 
 [[ $# -eq 2 ]] || { echo "usage: $0 <caddy-image-digest> <logs-archive-bucket>" >&2; exit 1; }
 want_digest="$1" archive="$2"
-S3_ENDPOINT="https://nbg1.your-objectstorage.com"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+inv="${repo_root}/ansible/inventory/hosts.yml"
+known="${repo_root}/ansible/inventory/known_hosts"
 
 log() { printf '==> %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-work="$(mktemp -d)"
-pids=()
-cleanup() {
-  for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
-  rm -rf "$work"
+var() { jq -r ".all.vars.$1" "$inv"; }
+host() { jq -r ".all.children.$1.hosts | to_entries[$2].value.$3" "$inv"; }
+domain="$(var watchtower_domain)"
+tunnel="$(var watchtower_tunnel_ip)"
+s3="https://$(var watchtower_s3_endpoint)"
+region="$(var watchtower_s3_region)"
+proxy_ip="$(host proxy 0 ansible_host)"
+node_ip="$(host nodes 0 ansible_host)"
+node_mesh="$(host nodes 0 mesh_ip)"
+nodes="$(jq '.all.children.nodes.hosts | length' "$inv")"
+
+on() { # public-ip command: run on a host as root
+  local ip=$1
+  shift
+  ssh -i "${ANSIBLE_PRIVATE_KEY_FILE:?}" -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known" "root@${ip}" "$@"
 }
-trap cleanup EXIT
+# edge <port> <curl args...>: a request to the domain through Caddy, from the
+# proxy. --resolve pins the name to the tunnel address; TLS is verified.
+edge() {
+  local port=$1
+  shift
+  on "$proxy_ip" curl -fsS --max-time 20 --resolve "${domain}:${port}:${tunnel}" "$@"
+}
+retry() { # tries delay command...: until it succeeds
+  local tries=$1 delay=$2 i
+  shift 2
+  for ((i = 1; i <= tries; i++)); do
+    "$@" >/dev/null 2>&1 && return 0
+    sleep "$delay"
+  done
+  return 1
+}
 
 # ---------------------------------------------------------------------------
-log "1/6 rollouts"
-for ns in kube-system watchtower watchtower-edge watchtower-fip logging; do
-  for kind in deployment statefulset daemonset; do
-    while read -r name; do
-      [[ -n "$name" ]] || continue
-      kubectl -n "$ns" rollout status "$kind/$name" --timeout=15m
-    done < <(kubectl -n "$ns" get "$kind" -o name 2>/dev/null | sed 's|.*/||')
-  done
+log "1/6 every endpoint through Caddy, over TLS"
+# The first deploy waits on the certificate (DNS-01 propagation).
+for check in "443 /api/health Grafana" "3100 /ready Loki" "8080 /ready Mimir" "3200 /ready Tempo"; do
+  read -r port path name <<<"$check"
+  retry 40 15 edge "$port" "https://${domain}:${port}${path}" || fail "${name} not ready through Caddy on :${port}"
+  echo "    ${name} ready"
 done
 
 # ---------------------------------------------------------------------------
-log "2/6 readiness"
-ready() { # namespace service port path
-  for _ in $(seq 1 30); do
-    if kubectl get --raw "/api/v1/namespaces/$1/services/http:$2:$3/proxy$4" >/dev/null 2>&1; then
-      echo "    $2 ready"
-      return 0
-    fi
-    sleep 10
-  done
-  fail "$2 not ready after 5 minutes"
-}
-ready watchtower loki-query-frontend 3100 /ready
-ready watchtower loki-distributor 3100 /ready
-ready watchtower mimir 8080 /ready
-ready watchtower tempo 3200 /ready
-ready watchtower grafana 80 /api/health
-
-# ---------------------------------------------------------------------------
-log "3/6 end-to-end log push and query"
-forward() { # service local-port remote-port
-  kubectl -n watchtower port-forward "svc/$1" "$2:$3" >"$work/pf-$1.log" 2>&1 &
-  pids+=("$!")
-}
-forward loki-distributor 13100 3100
-forward loki-query-frontend 13101 3100
-sleep 3
+log "2/6 end-to-end log push and query"
 marker="deploy-verify-${GITHUB_SHA:-local}-$(date +%s)"
 now_ns="$(date +%s%N)"
-jq -n --arg ts "$now_ns" --arg line "$marker" \
-  '{streams: [{stream: {job: "deploy-verify"}, values: [[$ts, $line]]}]}' >"$work/push.json"
-curl -fsS -X POST -H 'Content-Type: application/json' -H 'X-Scope-OrgID: watchtower-smoke' \
-  --data @"$work/push.json" http://127.0.0.1:13100/loki/api/v1/push \
-  || fail "push to the distributor was rejected"
-found=""
-for _ in $(seq 1 24); do
-  if curl -fsS -G -H 'X-Scope-OrgID: watchtower-smoke' http://127.0.0.1:13101/loki/api/v1/query_range \
-      --data-urlencode "query={job=\"deploy-verify\"} |= \"${marker}\"" \
-      --data-urlencode "start=$((now_ns - 60000000000))" \
-      | jq -e '.data.result | length > 0' >/dev/null 2>&1; then
-    found=yes
-    break
-  fi
-  sleep 5
-done
-[[ -n "$found" ]] || fail "pushed log line never came back from a query"
+push="$(jq -cn --arg ts "$now_ns" --arg line "$marker" \
+  '{streams: [{stream: {job: "deploy-verify"}, values: [[$ts, $line]]}]}')"
+edge 3100 -X POST -H 'Content-Type: application/json' -H 'X-Scope-OrgID: watchtower-smoke' \
+  --data "$push" "https://${domain}:3100/loki/api/v1/push" >/dev/null || fail "Loki rejected the push"
+loki_found() {
+  edge 3100 -G -H 'X-Scope-OrgID: watchtower-smoke' "https://${domain}:3100/loki/api/v1/query_range" \
+    --data-urlencode "query={job=\"deploy-verify\"} |= \"${marker}\"" \
+    --data-urlencode "start=$((now_ns - 60000000000))" | jq -e '.data.result | length > 0'
+}
+retry 24 5 loki_found || fail "the pushed log line never came back from a query"
 echo "    pushed and read back ${marker}"
 
 # ---------------------------------------------------------------------------
-log "4/6 edge image"
-edge_pod="$(kubectl -n watchtower-edge get pod -l app.kubernetes.io/name=edge \
-  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')"
-[[ -n "$edge_pod" ]] || fail "no running edge pod"
-image_id="$(kubectl -n watchtower-edge get pod "$edge_pod" \
-  -o jsonpath='{.status.containerStatuses[?(@.name=="caddy")].imageID}')"
-[[ "$image_id" == *"$want_digest" ]] || fail "edge runs ${image_id}, not ${want_digest}"
+log "3/6 end-to-end trace push and query"
+trace_id="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+span_id="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+span="$(jq -cn --arg t "$trace_id" --arg s "$span_id" --arg now "$now_ns" '{resourceSpans: [{
+  resource: {attributes: [{key: "service.name", value: {stringValue: "deploy-verify"}}]},
+  scopeSpans: [{spans: [{traceId: $t, spanId: $s, name: "verify", kind: 1,
+    startTimeUnixNano: $now, endTimeUnixNano: (($now | tonumber) + 1000000 | tostring)}]}]}]}')"
+edge 4318 -X POST -H 'Content-Type: application/json' -H 'X-Scope-OrgID: watchtower-smoke' \
+  --data "$span" "https://${domain}:4318/v1/traces" >/dev/null || fail "Tempo rejected the span"
+retry 24 5 edge 3200 -H 'X-Scope-OrgID: watchtower-smoke' "https://${domain}:3200/api/v2/traces/${trace_id}" \
+  || fail "trace ${trace_id} never came back from Tempo"
+echo "    pushed and read back trace ${trace_id}"
+
+# ---------------------------------------------------------------------------
+log "4/6 Caddy image"
+running="$(on "$proxy_ip" podman inspect caddy --format '{{.ImageDigest}}')"
+[[ "$running" == "$want_digest" ]] || fail "the proxy runs ${running}, not ${want_digest}"
 echo "    caddy is ${want_digest}"
 
 # ---------------------------------------------------------------------------
-log "5/6 floating IP follows the edge pod"
-edge_node="$(kubectl -n watchtower-edge get pod "$edge_pod" -o jsonpath='{.spec.nodeName}')"
-want_server="$(kubectl get node "$edge_node" -o jsonpath='{.spec.providerID}' | sed 's|^hcloud://||')"
-printf 'Authorization: Bearer %s\n' "$HCLOUD_TOKEN" >"$work/hcloud-header"
-assigned=""
-# fipd reconciles every 10s; give it a minute after the rollout.
-for _ in $(seq 1 12); do
-  assigned="$(curl -fsS -H @"$work/hcloud-header" \
-    'https://api.hetzner.cloud/v1/floating_ips?label_selector=role%3Dwatchtower-vpn' \
-    | jq -r '.floating_ips[0].server // empty')"
-  [[ "$assigned" == "$want_server" ]] && break
-  sleep 5
-done
-[[ "$assigned" == "$want_server" ]] || fail "floating IP is on server ${assigned:-none}, edge runs on ${edge_node} (${want_server})"
-echo "    floating IP on ${edge_node}"
+log "5/6 the clusters are whole"
+active() { # url: ACTIVE members of a dskit ring
+  on "$node_ip" curl -fsS --max-time 10 -H 'Accept: application/json' "$1" \
+    | jq '[.shards[] | select(.state == "ACTIVE")] | length'
+}
+[[ "$(active "http://${node_mesh}:3100/ring")" == "$nodes" ]] || fail "Loki's ingester ring is missing a node"
+[[ "$(active "http://${node_mesh}:8080/ingester/ring")" == "$nodes" ]] || fail "Mimir's ingester ring is missing a node"
+under="$(on "$node_ip" podman exec kafka /opt/kafka/bin/kafka-topics.sh \
+  "--bootstrap-server=${node_mesh}:9092" --describe --under-replicated-partitions)"
+[[ -z "$under" ]] || fail "Kafka has under-replicated partitions: ${under}"
+cluster="$(on "$node_ip" curl -fsS --max-time 10 "http://${node_mesh}:8008/cluster")"
+jq -e --argjson n "$nodes" '([.members[] | select(.role == "leader")] | length) == 1
+  and ([.members[] | select(.state == "running" or .state == "streaming")] | length) == $n' \
+  <<<"$cluster" >/dev/null || fail "Patroni is not a leader with every replica streaming: ${cluster}"
+echo "    rings ACTIVE on ${nodes} nodes, Kafka fully replicated, Patroni healthy"
 
 # ---------------------------------------------------------------------------
 log "6/6 log archive"
 prefix="containers/$(date -u +%Y/%m/%d)/"
-archived=""
+archived() { aws --endpoint-url "$s3" --region "$region" s3 ls "s3://${archive}/${prefix}" --recursive | grep -q .; }
 # Fluent Bit uploads every 5 minutes (upload_timeout); wait up to 8.
-for _ in $(seq 1 16); do
-  if aws --endpoint-url "$S3_ENDPOINT" --region nbg1 s3 ls "s3://${archive}/${prefix}" --recursive | grep -q .; then
-    archived=yes
-    break
-  fi
-  sleep 30
-done
-[[ -n "$archived" ]] || fail "nothing under s3://${archive}/${prefix} yet"
+retry 16 30 archived || fail "nothing under s3://${archive}/${prefix} yet"
 echo "    container logs are being archived"
 
 log "verified"

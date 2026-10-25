@@ -1,3 +1,3 @@
 # What CI and the deploy run Ansible with. Compile the locked file with
-#   uv pip compile --generate-hashes --python-version 3.13 --python-platform x86_64-unknown-linux-gnu requirements.in -o requirements.txt
+#   uv pip compile --generate-hashes --python-version 3.13 --universal requirements.in -o requirements.txt
 ansible-core==2.21.5

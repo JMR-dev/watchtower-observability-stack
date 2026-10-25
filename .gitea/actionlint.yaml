@@ -5,3 +5,6 @@ self-hosted-runner:
   labels:
     - heavy
     - docker
+    # The arm64 DinD runner (Spot, scale-to-zero) that builds the Patroni
+    # image natively.
+    - docker-arm64

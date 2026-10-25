@@ -1,55 +1,65 @@
 #!/usr/bin/env bash
-# Build one of the two images and gate it on a Trivy scan.
+# Build one of our two images, check it can read the config it will run with,
+# and gate it on a Trivy scan.
 #
-#   scripts/build-image.sh caddy <image-ref>
-#   scripts/build-image.sh fipd  <image-ref> [version]
+#   scripts/build-image.sh caddy   <image-ref>    # amd64, on `docker`
+#   scripts/build-image.sh patroni <image-ref>    # arm64, on `docker-arm64`
 #
-# Shared by ci.yml (build + scan only) and deploy.yml (which pushes the ref
-# afterwards). Needs docker. Fails on any fixable HIGH/CRITICAL finding. For
-# Caddy it also runs `caddy validate` on the edge Caddyfile with the image it
-# just built, under the edge pod's security context, so a Caddyfile the
-# binary can't parse (an unknown directive, a missing plugin) or a module that
-# can't provision there (Coraza without a writable /tmp) fails here and not on
-# the edge pod.
+# Shared by ci.yml (build + check + scan) and deploy.yml (which pushes the
+# ref afterwards). Needs docker and the rendered configs
+# (ansible/playbooks/render.yml). Each image builds natively on its
+# architecture's runner; nothing is cross-built. Fails on any fixable
+# HIGH/CRITICAL finding.
 #
-# Trivy gets the image over stdin (`docker save | docker run -i`) instead of a
-# bind-mounted docker socket: on the Gitea runners the daemon is rootless
-# Docker-in-Docker, where a socket path would resolve on the daemon's side.
+#   caddy    `caddy validate` on the proxy's rendered Caddyfile, run the way
+#            the quadlet runs it (UID 1000, read-only root, writable /data,
+#            /config and /tmp, no capabilities but binding 443), so an unknown
+#            directive, a missing plugin or a module that can't provision
+#            there (Coraza without a writable /tmp) fails here, not on the
+#            proxy.
+#   patroni  `patroni --validate-config` on a node's rendered patroni.yml.
+#
+# Configs go in over stdin, and Trivy gets the image over stdin (`docker
+# save | docker run -i`), instead of bind mounts or the docker socket: on the
+# Gitea runners the daemon is Docker-in-Docker, where a host path resolves on
+# the daemon's side.
 
 set -euo pipefail
 
-TRIVY_IMAGE="docker.io/aquasec/trivy:0.76.1"
+TRIVY_IMAGE="docker.io/aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c"
 
-[[ $# -ge 2 ]] || { echo "usage: $0 caddy|fipd <image-ref> [version]" >&2; exit 1; }
-what="$1" ref="$2" version="${3:-dev}"
+usage() { echo "usage: $0 caddy|patroni <image-ref>" >&2; exit 1; }
+[[ $# -eq 2 ]] || usage
+what="$1" ref="$2"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+render="${repo_root}/ansible/.render"
 
 case "$what" in
   caddy)
+    caddyfile="${render}/watchtower-proxy/caddy/Caddyfile"
+    [[ -f "$caddyfile" ]] || { echo "no ${caddyfile}; run ansible/playbooks/render.yml first" >&2; exit 1; }
     DOCKER_BUILDKIT=1 docker build -t "$ref" "${repo_root}/build/caddy"
-    echo "==> Validating the edge Caddyfile with ${ref} as the edge pod runs it"
-    # The caddy container's settings in infra/apps/edge.go: UID 1000, no
-    # capabilities, a read-only root, and writable only at /data, /config and
-    # /tmp (TestEdge holds edge.go to exactly those three). The Caddyfile
-    # goes in over stdin, not a bind mount (the daemon may not see this
-    # filesystem), and lands in /tmp: it imports nothing, so where it sits
-    # doesn't matter. Provisioning needs neither the network nor the DNS-01
-    # key.
+    echo "==> Validating the proxy's Caddyfile with ${ref} as the proxy runs it"
+    # Provisioning needs neither the network nor the DNS-01 key; the bind
+    # address need not exist for validation.
     docker run --rm -i --network none --read-only --user 1000:1000 \
-      --cap-drop ALL --security-opt no-new-privileges \
+      --cap-drop ALL --cap-add NET_BIND_SERVICE --security-opt no-new-privileges \
       --tmpfs /data --tmpfs /config --tmpfs /tmp \
       -e DOMAIN=watchtower.jasonmross.dev -e GCP_PROJECT=watchtower-observe \
-      -e XDG_CONFIG_HOME=/config -e GOOGLE_APPLICATION_CREDENTIALS=/etc/caddy-dns/key.json \
+      -e XDG_CONFIG_HOME=/config -e XDG_DATA_HOME=/data \
+      -e GOOGLE_APPLICATION_CREDENTIALS=/etc/caddy-dns/key.json \
       --entrypoint sh "$ref" -c 'cat >/tmp/Caddyfile && exec caddy validate --config /tmp/Caddyfile --adapter caddyfile' \
-      <"${repo_root}/infra/apps/files/Caddyfile"
+      <"$caddyfile"
     ;;
-  fipd)
-    DOCKER_BUILDKIT=1 docker build --build-arg VERSION="$version" -t "$ref" "${repo_root}/fipd"
+  patroni)
+    config="${render}/watchtower-1/patroni/patroni.yml"
+    [[ -f "$config" ]] || { echo "no ${config}; run ansible/playbooks/render.yml first" >&2; exit 1; }
+    DOCKER_BUILDKIT=1 docker build -t "$ref" "${repo_root}/build/patroni"
+    echo "==> Validating a node's patroni.yml with ${ref}"
+    docker run --rm -i --network none --entrypoint sh "$ref" \
+      -c 'cat >/tmp/patroni.yml && exec patroni --validate-config /tmp/patroni.yml' <"$config"
     ;;
-  *)
-    echo "usage: $0 caddy|fipd <image-ref> [version]" >&2
-    exit 1
-    ;;
+  *) usage ;;
 esac
 
 echo "==> Scanning ${ref} with ${TRIVY_IMAGE}"

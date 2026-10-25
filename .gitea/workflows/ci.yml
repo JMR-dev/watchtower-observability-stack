@@ -1,16 +1,19 @@
 # Status checks for every pull request. No secrets and no credentials:
-# nothing here can reach Hetzner, GCP or the cluster. Deploys are deploy.yml.
+# nothing here can reach Hetzner, GCP or the hosts. Deploys are deploy.yml.
 #
 # Require these checks in the branch protection for main (Settings ->
-# Branches): go (infra), go (fipd), manifests, ansible, images (caddy),
-# images (fipd), shell, alloy.
+# Branches): go, ansible, configs, images (caddy), images (patroni),
+# semgrep, shell, alloy.
 #
 # Runs on the GKE runners (gitea-496920/gitea-runners; the gitea repo's
 # docs/runners.md):
 #   ubuntu-latest  a job pod of its own
 #   heavy          a job pod alone on an e2-highmem-4: compiling the Pulumi
 #                  providers' Go SDKs needs the memory
-#   docker         the Docker-in-Docker runner; `docker build` runs there
+#   docker         the Docker-in-Docker runner (amd64); `docker build` and
+#                  every check that runs a container image
+#   docker-arm64   the same on arm64 (Spot, scale-to-zero): the Patroni image,
+#                  built natively for the nodes
 #
 # Actions are pinned to a full commit SHA, with the release in a comment.
 name: ci
@@ -27,17 +30,13 @@ jobs:
   go:
     runs-on: heavy
     timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        module: [infra, fipd]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.gitea/actions/setup
         with:
           tools: go
       - name: gofmt, vet, test (100% coverage), build
-        working-directory: ${{ matrix.module }}
+        working-directory: infra
         # Two packages at a time: compiling several provider SDK packages at
         # once (vet, test and build each compile) can exhaust the pod's memory.
         env:
@@ -49,27 +48,7 @@ jobs:
           go vet ./...
           go test -race -coverprofile="${RUNNER_TEMP}/cover.out" ./...
           ../scripts/coverage-gate.sh "${RUNNER_TEMP}/cover.out"
-          if [[ "${{ matrix.module }}" == infra ]]; then
-            go build -o /dev/null ./cloud
-            go build -o /dev/null ./apps
-          else
-            go build -o /dev/null .
-          fi
-
-  manifests:
-    # heavy: the dump compiles the apps program's tests, which pull in the
-    # Pulumi Kubernetes SDK (see go).
-    runs-on: heavy
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.gitea/actions/setup
-        with:
-          tools: go helm kubectl kubeconform kube-apiserver etcd
-      - name: Every chart and every object the apps program builds, through kubeconform and an API server dry run
-        env:
-          GOFLAGS: -p=2
-        run: scripts/check-manifests.sh
+          go build -o /dev/null ./cloud
 
   ansible:
     runs-on: ubuntu-latest
@@ -78,48 +57,95 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.gitea/actions/setup
         with:
-          tools: ansible
-      - name: Syntax check every playbook (with Kubespray installed) and lint
+          tools: ansible-lint
+      - name: Syntax check every playbook and lint
         working-directory: ansible
         run: |
           set -euo pipefail
           ansible-galaxy collection install -r requirements.yml -p .collections >/dev/null
-          for playbook in playbooks/*.yml; do
+          for playbook in playbooks/site.yml playbooks/render.yml; do
             ansible-playbook -i inventory/hosts.sample.yml "$playbook" --syntax-check
           done
           ansible-lint
-      - name: Render the node firewall and check it with nft
+      - name: Render every host's firewall and check it with nft
         working-directory: ansible
         run: |
           set -euo pipefail
-          # The role's `validate: nft --check` only runs on the nodes, so a
-          # broken template would otherwise surface mid-deploy. Render it from
+          # The role's `validate: nft --check` only runs on the hosts, so a
+          # broken template would otherwise surface mid-deploy. Rendered from
           # the sample inventory, once as is and once with no IPv6 admin
-          # addresses (an empty set), and have the kernel check each in a
-          # network namespace of its own.
-          out="${RUNNER_TEMP}/nft"
-          mkdir -p "$out"
+          # addresses (an empty set), and checked by the kernel in a network
+          # namespace of its own.
           for variant in sample v4-only; do
             extra=()
             [[ $variant == v4-only ]] && extra=(-e '{"watchtower_admin_cidrs": ["192.0.2.0/24"]}')
-            ansible -i inventory/hosts.sample.yml watchtower-1 -c local -m ansible.builtin.template \
-              -a "src=roles/firewall/templates/watchtower.nft.j2 dest=${out}/${variant}.nft" "${extra[@]}" >/dev/null
-            unshare --user --map-root-user --net nft --check --file "${out}/${variant}.nft"
-            echo "${variant}: ok"
+            ansible-playbook -i inventory/hosts.sample.yml playbooks/render.yml "${extra[@]}" >/dev/null
+            for nft in .render/*/watchtower.nft; do
+              unshare --user --map-root-user --net nft --check --file "$nft"
+              echo "${variant} $(basename "$(dirname "$nft")"): ok"
+            done
           done
 
-  images:
-    # docker build needs a Docker daemon; ubuntu-latest job pods have none.
+  configs:
+    # Runs the hosts' own images against their rendered configs.
     runs-on: docker
     timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.gitea/actions/setup
+        with:
+          tools: ansible
+      - name: Render every host's configs
+        working-directory: ansible
+        run: ansible-playbook -i inventory/hosts.sample.yml playbooks/render.yml >/dev/null
+      - name: quadlet, Loki, Mimir, Tempo and Fluent Bit check them
+        run: scripts/check-configs.sh
+
+  images:
+    # Each image builds natively on its architecture's runner.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        image: [caddy, fipd]
+        include:
+          - image: caddy
+            runner: docker
+          - image: patroni
+            runner: docker-arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build + Trivy scan (no push)
-        run: scripts/build-image.sh "${{ matrix.image }}" "watchtower-${{ matrix.image }}:ci-${GITHUB_SHA:0:12}" "${GITHUB_SHA:0:12}"
+      - uses: ./.gitea/actions/setup
+        with:
+          tools: ansible
+      - name: Render the configs the image is checked against
+        working-directory: ansible
+        run: ansible-playbook -i inventory/hosts.sample.yml playbooks/render.yml >/dev/null
+      - name: Build, check its config, Trivy scan (no push)
+        run: scripts/build-image.sh "${{ matrix.image }}" "watchtower-${{ matrix.image }}:ci-${GITHUB_SHA:0:12}"
+
+  semgrep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.gitea/actions/setup
+        with:
+          tools: semgrep
+      - name: Semgrep (Go, shell, Dockerfiles, CI YAML, secrets)
+        run: |
+          set -euo pipefail
+          # The GitHub Actions rules only look under .github/workflows; the
+          # Gitea workflows and the setup action are the same format.
+          gha="${RUNNER_TEMP}/gha/.github/workflows"
+          mkdir -p "$gha"
+          cp .gitea/workflows/*.yml "$gha/"
+          cp .gitea/actions/setup/action.yml "$gha/setup-action.yml"
+          semgrep scan --metrics=off --error \
+            --config p/default --config p/golang --config p/dockerfile --config p/docker \
+            --config p/secrets --config p/github-actions --config p/ci --config p/security-audit \
+            --exclude ansible/.render --exclude ansible/.collections \
+            . "${RUNNER_TEMP}/gha"
 
   shell:
     runs-on: ubuntu-latest
@@ -130,7 +156,7 @@ jobs:
         with:
           tools: shellcheck actionlint
       - name: shellcheck
-        run: shellcheck -x scripts/*.sh ansible/roles/base/files/*.sh
+        run: shellcheck -x scripts/*.sh
       - name: actionlint (workflows, with shellcheck on their scripts)
         run: actionlint -config-file .gitea/actionlint.yaml .gitea/workflows/*.yml
 
