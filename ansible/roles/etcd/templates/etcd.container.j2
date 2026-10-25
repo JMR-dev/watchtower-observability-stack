@@ -1,0 +1,44 @@
+# Managed by Ansible (roles/etcd).
+#
+# --initial-cluster* only matter the first time a member starts with an empty
+# data directory; replacing a member is a runbook procedure (member remove,
+# member add, start with --initial-cluster-state=existing).
+[Unit]
+Description=etcd member {{ inventory_hostname }} (Patroni's consensus store)
+Wants=network-online.target wg-quick@wg1.service
+After=network-online.target wg-quick@wg1.service
+RequiresMountsFor={{ watchtower_data }}
+
+[Container]
+Image={{ watchtower_images.etcd }}
+ContainerName=etcd
+Network=host
+# The image runs as root; nothing here needs it.
+User=10001
+Group=10001
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+LogDriver=journald
+Volume={{ watchtower_data }}/etcd:/var/lib/etcd:Z
+Exec=/usr/local/bin/etcd \
+  --name={{ inventory_hostname }} \
+  --data-dir=/var/lib/etcd/data \
+  --listen-peer-urls=http://{{ mesh_ip }}:{{ watchtower_ports.etcd.peer }} \
+  --listen-client-urls=http://{{ mesh_ip }}:{{ watchtower_ports.etcd.client }} \
+  --advertise-client-urls=http://{{ mesh_ip }}:{{ watchtower_ports.etcd.client }} \
+  --initial-advertise-peer-urls=http://{{ mesh_ip }}:{{ watchtower_ports.etcd.peer }} \
+  --initial-cluster={% for h in groups['nodes'] %}{{ h }}=http://{{ hostvars[h].mesh_ip }}:{{ watchtower_ports.etcd.peer }}{{ ',' if not loop.last }}{% endfor %} \
+  --initial-cluster-state=new \
+  --initial-cluster-token={{ etcd_cluster_token }} \
+  --auto-compaction-retention=1h \
+  --quota-backend-bytes=1073741824
+PodmanArgs=--memory={{ watchtower_memory.etcd }}m
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

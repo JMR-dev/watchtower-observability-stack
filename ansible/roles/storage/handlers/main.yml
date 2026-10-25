@@ -1,0 +1,4 @@
+---
+- name: Relabel the data volume
+  ansible.builtin.command: restorecon -R {{ watchtower_data }}
+  changed_when: true

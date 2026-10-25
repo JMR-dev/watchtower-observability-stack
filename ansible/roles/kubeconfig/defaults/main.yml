@@ -1,5 +1,0 @@
----
-# Where the admin kubeconfig lands on the controller (CI: the runner's temp
-# dir; locally: wherever KUBECONFIG_OUT says).
-kubeconfig_out: "{{ lookup('ansible.builtin.env', 'KUBECONFIG_OUT') | default('~/.kube/watchtower', true) }}"
-kubeconfig_server: https://api.watchtower.jasonmross.dev:6443

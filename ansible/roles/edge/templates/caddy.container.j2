@@ -1,0 +1,39 @@
+# Managed by Ansible (roles/edge).
+[Unit]
+Description=Caddy (TLS and load balancing for {{ watchtower_domain }})
+Wants=network-online.target wg-quick@wg1.service wg-easy.service
+After=network-online.target wg-quick@wg1.service wg-easy.service
+RequiresMountsFor={{ watchtower_data }}
+
+[Container]
+Image={{ caddy_image }}
+ContainerName=caddy
+Network=host
+User=1000
+Group=1000
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+# 443 is below the unprivileged range.
+AddCapability=NET_BIND_SERVICE
+LogDriver=journald
+Volume={{ watchtower_data }}/caddy/data:/data:Z
+Volume={{ watchtower_data }}/caddy/config:/config:Z
+Volume={{ watchtower_config }}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro,Z
+Secret=caddy-dns-key,type=mount,target=/etc/caddy-dns/key.json,uid=1000,mode=0400
+Environment=DOMAIN={{ watchtower_domain }}
+Environment=GCP_PROJECT={{ watchtower_gcp_project }}
+Environment=GOOGLE_APPLICATION_CREDENTIALS=/etc/caddy-dns/key.json
+Environment=XDG_CONFIG_HOME=/config
+Environment=XDG_DATA_HOME=/data
+PodmanArgs=--memory={{ watchtower_memory.caddy }}m --authfile={{ watchtower_config }}/registry-auth.json
+
+[Service]
+# Caddy binds the tunnel address, which exists once wg-easy has brought wg0 up.
+ExecStartPre=/bin/sh -c 'for i in $(seq 120); do ip -4 addr show dev wg0 2>/dev/null | grep -q "inet {{ watchtower_tunnel_ip }}/" && exit 0; sleep 1; done; echo "wg0 has no {{ watchtower_tunnel_ip }}" >&2; exit 1'
+Restart=always
+RestartSec=10
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

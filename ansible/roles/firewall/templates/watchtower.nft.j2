@@ -1,20 +1,24 @@
 #!/usr/sbin/nft -f
-# Watchtower node firewall. Managed by Ansible (roles/firewall).
+# Watchtower host firewall. Managed by Ansible (roles/firewall).
 #
 # The host layer under the Hetzner Cloud Firewall. It mirrors that firewall
 # from the same lists (the cloud stack's adminCidrs, ciCidrs and
-# wireguardAllowCidrs, handed over in the inventory), so a node stays
-# filtered if the cloud firewall is ever detached. Layers, outside in:
-#   1. Hetzner Cloud Firewall: SSH and the API from admin and CI, UDP 51820
-#   2. this ruleset: the same, plus everything from the other nodes
+# wireguardAllowCidrs, handed over in the inventory), so a host stays
+# filtered if the cloud firewall is ever detached, and it is the only filter
+# on the private network and the mesh. Layers, outside in:
+#   1. Hetzner Cloud Firewall: SSH from admin and CI; UDP 51820 (proxy only)
+#   2. this ruleset: the same, the mesh transport from the private network,
+#      and, on wg1, everything between nodes but only Caddy's backend ports
+#      from the proxy
 #   3. fail2ban: per-address SSH bans in its own table, inet f2b-table
-#   4. Cilium network policies: pod to pod
 #
-# Only this table: kube-proxy, Cilium, portmap and fail2ban keep theirs, and
-# a packet has to get through every table's chain on a hook. The file swaps
-# the table in one transaction. watchtower-nftables.service loads it, never
-# nftables.service, whose reload and stop flush the whole ruleset,
-# Kubernetes' rules included.
+# Every container uses the host's network (Network=host), so nothing is
+# forwarded and the forward chain drops everything.
+#
+# Only this table: fail2ban and wg-easy keep theirs, and a packet has to get
+# through every table's chain on a hook. The file swaps the table in one
+# transaction. watchtower-nftables.service loads it, never nftables.service,
+# whose reload and stop flush the whole ruleset.
 #
 #   systemctl reload watchtower-nftables
 #   nft --check --file /etc/nftables/watchtower.nft
@@ -28,6 +32,15 @@
 {% endif %}
     }
 {% endmacro %}
+{% set edge_backends = [
+     watchtower_ports.grafana.http,
+     watchtower_ports.loki.http,
+     watchtower_ports.mimir.http,
+     watchtower_ports.tempo['query-frontend'].http,
+     watchtower_ports.tempo.distributor.http,
+     watchtower_ports.otlp.grpc,
+     watchtower_ports.otlp.http] %}
+{% set edge_listeners = watchtower_ports.edge.values() | list %}
 
 table inet watchtower
 delete table inet watchtower
@@ -35,25 +48,18 @@ delete table inet watchtower
 table inet watchtower {
 {{ cidr_set('admin_v4', 'ipv4_addr', watchtower_admin_cidrs | reject('search', ':') | list) }}
 {{ cidr_set('admin_v6', 'ipv6_addr', watchtower_admin_cidrs | select('search', ':') | list) }}
-{# Pods are IPv4 only, so portmap only forwards WireGuard over IPv4. #}
+{{ cidr_set('mesh_nodes', 'ipv4_addr', groups['nodes'] | map('extract', hostvars, 'mesh_ip') | list) }}
+{{ cidr_set('mesh_proxy', 'ipv4_addr', groups['proxy'] | map('extract', hostvars, 'mesh_ip') | list) }}
+{% if 'proxy' in group_names %}
 {{ cidr_set('wireguard_v4', 'ipv4_addr', watchtower_wireguard_cidrs | reject('search', ':') | list) }}
+{{ cidr_set('wireguard_v6', 'ipv6_addr', watchtower_wireguard_cidrs | select('search', ':') | list) }}
+{% endif %}
     chain input {
         type filter hook input priority filter; policy drop;
 
         ct state established,related accept
+        # A host's traffic to its own mesh address arrives on lo too.
         iif "lo" accept
-
-        # Pods (lxc*) and Cilium's devices: cilium_host, cilium_vxlan, and
-        # cilium_wg0, where encrypted node traffic comes back in. Pods reach
-        # nodelocaldns (169.254.25.10) and Services (addresses on kube-ipvs0)
-        # through input, before IPVS rewrites them.
-        iifname "lxc*" accept
-        iifname "cilium_*" accept
-
-        # The other nodes, over the private network: etcd, the API, kubelet,
-        # Cilium's VXLAN, WireGuard and health checks.
-        ip saddr {{ watchtower_private_cidr }} accept
-
         ct state invalid drop
 
         # DHCP replies: both networks lease their IPv4 addresses.
@@ -65,11 +71,32 @@ table inet watchtower {
         icmpv6 type echo-request limit rate 20/second accept
         icmp type echo-request limit rate 20/second accept
 
-        # SSH and the Kubernetes API from admin and CI addresses. No rate
-        # limit: one shared budget would let a scanner lock the deploy
-        # workflow out. fail2ban bans per address instead.
-        ip saddr @admin_v4 tcp dport { 22, 6443 } accept
-        ip6 saddr @admin_v6 tcp dport { 22, 6443 } accept
+        # The mesh's transport, from the private network only.
+        ip saddr {{ watchtower_private_cidr }} udp dport {{ watchtower_mesh_port }} accept
+{% if 'nodes' in group_names %}
+
+        # Over the mesh: the other nodes reach everything (rings, gossip,
+        # Kafka, etcd, Postgres, Patroni); the proxy only what Caddy proxies
+        # to and health-checks.
+        iifname "wg1" ip saddr @mesh_nodes accept
+        iifname "wg1" ip saddr @mesh_proxy tcp dport { {{ edge_backends | join(', ') }} } accept
+{% endif %}
+{% if 'proxy' in group_names %}
+
+        # WireGuard peers to wg-easy.
+        ip saddr @wireguard_v4 udp dport {{ watchtower_wireguard_port }} accept
+        ip6 saddr @wireguard_v6 udp dport {{ watchtower_wireguard_port }} accept
+
+        # Peers, through the tunnel, to Caddy on the tunnel address and
+        # nothing else.
+        iifname "wg0" ip daddr {{ watchtower_tunnel_ip }} tcp dport { {{ edge_listeners | join(', ') }} } accept
+{% endif %}
+
+        # SSH from admin and CI addresses. No rate limit: one shared budget
+        # would let a scanner lock the deploy workflow out. fail2ban bans per
+        # address instead.
+        ip saddr @admin_v4 tcp dport 22 accept
+        ip6 saddr @admin_v6 tcp dport 22 accept
 
         limit rate 5/minute log prefix "nft-drop-input: " level info
         counter drop
@@ -77,17 +104,6 @@ table inet watchtower {
 
     chain forward {
         type filter hook forward priority filter; policy drop;
-
-        # Pod traffic, both ways. Cilium's policies filter it.
-        iifname "lxc*" accept
-        iifname "cilium_*" accept
-        ct state established,related accept
-        ip saddr {{ watchtower_private_cidr }} accept
-
-        # WireGuard peers to the edge pod. Portmap DNATs UDP {{ watchtower_wireguard_port }} on any of
-        # the node's addresses (the Floating IP included) to the pod before
-        # routing, so it is forwarded, not delivered.
-        ip saddr @wireguard_v4 ct status dnat udp dport {{ watchtower_wireguard_port }} accept
 
         limit rate 5/minute log prefix "nft-drop-forward: " level info
         counter drop

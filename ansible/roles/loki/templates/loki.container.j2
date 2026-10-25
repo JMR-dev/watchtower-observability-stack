@@ -1,0 +1,35 @@
+# Managed by Ansible (roles/loki).
+[Unit]
+Description=Loki (monolithic, one of {{ groups['nodes'] | length }})
+Wants=network-online.target wg-quick@wg1.service
+After=network-online.target wg-quick@wg1.service
+RequiresMountsFor={{ watchtower_data }}
+
+[Container]
+Image={{ watchtower_images.loki }}
+ContainerName=loki
+Network=host
+User=10001
+Group=10001
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+LogDriver=journald
+Volume={{ watchtower_data }}/loki:/loki:Z
+Volume={{ watchtower_config }}/loki:/etc/loki:ro,Z
+Secret=s3-cluster-access-key,type=env,target=AWS_ACCESS_KEY_ID
+Secret=s3-cluster-secret-key,type=env,target=AWS_SECRET_ACCESS_KEY
+{% for ip in watchtower_node_ips_local_first %}
+AddHost=mimir.internal:{{ ip }}
+{% endfor %}
+Exec=-config.file=/etc/loki/loki.yaml -config.expand-env=true
+PodmanArgs=--memory={{ watchtower_memory.loki }}m
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

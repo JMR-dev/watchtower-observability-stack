@@ -1,0 +1,32 @@
+---
+# Reboots for updates, one host a week at a time, never two at once:
+# dnf-automatic (roles/base) installs security updates and never reboots;
+# this timer reboots when `needs-restarting -r` says one is due. The proxy
+# goes first, then node 1, 2 and 3, an hour apart. A node checks its peers
+# first and skips the week when they aren't all healthy, and hands Postgres
+# leadership away before going down.
+
+- name: Reboot script
+  ansible.builtin.template:
+    src: watchtower-reboot.sh.j2
+    dest: /usr/local/sbin/watchtower-reboot
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Reboot units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: /etc/systemd/system/{{ item }}
+    mode: "0644"
+    owner: root
+    group: root
+  loop: [watchtower-reboot.service, watchtower-reboot.timer]
+  notify: Reload systemd
+
+- name: Enable the reboot timer
+  ansible.builtin.systemd_service:
+    name: watchtower-reboot.timer
+    enabled: true
+    state: started
+    daemon_reload: true

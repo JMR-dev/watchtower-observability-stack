@@ -1,0 +1,7 @@
+---
+# A restart, not wg-quick's reload: the reload syncs a stripped config that
+# carries no private key (it comes from PostUp).
+- name: Restart wg1
+  ansible.builtin.systemd_service:
+    name: wg-quick@wg1
+    state: restarted

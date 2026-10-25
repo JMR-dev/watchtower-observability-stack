@@ -1,0 +1,11 @@
+# Managed by Ansible (roles/reboot). The proxy first, then the nodes in
+# order, an hour apart, Sunday mornings UTC.
+[Unit]
+Description=Weekly reboot window for {{ inventory_hostname }}
+
+[Timer]
+OnCalendar=Sun *-*-* {{ '%02d' | format(7 + (node_index | default(0))) }}:00:00 UTC
+Persistent=false
+
+[Install]
+WantedBy=timers.target

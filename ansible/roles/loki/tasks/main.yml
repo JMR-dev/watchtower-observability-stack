@@ -1,0 +1,57 @@
+---
+# Loki: three monolithic instances (-target=all), one per node, joined over
+# memberlist on the mesh and replicating writes three ways, sharing one
+# bucket. Loki's documented "HA monolithic" mode: any one node can be down.
+
+- name: Loki directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+  loop:
+    - {path: "{{ watchtower_data }}/loki", owner: 10001}
+    - {path: "{{ watchtower_config }}/loki", owner: root}
+
+- name: Loki config
+  ansible.builtin.template:
+    src: loki.yaml.j2
+    dest: "{{ watchtower_config }}/loki/loki.yaml"
+    mode: "0644"
+  notify: Restart loki
+
+- name: Loki's S3 key
+  ansible.builtin.include_role:
+    name: quadlet
+    tasks_from: secrets
+  vars:
+    quadlet_secrets:
+      - {name: s3-cluster-access-key, value: "{{ watchtower_secret.s3_cluster_access_key }}"}
+      - {name: s3-cluster-secret-key, value: "{{ watchtower_secret.s3_cluster_secret_key }}"}
+
+- name: Restart Loki when its key changed
+  ansible.builtin.debug:
+    msg: S3 key changed
+  changed_when: quadlet_secrets_changed | bool
+  notify: Restart loki
+
+- name: Pull Loki
+  containers.podman.podman_image:
+    name: "{{ watchtower_images.loki }}"
+
+- name: Loki quadlet
+  ansible.builtin.template:
+    src: loki.container.j2
+    dest: /etc/containers/systemd/loki.container
+    mode: "0644"
+  notify: Restart loki
+
+- name: Start Loki
+  ansible.builtin.systemd_service:
+    name: loki
+    state: started
+    daemon_reload: true
+
+- name: Apply Loki changes now
+  ansible.builtin.meta: flush_handlers

@@ -1,0 +1,59 @@
+---
+# Mimir: three monolithic replicas (classic architecture, no Kafka), joined
+# over memberlist on the mesh, replicating series three ways. Alertmanager
+# runs sharded across the three. Mimir's documented way to scale monolithic
+# mode; 3.2.3 crashes if ingest storage is enabled in a -target=all process.
+
+- name: Mimir directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+  loop:
+    - {path: "{{ watchtower_data }}/mimir", owner: 10001}
+    - {path: "{{ watchtower_config }}/mimir", owner: root}
+
+- name: Mimir config and runtime overrides
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ watchtower_config }}/mimir/{{ item }}"
+    mode: "0644"
+  loop: [mimir.yaml, runtime.yaml]
+  notify: Restart mimir
+
+- name: Mimir's S3 key
+  ansible.builtin.include_role:
+    name: quadlet
+    tasks_from: secrets
+  vars:
+    quadlet_secrets:
+      - {name: s3-cluster-access-key, value: "{{ watchtower_secret.s3_cluster_access_key }}"}
+      - {name: s3-cluster-secret-key, value: "{{ watchtower_secret.s3_cluster_secret_key }}"}
+
+- name: Restart Mimir when its key changed
+  ansible.builtin.debug:
+    msg: S3 key changed
+  changed_when: quadlet_secrets_changed | bool
+  notify: Restart mimir
+
+- name: Pull Mimir
+  containers.podman.podman_image:
+    name: "{{ watchtower_images.mimir }}"
+
+- name: Mimir quadlet
+  ansible.builtin.template:
+    src: mimir.container.j2
+    dest: /etc/containers/systemd/mimir.container
+    mode: "0644"
+  notify: Restart mimir
+
+- name: Start Mimir
+  ansible.builtin.systemd_service:
+    name: mimir
+    state: started
+    daemon_reload: true
+
+- name: Apply Mimir changes now
+  ansible.builtin.meta: flush_handlers

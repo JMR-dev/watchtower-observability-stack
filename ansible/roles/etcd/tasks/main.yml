@@ -1,0 +1,33 @@
+---
+# etcd: Patroni's consensus store (who leads Postgres). Three members, one per
+# node, quorum of two; on the mesh only, without TLS or auth, reachable from
+# the nodes alone (roles/firewall). It holds Patroni's leader key and
+# cluster state, nothing else.
+
+- name: Directory for etcd
+  ansible.builtin.file:
+    path: "{{ watchtower_data }}/etcd"
+    state: directory
+    mode: "0700"
+    owner: 10001
+    group: 10001
+
+- name: Pull etcd
+  containers.podman.podman_image:
+    name: "{{ watchtower_images.etcd }}"
+
+- name: Quadlet for etcd
+  ansible.builtin.template:
+    src: etcd.container.j2
+    dest: /etc/containers/systemd/etcd.container
+    mode: "0644"
+  notify: Restart etcd
+
+- name: Start etcd
+  ansible.builtin.systemd_service:
+    name: etcd
+    state: started
+    daemon_reload: true
+
+- name: Apply etcd changes now
+  ansible.builtin.meta: flush_handlers

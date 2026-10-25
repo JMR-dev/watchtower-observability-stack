@@ -1,0 +1,13 @@
+---
+# Cluster identities. None is secret; each must stay the same for the life of
+# its cluster, because the members recorded it when they first started.
+
+# KRaft cluster ID (22 characters, base64url of 16 random bytes).
+kafka_cluster_id: FaclwNB6LOG0YIuYb7--wA
+# Tempo's topic, created once by roles/kafka.
+kafka_tempo_topic: tempo-traces
+kafka_tempo_partitions: 4
+
+etcd_cluster_token: watchtower-etcd
+# Patroni's cluster name: its keys in etcd live under /service/<scope>.
+patroni_scope: watchtower

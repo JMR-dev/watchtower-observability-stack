@@ -1,0 +1,30 @@
+# Managed by Ansible (roles/patroni).
+[Unit]
+Description=Patroni and PostgreSQL ({{ inventory_hostname }})
+Wants=network-online.target wg-quick@wg1.service etcd.service
+After=network-online.target wg-quick@wg1.service etcd.service
+RequiresMountsFor={{ watchtower_data }}
+
+[Container]
+Image={{ patroni_image }}
+ContainerName=patroni
+Network=host
+NoNewPrivileges=true
+DropCapability=ALL
+LogDriver=journald
+Volume={{ watchtower_data }}/postgres:/var/lib/postgresql/data:Z
+Volume={{ watchtower_config }}/patroni:/etc/patroni:ro,Z
+# Patroni reads its passwords from these variables; the config names none.
+Secret=postgres-superuser-password,type=env,target=PATRONI_SUPERUSER_PASSWORD
+Secret=postgres-replication-password,type=env,target=PATRONI_REPLICATION_PASSWORD
+Secret=patroni-restapi-password,type=env,target=PATRONI_RESTAPI_PASSWORD
+PodmanArgs=--memory={{ watchtower_memory.patroni }}m --shm-size=256m --authfile={{ watchtower_config }}/registry-auth.json
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

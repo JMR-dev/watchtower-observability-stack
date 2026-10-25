@@ -1,0 +1,26 @@
+---
+# Memory caps (podman --memory), in MiB. Caps, not reservations: on a 16 GB
+# node they add up to about 13 GB, leaving room for the OS and page cache.
+# Tempo sets GOMEMLIMIT from its cap (automemlimit).
+watchtower_memory:
+  loki: 1536
+  mimir: 3072
+  tempo:
+    query-frontend: 512
+    distributor: 512
+    live-store: 1024
+    querier: 512
+    backend-worker: 512
+    metrics-generator: 512
+    block-builder: 1024
+    backend-scheduler: 256
+  kafka: 1536
+  etcd: 512
+  patroni: 1024
+  grafana: 512
+  fluentbit: 256
+  caddy: 512
+  wg_easy: 512
+
+# Kafka's JVM heap, inside its cap.
+kafka_heap: -Xms512m -Xmx1g

@@ -1,0 +1,16 @@
+# Managed by Ansible (roles/mesh). The mesh between the watchtower hosts:
+# {{ watchtower_mesh_cidr }} over the private network. The private key stays in
+# /etc/wireguard/wg1.key, made on this host.
+[Interface]
+Address = {{ mesh_ip }}/24
+ListenPort = {{ watchtower_mesh_port }}
+PostUp = wg set %i private-key /etc/wireguard/wg1.key
+{% for h in (groups['proxy'] + groups['nodes']) if h != inventory_hostname %}
+
+[Peer]
+# {{ h }}
+PublicKey = {{ hostvars[h].mesh_public_key }}
+AllowedIPs = {{ hostvars[h].mesh_ip }}/32
+Endpoint = {{ hostvars[h].private_ip }}:{{ watchtower_mesh_port }}
+PersistentKeepalive = 25
+{% endfor %}

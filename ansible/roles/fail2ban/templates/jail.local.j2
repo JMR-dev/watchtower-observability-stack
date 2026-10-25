@@ -8,7 +8,7 @@ bantime  = {{ fail2ban_bantime }}
 findtime = {{ fail2ban_findtime }}
 maxretry = {{ fail2ban_maxretry }}
 
-# fail2ban's own nftables table; Kubernetes' and Cilium's are untouched.
+# fail2ban's own nftables table; roles/firewall's is untouched.
 banaction          = nftables-multiport
 banaction_allports = nftables-allports
 

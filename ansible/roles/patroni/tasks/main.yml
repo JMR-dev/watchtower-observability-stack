@@ -1,0 +1,76 @@
+---
+# Postgres for the three Grafanas, kept highly available by Patroni: one
+# primary, two streaming replicas, failover in about 30 seconds, with etcd
+# deciding who leads. Our own image (build/patroni), from Artifact Registry.
+#
+# A config change never restarts the leader under Grafana's feet: the
+# restart handler first moves leadership to a healthy replica (switchover).
+
+- name: Patroni needs its image
+  ansible.builtin.assert:
+    that: patroni_image is defined and patroni_image | length > 0
+    fail_msg: pass -e patroni_image=<registry>/patroni@sha256:... (the deploy workflow does)
+
+- name: Patroni directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+  loop:
+    # The image's postgres user.
+    - {path: "{{ watchtower_data }}/postgres", owner: 999, mode: "0700"}
+    - {path: "{{ watchtower_config }}/patroni", owner: root, mode: "0755"}
+
+- name: Patroni config
+  ansible.builtin.template:
+    src: patroni.yml.j2
+    dest: "{{ watchtower_config }}/patroni/patroni.yml"
+    mode: "0644"
+  notify: Restart patroni
+
+- name: Patroni's credentials
+  ansible.builtin.include_role:
+    name: quadlet
+    tasks_from: secrets
+  vars:
+    quadlet_secrets:
+      - {name: postgres-superuser-password, value: "{{ watchtower_secret.postgres_superuser_password }}"}
+      - {name: postgres-replication-password, value: "{{ watchtower_secret.postgres_replication_password }}"}
+      - {name: patroni-restapi-password, value: "{{ watchtower_secret.patroni_restapi_password }}"}
+
+- name: Restart Patroni when a credential changed
+  ansible.builtin.debug:
+    msg: credentials changed
+  changed_when: quadlet_secrets_changed | bool
+  notify: Restart patroni
+
+- name: Pull Patroni
+  containers.podman.podman_image:
+    name: "{{ patroni_image }}"
+    auth_file: "{{ watchtower_config }}/registry-auth.json"
+
+- name: Patroni quadlet
+  ansible.builtin.template:
+    src: patroni.container.j2
+    dest: /etc/containers/systemd/patroni.container
+    mode: "0644"
+  notify: Restart patroni
+
+- name: Start Patroni
+  ansible.builtin.systemd_service:
+    name: patroni
+    state: started
+    daemon_reload: true
+
+- name: Apply Patroni changes now
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for this member to report healthy
+  ansible.builtin.uri:
+    url: http://{{ mesh_ip }}:{{ watchtower_ports.patroni }}/health
+  register: patroni_health
+  until: patroni_health.status == 200
+  retries: 60
+  delay: 5

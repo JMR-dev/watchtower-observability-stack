@@ -1,0 +1,12 @@
+---
+# The components this node runs. Every node: the stateless and partitioned
+# ones. Placement (group_vars/all/placement.yml) adds the query frontends and
+# the two single-copy components.
+tempo_components: >-
+  {{ ['distributor', 'live-store', 'querier', 'backend-worker', 'metrics-generator']
+     + (['query-frontend'] if inventory_hostname in tempo_query_frontend_hosts else [])
+     + (['block-builder'] if inventory_hostname == tempo_block_builder_host else [])
+     + (['backend-scheduler'] if inventory_hostname == tempo_backend_scheduler_host else []) }}
+
+# Every component a node can run, so a moved singleton's leftovers are removed.
+tempo_all_components: [distributor, live-store, querier, backend-worker, metrics-generator, query-frontend, block-builder, backend-scheduler]

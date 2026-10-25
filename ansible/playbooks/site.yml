@@ -1,14 +1,72 @@
 ---
-# Everything, in order: node baseline, the Kubernetes cluster (Kubespray's
-# cluster.yml), the kubeconfig. The deploy workflow runs the three parts
-# separately so Kubespray only runs when its inputs change.
+# Everything on the hosts, from a fresh server to a running stack, and every
+# deploy after that. The deploy workflow runs it with the image digests it
+# just built (caddy_image, patroni_image) and the secrets in its environment.
 #
-#   cd ansible && ansible-playbook playbooks/site.yml
-- name: Node baseline
-  ansible.builtin.import_playbook: prepare.yml
+#   ansible-playbook playbooks/site.yml -e caddy_image=... -e patroni_image=...
 
-- name: Kubernetes (Kubespray)
-  ansible.builtin.import_playbook: kubernetes_sigs.kubespray.cluster
+- name: Check the deploy's inputs
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Every secret is in the environment
+      ansible.builtin.assert:
+        that: watchtower_secret[item] | length > 0
+        fail_msg: "{{ item }} is empty: the deploy reads every secret from Secret Manager (docs/required-secrets.md)"
+        quiet: true
+      loop: "{{ watchtower_secret.keys() | list }}"
+      no_log: true
 
-- name: Admin kubeconfig
-  ansible.builtin.import_playbook: kubeconfig.yml
+- name: Host baseline, firewall, mesh and storage
+  hosts: proxy:nodes
+  roles:
+    - base
+    - firewall
+    - fail2ban
+    - mesh
+    - storage
+    - registry
+    - logship
+    - reboot
+
+# The first deploy starts every node at once: etcd and Kafka need a quorum
+# before any member reports ready. After that, one node at a time, each
+# checked healthy before the next, so the cluster never loses more than one.
+- name: Decide how to roll the nodes
+  hosts: nodes
+  gather_facts: false
+  tasks:
+    - name: Is etcd already installed here?
+      ansible.builtin.stat:
+        path: /etc/containers/systemd/etcd.container
+      register: watchtower_etcd_unit
+
+    - name: Pick the batch size
+      ansible.builtin.set_fact:
+        watchtower_node_serial: >-
+          {{ groups['nodes'] | length
+             if groups['nodes'] | map('extract', hostvars, 'watchtower_etcd_unit') | map(attribute='stat.exists') | select | list | length == 0
+             else 1 }}
+      run_once: true
+      delegate_to: "{{ groups['nodes'][0] }}"
+      delegate_facts: true
+
+- name: Data nodes
+  hosts: nodes
+  serial: "{{ hostvars[groups['nodes'][0]]['watchtower_node_serial'] | default(1) }}"
+  roles:
+    - etcd
+    - patroni
+    - kafka
+    - loki
+    - mimir
+    - tempo
+    - grafana
+  post_tasks:
+    - name: This node is healthy before the next one goes
+      ansible.builtin.include_tasks: tasks/node-health.yml
+
+- name: Proxy
+  hosts: proxy
+  roles:
+    - edge

@@ -1,0 +1,25 @@
+---
+# Hands leadership to a healthy replica when this member leads, so a restart
+# is never an unplanned failover. Patroni answers /primary with 200 only on
+# the leader. A first start (nothing running yet) has nothing to hand over.
+- name: Is this member the leader?
+  ansible.builtin.uri:
+    url: http://{{ mesh_ip }}:{{ watchtower_ports.patroni }}/primary
+    status_code: [200, 503]
+  register: patroni_primary
+  failed_when: false
+
+- name: Switch over to a replica
+  ansible.builtin.command:
+    argv: [podman, exec, patroni, patronictl, -c, /etc/patroni/patroni.yml, switchover, --leader, "{{ inventory_hostname }}", --force]
+  when: patroni_primary.status | default(0) == 200
+  changed_when: true
+
+- name: Wait for the new leader to take over
+  ansible.builtin.uri:
+    url: http://{{ mesh_ip }}:{{ watchtower_ports.patroni }}/replica
+  register: patroni_replica
+  until: patroni_replica.status == 200
+  retries: 30
+  delay: 2
+  when: patroni_primary.status | default(0) == 200

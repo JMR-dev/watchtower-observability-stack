@@ -1,0 +1,80 @@
+---
+# Apache Kafka for Tempo's ingest path: three brokers in KRaft combined mode
+# (each also a controller), one per node, data replicated three ways with two
+# in sync required. Losing one node keeps both the controller quorum and the
+# writes. Listeners are on the mesh only and carry no authentication: nothing
+# but the nodes can reach them (roles/firewall).
+
+- name: Kafka directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+  loop:
+    # appuser in the image.
+    - {path: "{{ watchtower_data }}/kafka", owner: 1000}
+    - {path: "{{ watchtower_config }}/kafka", owner: root}
+
+- name: Kafka settings
+  ansible.builtin.template:
+    src: kafka.env.j2
+    dest: "{{ watchtower_config }}/kafka/kafka.env"
+    mode: "0644"
+  notify: Restart kafka
+
+- name: Pull Kafka
+  containers.podman.podman_image:
+    name: "{{ watchtower_images.kafka }}"
+
+- name: Kafka quadlet
+  ansible.builtin.template:
+    src: kafka.container.j2
+    dest: /etc/containers/systemd/kafka.container
+    mode: "0644"
+  notify: Restart kafka
+
+- name: Start Kafka
+  ansible.builtin.systemd_service:
+    name: kafka
+    state: started
+    daemon_reload: true
+
+- name: Apply Kafka changes now
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for this broker
+  ansible.builtin.wait_for:
+    host: "{{ mesh_ip }}"
+    port: "{{ watchtower_ports.kafka.broker }}"
+    timeout: 300
+
+# Pre-created, as Tempo's docs ask: its auto-create would make 1000
+# partitions. More partitions than live-stores per zone is fine (only owned
+# ones get writes) and leaves room to grow; they can be added, never removed.
+- name: Create Tempo's topic
+  ansible.builtin.command:
+    argv:
+      - podman
+      - exec
+      - kafka
+      - /opt/kafka/bin/kafka-topics.sh
+      - --bootstrap-server={{ mesh_ip }}:{{ watchtower_ports.kafka.broker }}
+      - --create
+      - --if-not-exists
+      - --topic={{ kafka_tempo_topic }}
+      - --partitions={{ kafka_tempo_partitions }}
+      - --replication-factor=3
+      - --config=min.insync.replicas=2
+      - --config=retention.ms={{ 24 * 3600 * 1000 }}
+      - --config=cleanup.policy=delete
+      - --config=max.message.bytes=16000000
+  register: kafka_topic
+  changed_when: "'Created topic' in kafka_topic.stdout"
+  # The whole quorum has to be up: on the first deploy every broker starts in
+  # this same pass.
+  until: kafka_topic.rc == 0
+  retries: 30
+  delay: 10
+  run_once: true

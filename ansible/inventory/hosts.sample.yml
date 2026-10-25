@@ -1,25 +1,39 @@
 ---
 # Shape of the inventory the cloud stack exports (`pulumi stack output
-# inventory`), with documentation addresses. Used by CI's syntax checks.
+# inventory`), with documentation addresses. CI's syntax checks and config
+# render use it.
 all:
   vars:
     ansible_user: root
     ansible_python_interpreter: /usr/bin/python3
-    watchtower_floating_ipv4: 198.51.100.7
     watchtower_admin_cidrs: [192.0.2.0/24, "2001:db8::/32", 34.26.149.196/32]
     watchtower_wireguard_cidrs: [0.0.0.0/0, "::/0"]
     watchtower_wireguard_port: 51820
-    watchtower_private_cidr: 10.20.0.0/16
-  hosts:
-    watchtower-1: {ansible_host: 203.0.113.11, ip: 10.20.1.11, access_ip: 10.20.1.11, watchtower_public_ipv4: 203.0.113.11}
-    watchtower-2: {ansible_host: 203.0.113.12, ip: 10.20.1.12, access_ip: 10.20.1.12, watchtower_public_ipv4: 203.0.113.12}
-    watchtower-3: {ansible_host: 203.0.113.13, ip: 10.20.1.13, access_ip: 10.20.1.13, watchtower_public_ipv4: 203.0.113.13}
+    watchtower_private_cidr: 10.20.1.0/24
+    watchtower_mesh_cidr: 10.30.0.0/24
+    watchtower_mesh_port: 51830
+    watchtower_domain: watchtower.jasonmross.dev
+    watchtower_vpn_host: vpn.watchtower.jasonmross.dev
+    watchtower_tunnel_ip: 10.8.0.1
+    watchtower_tunnel_cidr: 10.8.0.0/24
+    watchtower_gcp_project: watchtower-observe
+    watchtower_s3_endpoint: nbg1.your-objectstorage.com
+    watchtower_s3_region: nbg1
+    watchtower_buckets:
+      loki: jmr-watchtower-loki
+      mimir-blocks: jmr-watchtower-mimir-blocks
+      mimir-ruler: jmr-watchtower-mimir-ruler
+      mimir-alertmanager: jmr-watchtower-mimir-alertmanager
+      tempo: jmr-watchtower-tempo
+      logs-archive: jmr-watchtower-logs-archive
+    watchtower_archive_prefixes: {containers: containers/, journal: journal/, audit: audit/}
+    watchtower_retention_days: {loki: 30, mimir: 90, tempo: 30, log_archive: 90}
   children:
-    kube_control_plane:
-      hosts: {watchtower-1: {}, watchtower-2: {}, watchtower-3: {}}
-    etcd:
-      hosts: {watchtower-1: {}, watchtower-2: {}, watchtower-3: {}}
-    kube_node:
-      hosts: {watchtower-1: {}, watchtower-2: {}, watchtower-3: {}}
-    k8s_cluster:
-      children: {kube_control_plane: {}, kube_node: {}}
+    proxy:
+      hosts:
+        watchtower-proxy: {ansible_host: 198.51.100.7, private_ip: 10.20.1.10, mesh_ip: 10.30.0.10, volume_id: 100}
+    nodes:
+      hosts:
+        watchtower-1: {ansible_host: 203.0.113.11, private_ip: 10.20.1.11, mesh_ip: 10.30.0.11, volume_id: 101, node_index: 1, zone: a}
+        watchtower-2: {ansible_host: 203.0.113.12, private_ip: 10.20.1.12, mesh_ip: 10.30.0.12, volume_id: 102, node_index: 2, zone: b}
+        watchtower-3: {ansible_host: 203.0.113.13, private_ip: 10.20.1.13, mesh_ip: 10.30.0.13, volume_id: 103, node_index: 3, zone: c}

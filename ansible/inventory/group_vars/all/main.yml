@@ -1,6 +1,7 @@
 ---
-# Node preparation (roles base, firewall, fail2ban, floating_ip). Kubespray's
-# own settings live in kubespray.yml (all hosts) and ../k8s_cluster/.
+# Host-wide settings. Every name the cloud stack owns (buckets, addresses,
+# CIDRs, retention) arrives in the inventory instead (`pulumi stack output
+# inventory`); nothing here repeats one.
 
 timezone: Etc/UTC
 
@@ -11,4 +12,16 @@ fail2ban_ignoreip:
   - "::1"
   - 34.26.149.196/32
 
-# watchtower_floating_ipv4 comes from the inventory (cloud stack output).
+# The LUKS volume (roles/storage) is mounted here; every service keeps its
+# state in a directory of its own below it.
+watchtower_data: /srv/watchtower
+# Rendered configs, one directory per service.
+watchtower_config: /etc/watchtower
+
+# Node mesh IPs in inventory order, and the same list with this host's own
+# address first: Go's dialer tries /etc/hosts addresses in order, so a
+# container reaches its local copy of a service first and moves on to the
+# others when it is down.
+watchtower_node_ips: "{{ groups['nodes'] | map('extract', hostvars, 'mesh_ip') | list }}"
+watchtower_node_ips_local_first: >-
+  {{ ([mesh_ip] if mesh_ip in watchtower_node_ips else []) + (watchtower_node_ips | reject('equalto', mesh_ip) | list) }}

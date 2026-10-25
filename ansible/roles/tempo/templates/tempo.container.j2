@@ -1,0 +1,39 @@
+# Managed by Ansible (roles/tempo). Tempo {{ component }}.
+[Unit]
+Description=Tempo {{ component }}
+Wants=network-online.target wg-quick@wg1.service
+After=network-online.target wg-quick@wg1.service
+RequiresMountsFor={{ watchtower_data }}
+
+[Container]
+Image={{ watchtower_images.tempo }}
+ContainerName=tempo-{{ component }}
+Network=host
+User=10001
+Group=10001
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+LogDriver=journald
+Volume={{ watchtower_data }}/tempo/{{ component }}:/var/tempo:Z
+Volume={{ watchtower_config }}/tempo/{{ component }}:/etc/tempo:ro,Z
+Secret=s3-cluster-access-key,type=env,target=AWS_ACCESS_KEY_ID
+Secret=s3-cluster-secret-key,type=env,target=AWS_SECRET_ACCESS_KEY
+{% for ip in watchtower_node_ips_local_first %}
+AddHost=kafka.internal:{{ ip }}
+AddHost=mimir.internal:{{ ip }}
+{% endfor %}
+{% for ip in tempo_frontend_ips %}
+AddHost=tempo-frontend.internal:{{ ip }}
+{% endfor %}
+Exec=-target={{ component }} -config.file=/etc/tempo/tempo.yaml
+PodmanArgs=--memory={{ watchtower_memory.tempo[component] }}m
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

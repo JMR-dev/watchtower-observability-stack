@@ -1,0 +1,85 @@
+# Managed by Ansible (roles/loki). Loki {{ watchtower_images.loki.split(':')[1].split('@')[0] }}, -target=all, one of {{ groups['nodes'] | length }}.
+# S3 credentials come from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (the
+# cluster key, as podman secrets); the config names none.
+target: all
+auth_enabled: true
+
+server:
+  http_listen_address: {{ mesh_ip }}
+  http_listen_port: {{ watchtower_ports.loki.http }}
+  grpc_listen_address: {{ mesh_ip }}
+  grpc_listen_port: {{ watchtower_ports.loki.grpc }}
+  log_level: info
+
+common:
+  path_prefix: /loki
+  # Every write goes to three ingesters, one per node: losing a node (or a
+  # gated reboot) leaves a 2-of-3 quorum and writes keep flowing.
+  replication_factor: 3
+  instance_addr: {{ mesh_ip }}
+  ring:
+    kvstore:
+      store: memberlist
+  storage:
+    s3:
+      endpoint: {{ watchtower_s3_endpoint }}
+      region: {{ watchtower_s3_region }}
+      bucketnames: {{ watchtower_buckets.loki }}
+      s3forcepathstyle: true
+      insecure: false
+
+memberlist:
+  cluster_label: watchtower-loki
+  bind_addr: [{{ mesh_ip }}]
+  bind_port: {{ watchtower_ports.loki.memberlist }}
+  advertise_addr: {{ mesh_ip }}
+  advertise_port: {{ watchtower_ports.loki.memberlist }}
+  join_members:
+{% for ip in watchtower_node_ips %}
+    - {{ ip }}:{{ watchtower_ports.loki.memberlist }}
+{% endfor %}
+
+schema_config:
+  configs:
+    - from: "2026-10-01"
+      store: tsdb
+      object_store: s3
+      schema: v13
+      index:
+        prefix: loki_index_
+        period: 24h
+
+ingester:
+  wal:
+    dir: /loki/wal
+
+limits_config:
+  retention_period: {{ watchtower_retention_days.loki * 24 }}h
+  max_query_lookback: {{ watchtower_retention_days.loki * 24 }}h
+  max_query_length: {{ watchtower_retention_days.loki * 24 + 1 }}h
+  ingestion_rate_mb: 16
+  ingestion_burst_size_mb: 32
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+  allow_structured_metadata: true
+  volume_enabled: true
+  # GDPR right to erasure goes through the delete API (scripts/gdpr-purge.sh).
+  deletion_mode: filter-and-delete
+
+# One instance at a time runs it: the compactor elects itself through its
+# own ring.
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
+  compaction_interval: 10m
+  delete_request_store: s3
+
+ruler:
+  alertmanager_url: http://mimir.internal:{{ watchtower_ports.mimir.http }}/alertmanager
+  enable_api: true
+  rule_path: /loki/rules-temp
+
+analytics:
+  reporting_enabled: false

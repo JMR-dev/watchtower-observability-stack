@@ -1,0 +1,86 @@
+---
+# Tempo 3 in microservices mode: one process (and container) per component,
+# since Tempo runs exactly one target per process. Ingest goes through Kafka:
+# distributors write, live-stores (one per node, each its own zone) serve
+# recent traces, the block builder writes blocks to S3, the scheduler and
+# workers compact and enforce retention, metrics generators turn spans into
+# Mimir series.
+
+- name: Tempo directories
+  ansible.builtin.file:
+    path: "{{ item.0 }}/{{ item.1 }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ 10001 if item.0 == watchtower_data + '/tempo' else 'root' }}"
+    group: "{{ 10001 if item.0 == watchtower_data + '/tempo' else 'root' }}"
+  loop: "{{ [watchtower_data + '/tempo', watchtower_config + '/tempo'] | product(tempo_components) | list }}"
+
+- name: Tempo configs, one per component
+  ansible.builtin.template:
+    src: tempo.yaml.j2
+    dest: "{{ watchtower_config }}/tempo/{{ item }}/tempo.yaml"
+    mode: "0644"
+  loop: "{{ tempo_components }}"
+  vars:
+    component: "{{ item }}"
+  register: tempo_configs
+
+- name: Tempo's S3 key
+  ansible.builtin.include_role:
+    name: quadlet
+    tasks_from: secrets
+  vars:
+    quadlet_secrets:
+      - {name: s3-cluster-access-key, value: "{{ watchtower_secret.s3_cluster_access_key }}"}
+      - {name: s3-cluster-secret-key, value: "{{ watchtower_secret.s3_cluster_secret_key }}"}
+
+- name: Pull Tempo
+  containers.podman.podman_image:
+    name: "{{ watchtower_images.tempo }}"
+
+- name: Tempo quadlets, one per component
+  ansible.builtin.template:
+    src: tempo.container.j2
+    dest: /etc/containers/systemd/tempo-{{ item }}.container
+    mode: "0644"
+  loop: "{{ tempo_components }}"
+  vars:
+    component: "{{ item }}"
+  register: tempo_units
+
+# A singleton moved to another node leaves its unit here; stop and remove it
+# so two never run.
+- name: Stop components this node no longer runs
+  ansible.builtin.systemd_service:
+    name: tempo-{{ item }}
+    state: stopped
+  loop: "{{ tempo_all_components | difference(tempo_components) }}"
+  failed_when: false
+
+- name: Remove their quadlets
+  ansible.builtin.file:
+    path: /etc/containers/systemd/tempo-{{ item }}.container
+    state: absent
+  loop: "{{ tempo_all_components | difference(tempo_components) }}"
+
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# Per component, restarting only what changed: a whole-Tempo restart would
+# drop every live-store at once.
+- name: Restart changed components
+  ansible.builtin.systemd_service:
+    name: tempo-{{ item }}
+    state: restarted
+  loop: "{{ tempo_components }}"
+  when: >-
+    quadlet_secrets_changed | bool
+    or (tempo_configs.results | selectattr('item', 'equalto', item) | first).changed
+    or (tempo_units.results | selectattr('item', 'equalto', item) | first).changed
+
+- name: Start every component
+  ansible.builtin.systemd_service:
+    name: tempo-{{ item }}
+    state: started
+  loop: "{{ tempo_components }}"

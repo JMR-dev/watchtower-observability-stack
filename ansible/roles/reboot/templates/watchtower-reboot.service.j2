@@ -1,0 +1,8 @@
+# Managed by Ansible (roles/reboot).
+[Unit]
+Description=Reboot for updates, when due and the cluster can spare this host
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/watchtower-reboot

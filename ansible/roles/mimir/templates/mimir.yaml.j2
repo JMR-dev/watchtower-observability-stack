@@ -1,0 +1,106 @@
+# Managed by Ansible (roles/mimir). Mimir {{ watchtower_images.mimir.split(':')[1].split('@')[0] }}, one of {{ groups['nodes'] | length }} monolithic
+# replicas. S3 credentials come from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+# (the cluster key, as podman secrets).
+{% macro s3(bucket) %}
+  s3:
+    endpoint: {{ watchtower_s3_endpoint }}
+    region: {{ watchtower_s3_region }}
+    bucket_name: {{ watchtower_buckets[bucket] }}
+    insecure: false
+{%- endmacro %}
+{# Every ring: memberlist, and the mesh address. Mimir would otherwise
+   advertise the first interface it finds, which is the public one. #}
+{% macro ring(rf=none) %}
+    kvstore:
+      store: memberlist
+    instance_addr: {{ mesh_ip }}
+{% if rf %}
+    replication_factor: {{ rf }}
+{% endif %}
+{%- endmacro %}
+target: all,alertmanager,overrides-exporter
+multitenancy_enabled: true
+activity_tracker:
+  filepath: /data/metrics-activity.log
+
+server:
+  http_listen_address: {{ mesh_ip }}
+  http_listen_port: {{ watchtower_ports.mimir.http }}
+  grpc_listen_address: {{ mesh_ip }}
+  grpc_listen_port: {{ watchtower_ports.mimir.grpc }}
+  log_level: info
+
+# Classic architecture: Kafka-based ingest storage crashes monolithic 3.2.3
+# (mimir#13468).
+ingest_storage:
+  enabled: false
+
+memberlist:
+  cluster_label: watchtower-mimir
+  bind_addr: [{{ mesh_ip }}]
+  bind_port: {{ watchtower_ports.mimir.memberlist }}
+  advertise_addr: {{ mesh_ip }}
+  advertise_port: {{ watchtower_ports.mimir.memberlist }}
+  join_members:
+{% for ip in watchtower_node_ips %}
+    - {{ ip }}:{{ watchtower_ports.mimir.memberlist }}
+{% endfor %}
+
+blocks_storage:
+  backend: s3
+{{ s3('mimir-blocks') }}
+  tsdb:
+    dir: /data/tsdb
+    retention_period: 24h
+  bucket_store:
+    sync_dir: /data/tsdb-sync
+
+ruler_storage:
+  backend: s3
+{{ s3('mimir-ruler') }}
+
+alertmanager_storage:
+  backend: s3
+{{ s3('mimir-alertmanager') }}
+
+distributor:
+  ring:
+{{ ring() }}
+
+ingester:
+  ring:
+{{ ring(3) }}
+
+store_gateway:
+  sharding_ring:
+{{ ring(3) }}
+
+compactor:
+  data_dir: /data/compactor
+  sharding_ring:
+{{ ring() }}
+
+ruler:
+  rule_path: /data/rules
+  alertmanager_url: http://{{ mesh_ip }}:{{ watchtower_ports.mimir.http }}/alertmanager
+  ring:
+{{ ring() }}
+
+alertmanager:
+  data_dir: /data/alertmanager
+  external_url: https://{{ watchtower_domain }}:{{ watchtower_ports.edge.mimir }}/alertmanager
+  sharding_ring:
+{{ ring(3) }}
+
+limits:
+  compactor_blocks_retention_period: {{ watchtower_retention_days.mimir }}d
+  ingestion_rate: 100000
+  ingestion_burst_size: 1000000
+  max_global_series_per_user: 500000
+  max_label_names_per_series: 30
+
+runtime_config:
+  file: /etc/mimir/runtime.yaml
+
+usage_stats:
+  enabled: false

@@ -1,8 +1,7 @@
 ---
 # SSH brute-force protection. The Hetzner firewall limits SSH to adminCidrs
 # and the CI runners; fail2ban covers the case where adminCidrs is wide open.
-# It keeps its own nftables table (inet f2b-table), apart from the tables
-# Kubernetes and Cilium manage.
+# It keeps its own nftables table (inet f2b-table), apart from roles/firewall's.
 
 - name: Enable EPEL (provides fail2ban on AlmaLinux 10)
   ansible.builtin.dnf:

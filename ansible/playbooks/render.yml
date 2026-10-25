@@ -1,0 +1,75 @@
+---
+# Renders every template, per host, into .render/<host>/ on the controller,
+# from the sample inventory and stand-in secrets, for CI's config checks
+# (scripts/check-configs.sh) and for reading. Touches no host.
+#
+#   ansible-playbook -i inventory/hosts.sample.yml playbooks/render.yml
+
+- name: Render every host's configs locally
+  hosts: proxy:nodes
+  connection: local
+  gather_facts: false
+  vars:
+    render_dir: "{{ playbook_dir }}/../.render/{{ inventory_hostname }}"
+    caddy_image: europe-west3-docker.pkg.dev/watchtower-observe/watchtower/caddy@sha256:{{ '0' * 64 }}
+    patroni_image: europe-west3-docker.pkg.dev/watchtower-observe/watchtower/patroni@sha256:{{ '0' * 64 }}
+    common:
+      - {src: firewall/templates/watchtower.nft.j2, dest: watchtower.nft}
+      - {src: mesh/templates/wg1.conf.j2, dest: wg1.conf}
+      - {src: logship/templates/fluent-bit.conf.j2, dest: fluent-bit/fluent-bit.conf}
+      - {src: logship/templates/fluent-bit.container.j2, dest: quadlets/fluent-bit.container}
+      - {src: reboot/templates/watchtower-reboot.sh.j2, dest: watchtower-reboot.sh}
+      - {src: reboot/templates/watchtower-reboot.timer.j2, dest: watchtower-reboot.timer}
+    per_node:
+      - {src: loki/templates/loki.yaml.j2, dest: loki/loki.yaml}
+      - {src: loki/templates/loki.container.j2, dest: quadlets/loki.container}
+      - {src: mimir/templates/mimir.yaml.j2, dest: mimir/mimir.yaml}
+      - {src: mimir/templates/runtime.yaml.j2, dest: mimir/runtime.yaml}
+      - {src: mimir/templates/mimir.container.j2, dest: quadlets/mimir.container}
+      - {src: kafka/templates/kafka.env.j2, dest: kafka/kafka.env}
+      - {src: kafka/templates/kafka.container.j2, dest: quadlets/kafka.container}
+      - {src: etcd/templates/etcd.container.j2, dest: quadlets/etcd.container}
+      - {src: patroni/templates/patroni.yml.j2, dest: patroni/patroni.yml}
+      - {src: patroni/templates/patroni.container.j2, dest: quadlets/patroni.container}
+      - {src: grafana/templates/grafana.ini.j2, dest: grafana/grafana.ini}
+      - {src: grafana/templates/datasources.yaml.j2, dest: grafana/datasources.yaml}
+      - {src: grafana/templates/grafana.container.j2, dest: quadlets/grafana.container}
+    per_proxy:
+      - {src: edge/templates/Caddyfile.j2, dest: caddy/Caddyfile}
+      - {src: edge/templates/caddy.container.j2, dest: quadlets/caddy.container}
+      - {src: edge/templates/wg-easy.container.j2, dest: quadlets/wg-easy.container}
+  tasks:
+    # A fact, not a play var: every host's wg1.conf reads the others'.
+    - name: Stand-in mesh public keys
+      ansible.builtin.set_fact:
+        mesh_public_key: "{{ ('stand-in public key for ' ~ inventory_hostname) | hash('sha256') | b64encode | truncate(43, True, '') }}="
+
+    - name: Role defaults the templates use
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../roles/tempo/defaults/main.yml"
+
+    - name: Output directories
+      ansible.builtin.file:
+        path: "{{ render_dir }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: [quadlets, fluent-bit, loki, mimir, kafka, patroni, grafana, caddy, tempo]
+
+    - name: Templates every host renders
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/{{ item.src }}"
+        dest: "{{ render_dir }}/{{ item.dest }}"
+        mode: "0644"
+      loop: "{{ common + (per_node if 'nodes' in group_names else per_proxy) }}"
+
+    - name: Tempo, per component
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/tempo/templates/{{ item.0 }}"
+        dest: "{{ render_dir }}/{{ item.1 }}/{{ prefix }}{{ component }}{{ suffix }}"
+        mode: "0644"
+      vars:
+        prefix: "{{ 'tempo-' if item.1 == 'quadlets' else '' }}"
+        suffix: "{{ '.yaml' if item.0 == 'tempo.yaml.j2' else '.container' }}"
+        component: "{{ item.2 }}"
+      loop: "{{ ['tempo.yaml.j2', 'tempo.container.j2'] | zip(['tempo', 'quadlets']) | product(tempo_components) | map('flatten') | list }}"
+      when: "'nodes' in group_names"

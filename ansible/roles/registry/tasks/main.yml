@@ -1,0 +1,14 @@
+---
+# Credentials for our own images in Artifact Registry: the read-only
+# gar-pull-key, as a podman auth file only root can read. Quadlets that run
+# those images pass it with --authfile; every other image is public.
+
+- name: Write the registry auth file
+  ansible.builtin.copy:
+    dest: "{{ watchtower_config }}/registry-auth.json"
+    content: >-
+      {{ {'auths': {watchtower_registry: {'auth': ('_json_key:' + watchtower_secret.gar_pull_key) | b64encode}}} | to_json }}
+    mode: "0600"
+    owner: root
+    group: root
+  no_log: true

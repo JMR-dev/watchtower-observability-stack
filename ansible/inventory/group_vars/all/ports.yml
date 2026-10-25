@@ -1,0 +1,29 @@
+---
+# Every port a service listens on. Backends bind only their host's mesh IP
+# (wg1) with Network=host, so the processes sharing a host need distinct
+# ports. roles/firewall opens them on wg1 only.
+watchtower_ports:
+  loki: {http: 3100, grpc: 9096, memberlist: 7947}
+  mimir: {http: 8080, grpc: 9095, memberlist: 7946}
+  # One process per Tempo component (Tempo 3 runs exactly one target per
+  # process). Caddy reaches the query frontends and the distributors.
+  tempo:
+    query-frontend: {http: 3200, grpc: 9200, memberlist: 7950}
+    distributor: {http: 3201, grpc: 9201, memberlist: 7951}
+    live-store: {http: 3202, grpc: 9202, memberlist: 7952}
+    querier: {http: 3203, grpc: 9203, memberlist: 7953}
+    backend-worker: {http: 3204, grpc: 9204, memberlist: 7954}
+    metrics-generator: {http: 3205, grpc: 9205, memberlist: 7955}
+    block-builder: {http: 3206, grpc: 9206, memberlist: 7956}
+    backend-scheduler: {http: 3207, grpc: 9207, memberlist: 7957}
+  otlp: {grpc: 4317, http: 4318}
+  kafka: {broker: 9092, controller: 9093}
+  etcd: {client: 2379, peer: 2380}
+  patroni: 8008
+  postgres: 5432
+  grafana: {http: 3000, alerting: 9094}
+  fluentbit: 2020
+  # wg-easy's UI, on the proxy's loopback; Caddy serves it on :51821.
+  wg_easy_ui: 51822
+  # Caddy's listeners, on the tunnel address 10.8.0.1 only.
+  edge: {grafana: 443, loki: 3100, mimir: 8080, tempo: 3200, otlp_grpc: 4317, otlp_http: 4318, wg_easy: 51821}

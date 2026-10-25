@@ -1,0 +1,72 @@
+# Managed by Ansible (roles/logship). Every container's log, the host's
+# journal and the audit log, to the log-archive bucket (90-day lifecycle) on
+# Hetzner Object Storage.
+#
+# Container logs reach the journal (podman's journald log driver) and carry
+# CONTAINER_NAME; the rewrite below files them under containers/, the rest
+# of the journal under journal/.
+#
+# use_put_object: one PUT per chunk. The cluster key is write-only on the
+# archive (bucket policy) and may not run multipart uploads, so this is
+# required.
+#
+# retry_limit: the S3 plugin caps "no_limits" at 5 attempts (about 30 s of
+# linear backoff), then quarantines the chunk on disk and never sends it. 300
+# attempts at 2 s more each ride out about a day of S3 outage.
+# store_dir_limit_size: the buffer for that outage, bounded so it cannot fill
+# the volume.
+
+[SERVICE]
+    Flush                     5
+    Daemon                    Off
+    Log_Level                 info
+    HTTP_Server               On
+    HTTP_Listen               127.0.0.1
+    HTTP_Port                 {{ watchtower_ports.fluentbit }}
+    Health_Check              On
+    storage.path              /var/lib/fluent-bit/storage
+    storage.sync              normal
+    storage.backlog.mem_limit 16M
+
+[INPUT]
+    Name              systemd
+    Tag               journal.host
+    Path              /var/log/journal
+    DB                /var/lib/fluent-bit/journal.db
+    Strip_Underscores On
+    storage.type      filesystem
+
+[INPUT]
+    Name              tail
+    Tag               audit.host
+    Path              /var/log/audit/audit.log
+    DB                /var/lib/fluent-bit/audit.db
+    Mem_Buf_Limit     16MB
+    storage.type      filesystem
+
+[FILTER]
+    Name    rewrite_tag
+    Match   journal.host
+    Rule    $CONTAINER_NAME ^.+$ containers.$CONTAINER_NAME false
+
+[FILTER]
+    Name    record_modifier
+    Match   *
+    Record  node {{ inventory_hostname }}
+{% for prefix, match in [(watchtower_archive_prefixes.containers, 'containers.*'), (watchtower_archive_prefixes.journal, 'journal.*'), (watchtower_archive_prefixes.audit, 'audit.*')] %}
+
+[OUTPUT]
+    Name                 s3
+    Match                {{ match }}
+    bucket               {{ watchtower_buckets['logs-archive'] }}
+    region               {{ watchtower_s3_region }}
+    endpoint             https://{{ watchtower_s3_endpoint }}
+    use_put_object       On
+    compression          gzip
+    total_file_size      50M
+    upload_timeout       5m
+    store_dir            /var/lib/fluent-bit/s3-{{ prefix | trim('/') }}
+    s3_key_format        /{{ prefix }}%Y/%m/%d/%H/{{ inventory_hostname }}-%M%S-$UUID.gz
+    retry_limit          300
+    store_dir_limit_size 5G
+{% endfor %}

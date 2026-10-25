@@ -1,0 +1,35 @@
+# Managed by Ansible (roles/logship).
+[Unit]
+Description=Fluent Bit (journal and audit log to the log archive)
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor={{ watchtower_data }}
+
+[Container]
+Image={{ watchtower_images.fluentbit }}
+ContainerName=fluent-bit
+Network=host
+# It reads the host's journal and /var/log/audit (auditd_log_t), which an
+# SELinux-confined container may not; the same exception the Kubernetes
+# design made with spc_t. Read-only mounts, every capability dropped but
+# reading files it doesn't own.
+SecurityLabelDisable=true
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+AddCapability=DAC_READ_SEARCH
+LogDriver=journald
+Volume=/var/log:/var/log:ro
+Volume=/etc/machine-id:/etc/machine-id:ro
+Volume={{ watchtower_data }}/fluent-bit:/var/lib/fluent-bit
+Volume={{ watchtower_config }}/fluent-bit:/fluent-bit/etc:ro
+Secret=s3-cluster-access-key,type=env,target=AWS_ACCESS_KEY_ID
+Secret=s3-cluster-secret-key,type=env,target=AWS_SECRET_ACCESS_KEY
+PodmanArgs=--memory={{ watchtower_memory.fluentbit }}m
+
+[Service]
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+# Patroni and its Postgres driver, for the image (Dockerfile). Locked for
+# linux/arm64 (the nodes) with hashes:
+#   uv pip compile --generate-hashes --python-version 3.13 --python-platform aarch64-manylinux_2_28 requirements.in -o requirements.txt
+patroni[etcd3]==4.1.5
+psycopg[binary]==3.3.6

@@ -1,0 +1,100 @@
+---
+# The proxy: wg-easy ends the client VPN (wg0, the tunnel address
+# 10.8.0.1) and Caddy, on that address only, terminates TLS for
+# watchtower.jasonmross.dev and spreads each port across the nodes over the
+# mesh, with health checks, so a node down is a node skipped.
+
+- name: Caddy needs its image
+  ansible.builtin.assert:
+    that: caddy_image is defined and caddy_image | length > 0
+    fail_msg: pass -e caddy_image=<registry>/caddy@sha256:... (the deploy workflow does)
+
+# wg-easy runs `iptables` for its own rules; nft_masq backs them.
+- name: Load nft_masq at boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/wg-easy.conf
+    mode: "0644"
+    content: "nft_masq\n"
+
+- name: Load nft_masq now
+  community.general.modprobe:
+    name: nft_masq
+    state: present
+
+- name: Edge directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+  loop:
+    - {path: "{{ watchtower_data }}/wg-easy", owner: root}
+    # Caddy runs as 1000 in our image.
+    - {path: "{{ watchtower_data }}/caddy", owner: 1000}
+    - {path: "{{ watchtower_data }}/caddy/data", owner: 1000}
+    - {path: "{{ watchtower_data }}/caddy/config", owner: 1000}
+    - {path: "{{ watchtower_config }}/caddy", owner: root}
+
+- name: Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ watchtower_config }}/caddy/Caddyfile"
+    mode: "0644"
+  notify: Restart caddy
+
+- name: Edge secrets
+  ansible.builtin.include_role:
+    name: quadlet
+    tasks_from: secrets
+  vars:
+    quadlet_secrets:
+      - {name: wg-easy-password, value: "{{ watchtower_secret.wg_easy_password }}"}
+      - {name: caddy-dns-key, value: "{{ watchtower_secret.caddy_dns_key }}"}
+
+# wg-easy reads its password only on first start (INIT_*); Caddy reads the
+# DNS key at every renewal, so only Caddy restarts for it.
+- name: Restart Caddy when its key changed
+  ansible.builtin.debug:
+    msg: secrets changed
+  changed_when: quadlet_secrets_changed | bool
+  notify: Restart caddy
+
+- name: Pull wg-easy
+  containers.podman.podman_image:
+    name: "{{ watchtower_images.wg_easy }}"
+
+- name: Pull Caddy
+  containers.podman.podman_image:
+    name: "{{ caddy_image }}"
+    auth_file: "{{ watchtower_config }}/registry-auth.json"
+
+- name: Quadlet for wg-easy
+  ansible.builtin.template:
+    src: wg-easy.container.j2
+    dest: /etc/containers/systemd/wg-easy.container
+    mode: "0644"
+  notify: Restart wg-easy
+
+- name: Quadlet for Caddy
+  ansible.builtin.template:
+    src: caddy.container.j2
+    dest: /etc/containers/systemd/caddy.container
+    mode: "0644"
+  notify: Restart caddy
+
+- name: Start wg-easy and Caddy
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: started
+    daemon_reload: true
+  loop: [wg-easy, caddy]
+
+- name: Apply edge changes now
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for Caddy on the tunnel address
+  ansible.builtin.wait_for:
+    host: "{{ watchtower_tunnel_ip }}"
+    port: "{{ watchtower_ports.edge.loki }}"
+    timeout: 180
