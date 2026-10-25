@@ -57,7 +57,7 @@ and nothing else.
 | DNS | Records in the zone `scripts/bootstrap.sh` created and delegated | `infra/cloud/dns.go` |
 | Hosts | Updates, journald, SELinux, nftables, fail2ban, the wg1 mesh, the LUKS volume, gated reboots, Fluent Bit | `ansible/roles/{base,firewall,fail2ban,mesh,storage,reboot,logship}` |
 | Services | One role each; every container a quadlet in `/etc/containers/systemd` | `ansible/roles/{loki,mimir,kafka,tempo,etcd,patroni,grafana,edge}` |
-| Images | Caddy and Patroni, built natively on the arm64 runner, checked and scanned | `build/`, `scripts/build-image.sh` |
+| Images | Caddy, wg-easy (on Alpine) and Patroni, built natively on the arm64 runner, checked and scanned; tagged version, Alpine release and revision, and reused while the tag stands | `build/`, `scripts/{image-tag,build-image,publish-image}.sh` |
 
 ## Data flow
 
@@ -146,8 +146,9 @@ and nothing else.
 - **`ci.yml`** checks every pull request: Go (100% coverage); Ansible syntax
   and lint, every host's firewall through `nft --check`; every rendered
   config through the program that reads it (quadlet, Loki, Mimir, Tempo,
-  Fluent Bit; shellcheck for the host scripts); both images (native builds,
-  their configs checked with the built image, Trivy); Semgrep; shellcheck,
-  actionlint, the Alloy example.
-- **`deploy.yml`** on merge to main: both images (to Artifact Registry),
-  `infra/cloud`, `ansible/playbooks/site.yml`, then `scripts/verify.sh`.
+  Fluent Bit; shellcheck for the host scripts); our images (native builds,
+  their configs checked with the built image, Trivy, a new tag for any
+  change); Semgrep; shellcheck, actionlint, the Alloy example.
+- **`deploy.yml`** on merge to main: our images (to Artifact Registry, on
+  Alpine's newest patch release), `infra/cloud`,
+  `ansible/playbooks/site.yml`, then `scripts/verify.sh`.

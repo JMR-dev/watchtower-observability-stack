@@ -4,7 +4,7 @@
 #      address, over TLS with a valid certificate for the domain;
 #   2. a log line pushed through Caddy comes back from a Loki query;
 #   3. an OTLP span pushed through Caddy comes back from Tempo;
-#   4. the proxy runs the Caddy image this deploy built (by digest);
+#   4. the proxy runs this commit's Caddy image (its tag, scripts/image-tag.sh);
 #   5. the clusters are whole: Loki's and Mimir's ingester rings have every
 #      node ACTIVE, Kafka has no under-replicated partition, Patroni has a
 #      leader and every replica streaming;
@@ -14,7 +14,7 @@
 #   8. every host passes its own health check (roles/health), the one its
 #      Healthchecks.io check hears from every 5 minutes.
 #
-#   scripts/verify.sh <caddy-image-digest> <logs-archive-bucket>
+#   scripts/verify.sh <logs-archive-bucket>
 #
 # Runs from the deploy runner over SSH, with the inventory and pinned host
 # keys the job wrote (ansible/inventory/{hosts.yml,known_hosts}) and the key
@@ -23,13 +23,15 @@
 # WATCHTOWER_SSH_VIA=vpn to reach the proxy on the tunnel address instead.
 # The checks through Caddy run on the proxy itself, against 10.8.0.1, so
 # they cover TLS, Caddy's routing and every backend without a VPN peer.
-# Needs: ssh, jq, aws (admin S3 key in AWS_*).
+# Needs: ssh, jq, curl, aws (admin S3 key in AWS_*). Takes the deploy's
+# ALPINE_RELEASE for the Caddy tag, else resolves the newest one.
 
 set -euo pipefail
 
-[[ $# -eq 2 ]] || { echo "usage: $0 <caddy-image-digest> <logs-archive-bucket>" >&2; exit 1; }
-want_digest="$1" archive="$2"
+[[ $# -eq 1 ]] || { echo "usage: $0 <logs-archive-bucket>" >&2; exit 1; }
+archive="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+caddy_tag="$("${repo_root}/scripts/image-tag.sh" caddy)"
 inv="${repo_root}/ansible/inventory/hosts.yml"
 known="${repo_root}/ansible/inventory/known_hosts"
 
@@ -119,9 +121,9 @@ echo "    pushed and read back trace ${trace_id}"
 
 # ---------------------------------------------------------------------------
 log "4/8 Caddy image"
-running="$(on "$proxy_ip" podman inspect caddy --format '{{.ImageDigest}}')"
-[[ "$running" == "$want_digest" ]] || fail "the proxy runs ${running}, not ${want_digest}"
-echo "    caddy is ${want_digest}"
+running="$(on "$proxy_ip" podman inspect caddy --format '{{.ImageName}}')"
+[[ "$running" == */watchtower/caddy:"$caddy_tag" ]] || fail "the proxy runs ${running}, not caddy:${caddy_tag}"
+echo "    caddy is ${running}"
 
 # ---------------------------------------------------------------------------
 log "5/8 the clusters are whole"

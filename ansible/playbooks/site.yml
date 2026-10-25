@@ -1,9 +1,11 @@
 ---
 # Everything on the hosts, from a fresh server to a running stack, and every
 # deploy after that. The deploy workflow runs it with the image digests it
-# just built (caddy_image, patroni_image) and the secrets in its environment.
+# just pushed or found (their tags, scripts/image-tag.sh) and the secrets in
+# its environment.
 #
-#   ansible-playbook playbooks/site.yml -e caddy_image=... -e patroni_image=...
+#   scripts/image-tag.sh --vars >image-tags.json
+#   ansible-playbook playbooks/site.yml -e @image-tags.json
 
 - name: Check the deploy's inputs
   hosts: localhost
@@ -16,6 +18,14 @@
         quiet: true
       loop: "{{ watchtower_secret.keys() | list }}"
       no_log: true
+
+    - name: Every one of our images has a tag
+      ansible.builtin.assert:
+        that: watchtower_image_tags[item] | default('') | length > 0
+        fail_msg: "no tag for {{ item }}: pass -e @image-tags.json from scripts/image-tag.sh --vars (the deploy does)"
+        quiet: true
+      # Every build/<name>/.
+      loop: "{{ lookup('ansible.builtin.pipe', playbook_dir ~ '/../../scripts/image-tag.sh --names').splitlines() }}"
 
 - name: Host baseline, firewall, mesh and storage
   hosts: proxy:nodes

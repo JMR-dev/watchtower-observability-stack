@@ -4,22 +4,26 @@
 # watchtower.jasonmross.dev and spreads each port across the nodes over the
 # mesh, with health checks, so a node down is a node skipped.
 
-- name: Caddy needs its image
+- name: The edge needs its images' tags (wg-easy, Caddy)
   ansible.builtin.assert:
-    that: caddy_image is defined and caddy_image | length > 0
-    fail_msg: pass -e caddy_image=<registry>/caddy@sha256:... (the deploy workflow does)
+    that: watchtower_image_tags[item] | default('') | length > 0
+    fail_msg: pass -e @image-tags.json from scripts/image-tag.sh --vars (the deploy workflow does)
+  loop: [wg-easy, caddy]
 
-# wg-easy runs `iptables` for its own rules; nft_masq backs them.
-- name: Load nft_masq at boot
+# wg-easy's interface hooks run `iptables`, nftables-backed in our image:
+# nft_masq does its masquerade and nft_compat the matches it can't translate.
+# The container has no CAP_SYS_MODULE, so they load on the host.
+- name: Load wg-easy's nftables modules at boot
   ansible.builtin.copy:
     dest: /etc/modules-load.d/wg-easy.conf
     mode: "0644"
-    content: "nft_masq\n"
+    content: "nft_masq\nnft_compat\n"
 
-- name: Load nft_masq now
+- name: Load wg-easy's nftables modules now
   community.general.modprobe:
-    name: nft_masq
+    name: "{{ item }}"
     state: present
+  loop: [nft_masq, nft_compat]
 
 - name: Edge directories
   ansible.builtin.file:
@@ -63,6 +67,7 @@
 - name: Pull wg-easy
   containers.podman.podman_image:
     name: "{{ watchtower_images.wg_easy }}"
+    auth_file: "{{ watchtower_config }}/registry-auth.json"
 
 - name: Pull Caddy
   containers.podman.podman_image:

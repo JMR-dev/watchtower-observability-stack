@@ -8,10 +8,15 @@
 # Python and the packages come from uv: a uv-managed CPython (uv checks its
 # hash) and requirements.txt, locked with hashes for arm64. Bump Patroni or
 # psycopg in requirements.in and recompile (the command is in its header).
+#
+# Any change here needs a new tag: a new version label, or else the next
+# watchtower.image.revision (back to 1 with a new version).
 
 FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
 
 FROM docker.io/library/postgres:18.6@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+LABEL org.opencontainers.image.version="4.1.5"
+LABEL watchtower.image.revision="1"
 
 ENV UV_PYTHON_INSTALL_DIR=/opt/python \
     UV_PYTHON_PREFERENCE=only-managed \

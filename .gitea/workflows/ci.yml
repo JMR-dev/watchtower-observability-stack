@@ -3,7 +3,7 @@
 #
 # Require these checks in the branch protection for main (Settings ->
 # Branches): go, ansible, configs, images (caddy), images (patroni),
-# semgrep, shell, alloy.
+# images (wg-easy), semgrep, shell, alloy.
 #
 # Runs on the GKE runners (gitea-496920/gitea-runners; the gitea repo's
 # docs/runners.md):
@@ -12,8 +12,8 @@
 #                  providers' Go SDKs needs the memory
 #   docker         the Docker-in-Docker runner (amd64); `docker build` and
 #                  every check that runs a container image
-#   docker-arm64   the same on arm64 (Spot, scale-to-zero): both of our
-#                  images, built natively for the hosts, which are all ARM
+#   docker-arm64   the same on arm64 (Spot, scale-to-zero): our images,
+#                  built natively for the hosts, which are all ARM
 #
 # Actions are pinned to a full commit SHA, with the release in a comment.
 name: ci
@@ -110,10 +110,10 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
+      # Every build/<name>/; a Go test keeps this list and deploy.yml's equal
+      # to those directories.
       matrix:
-        include:
-          - image: caddy
-          - image: patroni
+        image: [caddy, patroni, wg-easy]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.gitea/actions/setup
@@ -122,6 +122,13 @@ jobs:
       - name: Render the configs the image is checked against
         working-directory: ansible
         run: ansible-playbook -i inventory/hosts.sample.yml playbooks/render.yml >/dev/null
+      # The deploy reuses an image whose tag is in the registry, so a change
+      # that keeps the tag would never ship.
+      - name: A changed image has a new tag
+        run: |
+          set -euo pipefail
+          git fetch -q --no-tags --depth=1 origin "$GITHUB_BASE_REF"
+          scripts/image-tag.sh --check FETCH_HEAD
       - name: Build, check its config, Trivy scan (no push)
         run: scripts/build-image.sh "${{ matrix.image }}" "watchtower-${{ matrix.image }}:ci-${GITHUB_SHA:0:12}"
 

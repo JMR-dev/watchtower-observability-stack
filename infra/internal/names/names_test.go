@@ -2,6 +2,7 @@ package names
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -173,5 +174,38 @@ func TestBootstrapGrantsDeployWrittenSecrets(t *testing.T) {
 	got := strings.Fields(m[1])
 	if !reflect.DeepEqual(got, DeployWrittenSecrets) {
 		t.Errorf("bootstrap.sh deploy_written = %v, want %v", got, DeployWrittenSecrets)
+	}
+}
+
+// ci.yml and deploy.yml build every image in build/ and nothing else: an
+// image missing from deploy.yml would never reach the registry, and the
+// hosts job would install a tag that isn't there.
+func TestImageMatricesMatchBuildDirs(t *testing.T) {
+	dockerfiles, err := filepath.Glob("../../../build/*/Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	for _, f := range dockerfiles {
+		want = append(want, filepath.Base(filepath.Dir(f)))
+	}
+	if len(want) == 0 {
+		t.Fatal("no build/*/Dockerfile")
+	}
+	matrix := regexp.MustCompile(`(?m)^\s+image: \[([a-z0-9, -]*)\]$`)
+	for _, wf := range []string{"ci.yml", "deploy.yml"} {
+		b, err := os.ReadFile("../../../.gitea/workflows/" + wf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := matrix.FindStringSubmatch(string(b))
+		if m == nil {
+			t.Errorf("%s has no `image: [...]` matrix", wf)
+			continue
+		}
+		got := strings.Split(m[1], ", ")
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s builds %v, want every build/ image %v", wf, got, want)
+		}
 	}
 }

@@ -14,8 +14,8 @@ AddCapability=NET_ADMIN
 AddCapability=NET_RAW
 # It creates wg0 over netlink and writes iptables rules, which an
 # SELinux-confined container may not; the same exception the old single-VM
-# design made. The wireguard and nft_masq modules are preloaded, so it needs
-# no SYS_MODULE.
+# design made. The wireguard, nft_masq and nft_compat modules are preloaded,
+# so it needs no SYS_MODULE.
 SecurityLabelDisable=true
 LogDriver=journald
 Volume={{ watchtower_data }}/wg-easy:/etc/wireguard
@@ -33,7 +33,7 @@ Secret=wg-easy-password,type=env,target=INIT_PASSWORD
 Environment=HOST=127.0.0.1
 Environment=PORT={{ watchtower_ports.wg_easy_ui }}
 Environment=TRUSTED_PROXIES=127.0.0.1
-PodmanArgs=--memory={{ watchtower_memory.wg_easy }}m
+PodmanArgs=--memory={{ watchtower_memory.wg_easy }}m --authfile={{ watchtower_config }}/registry-auth.json
 
 [Service]
 Restart=always

@@ -78,7 +78,7 @@ every 90 days.
 | `ssh-private-key` | ed25519, root on the hosts (public half: `watchtower:sshPublicKey`); Ansible connects with it |
 | `s3-cluster-access-key`, `s3-cluster-secret-key` | Hetzner S3 credential `cluster`: Loki, Mimir, Tempo, Fluent Bit and the Postgres backup. The cloud program reads the access key ID too, for the bucket policies |
 | `luks-passphrase` | Encrypts every host's data volume. **Losing it loses the volumes' data** |
-| `gar-pull-key` | JSON key of `watchtower-image-puller@`, reader on the `watchtower` repo; the hosts pull Caddy and Patroni with it. `scripts/rotate-gcp-key.sh puller` |
+| `gar-pull-key` | JSON key of `watchtower-image-puller@`, reader on the `watchtower` repo; the hosts pull our images (Caddy, wg-easy, Patroni) with it. `scripts/rotate-gcp-key.sh puller` |
 | `grafana-admin-password` | Grafana's `admin`; `scripts/onboard-tenant.sh` reads the gopass copy |
 | `grafana-secret-key` | The same on all three Grafanas: it encrypts datasource secrets in the shared database |
 | `grafana-db-password` | Grafana's Postgres role |

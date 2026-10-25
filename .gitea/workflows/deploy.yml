@@ -5,8 +5,7 @@
 #                      server, an IP, a volume or a bucket (check the runbook
 #                      first: servers are replaced delete-first)
 #
-#   guard ─ image-caddy ─┐
-#         └ image-patroni┴ cloud ─ hosts
+#   guard ─ images (caddy, patroni, wg-easy) ─ cloud ─ hosts
 #
 # Credentials: the repo Actions secret GCP_DEPLOYER_KEY (watchtower-deployer@).
 # The cloud and hosts jobs' setup step uses it to read the secrets each needs
@@ -40,7 +39,10 @@ env:
 jobs:
   guard:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
+    outputs:
+      alpine_release: ${{ steps.alpine.outputs.ALPINE_RELEASE }}
+      alpine_digest: ${{ steps.alpine.outputs.ALPINE_DIGEST }}
     steps:
       - name: Deploy only from main
         run: |
@@ -49,67 +51,53 @@ jobs:
             exit 1
           fi
           echo "Deploying ${GITHUB_SHA:0:12} (allow_replace=${ALLOW_REPLACE})"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.gitea/actions/setup
+      # Once per deploy: the images jobs build on this release and the hosts
+      # job installs the tags it names, even if Alpine publishes mid-run.
+      - name: The Alpine release to build on (newest patch of our minor)
+        id: alpine
+        run: |
+          set -euo pipefail
+          scripts/image-tag.sh --alpine | tee -a "$GITHUB_OUTPUT"
 
   # Not GCP_DEPLOYER_KEY on the image jobs: jobs on the shared DinD runners
   # can see each other's credentials, so these get only the push key.
-  image-caddy:
+  images:
     needs: guard
-    # Built natively for the ARM proxy.
+    # Without this Gitea would append the runner to each job's name.
+    name: images (${{ matrix.image }})
+    # Built natively for the hosts, which are all ARM.
     runs-on: docker-arm64
     timeout-minutes: 40
-    outputs:
-      ref: ${{ steps.push.outputs.ref }}
-      digest: ${{ steps.push.outputs.digest }}
+    strategy:
+      fail-fast: false
+      # Every build/<name>/; a Go test keeps this list and ci.yml's equal to
+      # those directories.
+      matrix:
+        image: [caddy, patroni, wg-easy]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.gitea/actions/setup
         with:
           tools: ansible
-      - name: Render the Caddyfile the image is checked against
+      - name: Render the configs the image is checked against
         working-directory: ansible
         run: ansible-playbook -i inventory/hosts.sample.yml playbooks/render.yml >/dev/null
-      - name: Build, check, scan and push (or reuse this commit's)
-        id: push
+      # An image whose tag (version, Alpine release, revision) is already
+      # in the registry is reused; the hosts job installs the same tags.
+      - name: Build, check, scan and push (or reuse it)
         env:
           GAR_PUSH_KEY: ${{ secrets.GAR_PUSH_KEY }}
-        run: |
-          set -euo pipefail
-          pinned="$(scripts/publish-image.sh caddy "${GITHUB_SHA:0:12}" | tail -1)"
-          echo "ref=${pinned}" >>"$GITHUB_OUTPUT"
-          echo "digest=${pinned#*@}" >>"$GITHUB_OUTPUT"
-      - name: Remove registry credentials
-        if: always()
-        run: rm -f "${HOME}/.docker/config.json"
-
-  image-patroni:
-    needs: guard
-    # Built natively for the ARM nodes.
-    runs-on: docker-arm64
-    timeout-minutes: 40
-    outputs:
-      ref: ${{ steps.push.outputs.ref }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.gitea/actions/setup
-        with:
-          tools: ansible
-      - name: Render the patroni.yml the image is checked against
-        working-directory: ansible
-        run: ansible-playbook -i inventory/hosts.sample.yml playbooks/render.yml >/dev/null
-      - name: Build, check, scan and push (or reuse this commit's)
-        id: push
-        env:
-          GAR_PUSH_KEY: ${{ secrets.GAR_PUSH_KEY }}
-        run: |
-          set -euo pipefail
-          pinned="$(scripts/publish-image.sh patroni "${GITHUB_SHA:0:12}" | tail -1)"
-          echo "ref=${pinned}" >>"$GITHUB_OUTPUT"
+          ALPINE_RELEASE: ${{ needs.guard.outputs.alpine_release }}
+          ALPINE_DIGEST: ${{ needs.guard.outputs.alpine_digest }}
+        run: scripts/publish-image.sh "${{ matrix.image }}"
       - name: Remove registry credentials
         if: always()
         run: rm -f "${HOME}/.docker/config.json"
 
   cloud:
-    needs: [image-caddy, image-patroni]
+    needs: images
     # Room for the Pulumi providers, and on-demand: a preempted `pulumi up`
     # leaves the stack with pending operations to clear by hand.
     runs-on: heavy
@@ -154,7 +142,8 @@ jobs:
         run: rm -rf "${RUNNER_TEMP}/gcp-deployer.json" "${RUNNER_TEMP}/secrets" "${RUNNER_TEMP}/gcloud"
 
   hosts:
-    needs: [image-caddy, image-patroni, cloud]
+    # guard by name too: only a job that names it reads its outputs.
+    needs: [guard, images, cloud]
     runs-on: heavy
     # The first run installs every host from scratch.
     timeout-minutes: 120
@@ -197,19 +186,22 @@ jobs:
       - name: Install every host
         working-directory: ansible
         env:
-          CADDY_IMAGE: ${{ needs.image-caddy.outputs.ref }}
-          PATRONI_IMAGE: ${{ needs.image-patroni.outputs.ref }}
+          ALPINE_RELEASE: ${{ needs.guard.outputs.alpine_release }}
+          ALPINE_DIGEST: ${{ needs.guard.outputs.alpine_digest }}
         run: |
           set -euo pipefail
           ansible-galaxy collection install -r requirements.yml -p .collections >/dev/null
+          # Our images' tags: the ones the images jobs just pushed or found.
+          ../scripts/image-tag.sh --vars >image-tags.json
+          cat image-tags.json
           # -vvv: the deploy log shows each task's arguments, results and SSH
           # traffic. no_log tasks stay hidden at any verbosity, and every
           # secret value this job read is masked.
-          ansible-playbook -vvv playbooks/site.yml -e "caddy_image=${CADDY_IMAGE}" -e "patroni_image=${PATRONI_IMAGE}"
+          ansible-playbook -vvv playbooks/site.yml -e @image-tags.json
       - name: Verify
         env:
-          CADDY_DIGEST: ${{ needs.image-caddy.outputs.digest }}
-        run: scripts/verify.sh "$CADDY_DIGEST" "$ARCHIVE_BUCKET"
+          ALPINE_RELEASE: ${{ needs.guard.outputs.alpine_release }}
+        run: scripts/verify.sh "$ARCHIVE_BUCKET"
       - name: Remove keys
         if: always()
         run: rm -rf "${RUNNER_TEMP}/gcp-deployer.json" "${RUNNER_TEMP}/secrets" "${RUNNER_TEMP}/gcloud" ansible/inventory/known_hosts
