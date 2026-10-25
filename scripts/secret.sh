@@ -35,6 +35,12 @@
 
 set -euo pipefail
 
+# gcloud asks before it enables a disabled API, and exists() hides its
+# output, so the question would wait unseen on the terminal (the first put
+# hung that way). With prompts off it fails instead, and ensure() enables
+# the API itself.
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+
 PROJECT="${GCP_PROJECT:-watchtower-observe}"
 LOCATION="${SECRET_LOCATION:-europe-west3}"
 GITEA_URL="${GITEA_URL:-https://gitea.jasonmross.dev}"

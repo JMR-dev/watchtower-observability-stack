@@ -32,6 +32,10 @@
 
 set -euo pipefail
 
+# Several describe calls below hide gcloud's output, so a gcloud prompt
+# would wait unseen. With prompts off it takes the default or fails instead.
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 stack_file="${repo_root}/infra/cloud/Pulumi.prod.yaml"
 
