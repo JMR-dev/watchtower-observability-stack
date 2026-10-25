@@ -39,6 +39,14 @@ else
   echo "no watchtower/gcp-deployer-key yet (scripts/rotate-gcp-key.sh deployer); pulumi can't read secrets until it exists" >&2
 fi
 
+# The hosts' SSH key as a 0600 file beside it too: Ansible and verify.sh use
+# IdentitiesOnly, which ignores keys only the agent holds.
+if (umask 077 && _wt_file ssh-private-key >"$_wt_dir/ssh-private-key" 2>/dev/null); then
+  export ANSIBLE_PRIVATE_KEY_FILE="$_wt_dir/ssh-private-key"
+else
+  rm -f "$_wt_dir/ssh-private-key"
+  echo "no watchtower/ssh-private-key; Ansible can't reach the hosts" >&2
+fi
 if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
   _wt_file ssh-private-key | ssh-add - >/dev/null 2>&1 || echo "could not add the hosts' SSH key to ssh-agent" >&2
 fi

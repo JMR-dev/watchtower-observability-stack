@@ -1,0 +1,116 @@
+---
+# The owner's first WireGuard peer, so nobody needs public SSH to make one:
+# once, the deploy creates the client `owner` in wg-easy (through its API on
+# loopback) and adds its config to the Secret Manager secret
+# wireguard-owner-peer, which the deployer may add to but not read. The owner
+# fetches it with `scripts/secret.sh pull wireguard-owner-peer`.
+#
+# Before creating it, wg-easy's default client DNS is cleared: the tunnel is
+# split (only the tunnel range goes through it), so a peer keeps its own
+# resolver instead of being pointed at 1.1.1.1. Later peers made in the UI
+# follow that default too.
+#
+# Every deploy fetches the config again and adds a version only when it
+# changed (a sha256 marker on the proxy), so a failed upload is retried.
+
+- name: The wg-easy API answers
+  ansible.builtin.uri:
+    url: "{{ edge_wg_easy_api }}/client"
+    url_username: admin
+    url_password: "{{ watchtower_secret.wg_easy_password }}"
+    force_basic_auth: true
+  register: edge_wg_clients
+  until: edge_wg_clients.status == 200
+  retries: 30
+  delay: 5
+  no_log: true
+
+- name: Find the owner's peer
+  ansible.builtin.set_fact:
+    edge_owner_peer: "{{ edge_wg_clients.json | selectattr('name', 'equalto', edge_owner_peer_name) | first | default(none) }}"
+
+- name: Create the owner's peer, with no forced DNS
+  when: edge_owner_peer is none
+  block:
+    - name: Read wg-easy's client defaults
+      ansible.builtin.uri:
+        url: "{{ edge_wg_easy_api }}/admin/userconfig"
+        url_username: admin
+        url_password: "{{ watchtower_secret.wg_easy_password }}"
+        force_basic_auth: true
+      register: edge_wg_userconfig
+      no_log: true
+
+    - name: Clear the default client DNS
+      ansible.builtin.uri:
+        url: "{{ edge_wg_easy_api }}/admin/userconfig"
+        method: POST
+        body_format: json
+        body: >-
+          {{ edge_wg_userconfig.json | combine({'defaultDns': []})
+             | dict2items | rejectattr('key', 'in', ['id', 'createdAt', 'updatedAt']) | items2dict }}
+        url_username: admin
+        url_password: "{{ watchtower_secret.wg_easy_password }}"
+        force_basic_auth: true
+      when: edge_wg_userconfig.json.defaultDns | length > 0
+      no_log: true
+
+    - name: Create the client
+      ansible.builtin.uri:
+        url: "{{ edge_wg_easy_api }}/client"
+        method: POST
+        body_format: json
+        body: {name: "{{ edge_owner_peer_name }}", expiresAt: null}
+        url_username: admin
+        url_password: "{{ watchtower_secret.wg_easy_password }}"
+        force_basic_auth: true
+      register: edge_owner_created
+      no_log: true
+
+    - name: Remember its id
+      ansible.builtin.set_fact:
+        edge_owner_peer: {id: "{{ edge_owner_created.json.clientId }}"}
+
+- name: The owner's peer config
+  ansible.builtin.uri:
+    url: "{{ edge_wg_easy_api }}/client/{{ edge_owner_peer.id }}/configuration"
+    url_username: admin
+    url_password: "{{ watchtower_secret.wg_easy_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: edge_owner_config
+  no_log: true
+
+- name: What was last published
+  ansible.builtin.slurp:
+    src: "{{ watchtower_config }}/owner-peer.sha256"
+  register: edge_owner_published
+  failed_when: false
+
+- name: Publish a new or changed config
+  when: >-
+    (edge_owner_published.content | default('') | b64decode | trim)
+    != (edge_owner_config.content | hash('sha256'))
+  block:
+    # From the controller: the deployer's key there may add a version and
+    # nothing else (scripts/bootstrap.sh).
+    - name: Add it to Secret Manager
+      ansible.builtin.command:
+        argv: [gcloud, secrets, versions, add, wireguard-owner-peer, --project, "{{ watchtower_gcp_project }}", --data-file=-]
+        stdin: "{{ edge_owner_config.content }}"
+        stdin_add_newline: false
+      environment:
+        CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+        CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "{{ lookup('ansible.builtin.env', 'GOOGLE_APPLICATION_CREDENTIALS') }}"
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      no_log: true
+
+    - name: Mark it published
+      ansible.builtin.copy:
+        content: "{{ edge_owner_config.content | hash('sha256') }}\n"
+        dest: "{{ watchtower_config }}/owner-peer.sha256"
+        mode: "0600"
+        owner: root
+        group: root

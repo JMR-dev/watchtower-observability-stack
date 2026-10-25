@@ -1,8 +1,8 @@
 # Watchtower Observability Stack
 
-GDPR-minded, multi-tenant observability (metrics, logs, traces) at Hetzner
-in Germany: Mimir, Loki, Tempo and Grafana as podman containers on three ARM
-servers in Falkenstein (fsn1), with Object Storage in Nuremberg (nbg1),
+GDPR-minded, multi-tenant observability (metrics, logs, traces) in Hetzner's
+Falkenstein location (fsn1): Mimir, Loki, Tempo and Grafana as podman
+containers on three ARM servers, with their Object Storage alongside,
 reachable only through WireGuard at the private endpoint
 **watchtower.jasonmross.dev**.
 
@@ -11,7 +11,7 @@ reachable only through WireGuard at the private endpoint
 - **Install:** Ansible (`ansible/`) puts everything on the hosts as rootful podman quadlets; no Kubernetes
 - **High availability:** Loki and Mimir as three monolithic replicas (RF 3); Tempo in microservices mode on a 3-broker Kafka; three Grafanas on Postgres kept highly available by Patroni and etcd. Any one data node can be lost; the proxy is the one single point of failure
 - **Network:** a WireGuard mesh between all four hosts carries every byte between them; Caddy on the proxy load-balances each port across the nodes with health checks
-- **Object storage:** Hetzner Object Storage, nbg1; two S3 keys (admin, and one for the servers, fenced by bucket policies)
+- **Object storage:** Hetzner Object Storage, fsn1; two S3 keys (admin, and one for the servers, fenced by bucket policies)
 - **Log archive:** every container's log, every host's journal and audit log, kept 90 days in a bucket of their own
 - **Backups:** Grafana's database dumped nightly to Object Storage and kept 90 days, with a Healthchecks.io alert the moment a run fails
 - **Host health:** every host checks its services, disks and SELinux every 5 minutes and reports to its own Healthchecks.io check, so a lost node is noticed even though users aren't affected

@@ -42,7 +42,8 @@ gopass.
    done
    ```
 3. **Stack config.** In `infra/cloud/Pulumi.prod.yaml` set `sshPublicKey`
-   (`watchtower-root.pub`) and tighten `adminCidrs`. Commit it.
+   (`watchtower-root.pub`). Commit it. `ciCidrs` is the only public SSH
+   source: the deploy runners, to the proxy.
 4. **Bootstrap** (state bucket, DNS zone and delegation, service accounts,
    the image registry, the secrets' access grants), then the four GCP keys:
    ```bash
@@ -70,28 +71,50 @@ gopass.
 7. **Merge to main.** `deploy.yml` builds both images, creates the hosts,
    installs everything (all three nodes at once the first time), and
    verifies it end to end.
-8. **First peer:** the wg-easy UI is only reachable from a peer, so create
-   the first one through an SSH tunnel to the proxy:
+8. **Your VPN peer.** The deploy created the wg-easy client `owner` and
+   added its config to the secret `wireguard-owner-peer`
+   (`ansible/roles/edge/tasks/owner-peer.yml`). Fetch it and import it:
    ```bash
-   ssh -L 51822:127.0.0.1:51822 root@$(cd infra/cloud && pulumi stack output proxyIpv4)
-   # http://127.0.0.1:51822, user admin, the wg-easy password
+   scripts/secret.sh pull wireguard-owner-peer
+   gopass show -n watchtower/wireguard-owner-peer >watchtower.conf
+   nmcli connection import type wireguard file watchtower.conf && shred -u watchtower.conf
+   nmcli connection up watchtower
+   ssh root@10.8.0.1           # the proxy, over the tunnel
    ```
-   Create a client, import its config, connect, then use the TLS UI on
-   `https://watchtower.jasonmross.dev:51821` from then on.
+   The tunnel is split: only 10.8.0.0/24 goes through it, and your own DNS
+   stays as it is. More peers come from the UI on
+   `https://watchtower.jasonmross.dev:51821` (user `admin`, the wg-easy
+   password).
 9. Open `https://watchtower.jasonmross.dev` (Grafana, user `admin`) and point
    a test Alloy (`config/alloy/config.alloy.example`) at the stack.
 
 ## Host access
 
+SSH is only for WireGuard peers, and the deploy:
+
+| From | To | Path |
+|---|---|---|
+| A VPN peer (you) | the proxy | `10.8.0.1`, over the tunnel |
+| A VPN peer | a node | through the proxy, to the node's private address |
+| The deploy runners (`ciCidrs`) | the proxy | its public address |
+| The deploy runners | a node | through the proxy, to the node's private address |
+
+The nodes take nothing on their public addresses, and only the proxy's
+private address may reach their SSH.
+
 ```bash
-source scripts/env.sh
+source scripts/env.sh       # the key, as ANSIBLE_PRIVATE_KEY_FILE and in ssh-agent
 (cd infra/cloud && pulumi stack output inventory >../../ansible/inventory/hosts.yml \
   && pulumi stack output knownHosts >../../ansible/inventory/known_hosts)
-(cd ansible && ansible all -m ping)
-ssh root@<host>             # the key from env.sh's ssh-agent
+(cd ansible && ansible all -m ping -e watchtower_ssh_via=vpn)
+ssh root@10.8.0.1                       # the proxy
+ssh -J root@10.8.0.1 root@10.20.1.11    # watchtower-1 (10.20.1.1<n>)
+WATCHTOWER_SSH_VIA=vpn scripts/verify.sh <caddy-digest> <archive-bucket>
 ```
 
-SSH answers only on admin and CI addresses (`adminCidrs`, `ciCidrs`).
+For plain `ssh`, add the pinned host keys to your own known_hosts once:
+`cat ansible/inventory/known_hosts >>~/.ssh/known_hosts`. They are listed
+under the tunnel and private addresses too.
 
 Every service is a quadlet: `/etc/containers/systemd/<name>.container`
 generates `<name>.service`.
@@ -134,9 +157,11 @@ The proxy's reboot is a minute of no ingest and no UI.
 
 Each host runs a raw nftables ruleset in its own table, `inet watchtower`
 (`ansible/roles/firewall`), loaded by `watchtower-nftables.service`. It
-mirrors the Hetzner Cloud Firewalls from the same `adminCidrs`, `ciCidrs`
-and `wireguardAllowCidrs`. On the mesh (wg1), nodes reach each other fully
-and the proxy only the ports Caddy proxies to. Kafka, etcd, Patroni and
+mirrors the Hetzner Cloud Firewalls from the same `ciCidrs` and
+`wireguardAllowCidrs`. SSH: on the proxy from the deploy runners and from
+WireGuard peers on the tunnel address; on a node only from the proxy's
+private address. On the mesh (wg1), nodes reach each other fully and the
+proxy only the ports Caddy proxies to. Kafka, etcd, Patroni and
 Postgres have no authentication of their own beyond Postgres's: the
 firewall is what keeps them to the nodes. firewalld is masked.
 
@@ -189,16 +214,17 @@ listing and deleting them takes the admin key.
 1. Fetch a dump with the admin key:
    ```bash
    source scripts/env.sh
-   s3() { aws --endpoint-url https://nbg1.your-objectstorage.com --region nbg1 "$@"; }
+   s3() { aws --endpoint-url https://fsn1.your-objectstorage.com --region fsn1 "$@"; }
    s3 s3 ls s3://jmr-watchtower-postgres-backups/grafana/ | tail
    s3 s3 cp s3://jmr-watchtower-postgres-backups/grafana/grafana-<time>.dump ./grafana.dump
    ```
 2. Stop all three Grafanas, so nothing writes during the restore:
    `systemctl stop grafana` on every node.
-3. Restore on the leader (`patronictl list` names it). The replicas follow
+3. Restore on the leader (`patronictl list` names it; `<leader>` is its
+   private address, 10.20.1.1<n>). The replicas follow
    by streaming replication:
    ```bash
-   ssh root@<leader> podman exec -i patroni \
+   ssh -J root@10.8.0.1 root@<leader> podman exec -i patroni \
      pg_restore --clean --if-exists --single-transaction --dbname=grafana <grafana.dump
    ```
 4. `systemctl start grafana` on every node, then check the UI.
@@ -206,8 +232,8 @@ listing and deleting them takes the admin key.
 To get back one dashboard rather than everything, restore into a scratch
 database on the leader instead, with Grafana left running:
 ```bash
-ssh root@<leader> podman exec patroni createdb grafana_restore
-ssh root@<leader> podman exec -i patroni pg_restore --dbname=grafana_restore <grafana.dump
+ssh -J root@10.8.0.1 root@<leader> podman exec patroni createdb grafana_restore
+ssh -J root@10.8.0.1 root@<leader> podman exec -i patroni pg_restore --dbname=grafana_restore <grafana.dump
 ```
 Copy the dashboard's JSON out of its `dashboard` table, import it in
 Grafana, then `podman exec patroni dropdb grafana_restore`.
@@ -286,9 +312,9 @@ otherwise).
 ## Log archive
 
 ```bash
-aws --endpoint-url https://nbg1.your-objectstorage.com --region nbg1 \
+aws --endpoint-url https://fsn1.your-objectstorage.com --region fsn1 \
   s3 ls s3://jmr-watchtower-logs-archive/containers/$(date -u +%Y/%m/%d)/ --recursive
-aws --endpoint-url https://nbg1.your-objectstorage.com --region nbg1 \
+aws --endpoint-url https://fsn1.your-objectstorage.com --region fsn1 \
   s3 cp s3://jmr-watchtower-logs-archive/journal/2026/10/24/03/watchtower-1-0412-<uuid>.gz - | zcat | head
 ```
 

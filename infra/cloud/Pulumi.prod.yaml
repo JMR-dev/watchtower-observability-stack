@@ -4,7 +4,7 @@
 # `pulumi stack init prod --secrets-provider passphrase` adds encryptionsalt.
 config:
   # Falkenstein: the one location with cax31 capacity (2026-10-25). Object
-  # Storage stays in nbg1; both are in eu-central, where traffic is free.
+  # Storage is here too (internal/names S3Endpoint).
   watchtower:location: fsn1
   watchtower:networkZone: eu-central
   # 3 ARM nodes (8 vCPU each) and an ARM proxy (2 vCPU): exactly the
@@ -21,12 +21,9 @@ config:
   # The S3 owner ID is p16527471; bucket policies name p<id>:<access key>.
   watchtower:hetznerProjectId: "16527471"
   watchtower:sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPX/IQoTXtMZyyx0ltlnDX13AYOABb6frfb+pdG6eUL6"
-  # SSH. Tighten to your own egress addresses.
-  watchtower:adminCidrs:
-    - 0.0.0.0/0
-    - ::/0
-  # The Gitea Actions runners' Cloud NAT address (gitea-496920,
-  # gitea-runners-egress-ip).
+  # The only public SSH: the deploy, from the Gitea Actions runners' Cloud
+  # NAT address (gitea-496920, gitea-runners-egress-ip), to the proxy. People
+  # SSH in over the WireGuard VPN.
   watchtower:ciCidrs:
     - 34.26.149.196/32
   watchtower:wireguardAllowCidrs:

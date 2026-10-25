@@ -1,6 +1,7 @@
 ---
-# SSH brute-force protection. The Hetzner firewall limits SSH to adminCidrs
-# and the CI runners; fail2ban covers the case where adminCidrs is wide open.
+# SSH brute-force protection behind the firewalls, which already keep SSH to
+# the deploy runners, WireGuard peers and (on a node) the proxy: one bad
+# address at a time, if any of those misbehaves.
 # It keeps its own nftables table (inet f2b-table), apart from roles/firewall's.
 
 - name: Enable EPEL (provides fail2ban on AlmaLinux 10)

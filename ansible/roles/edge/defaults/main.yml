@@ -1,0 +1,5 @@
+---
+# wg-easy's API, on the loopback port it listens on.
+edge_wg_easy_api: http://127.0.0.1:{{ watchtower_ports.wg_easy_ui }}/api
+# The client the deploy creates for the owner (tasks/owner-peer.yml).
+edge_owner_peer_name: owner

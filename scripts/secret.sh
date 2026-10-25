@@ -12,6 +12,10 @@
 #   scripts/secret.sh ensure <id>...  create empty secrets (bootstrap.sh does
 #                                     this for every id deploy.yml reads)
 #   scripts/secret.sh deploy-ids      the ids deploy.yml reads, one a line
+#   scripts/secret.sh pull <id>       copy the latest value from Secret
+#                                     Manager into gopass: for the secrets
+#                                     the deploy writes (label writer=deploy),
+#                                     e.g. wireguard-owner-peer
 #   scripts/secret.sh gitea <id> <NAME>
 #                                     copy the latest value into the repo's
 #                                     Actions secret NAME (only
@@ -51,7 +55,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workflow="${repo_root}/.gitea/workflows/deploy.yml"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
-usage() { die "usage: $0 put <id> | check | ensure <id>... | gitea <id> <NAME> | deploy-ids"; }
+usage() { die "usage: $0 put <id> | check | ensure <id>... | gitea <id> <NAME> | deploy-ids | pull <id>"; }
 
 # Secret Manager's id rule, less a leading dash: ids go on gcloud command
 # lines, where one would read as a flag.
@@ -139,20 +143,40 @@ gitea() {
   echo "copied ${id} to the Actions secret ${name} on ${REPO}"
 }
 
+pull() {
+  local id=$1
+  scratch
+  gcloud secrets versions access latest --secret "$id" --project "$PROJECT" --out-file "${work}/value"
+  gopass insert -f "watchtower/${id}" <"${work}/value" >/dev/null
+  echo "copied ${id} from Secret Manager to gopass (watchtower/${id})"
+}
+
 check() {
-  local id local_ids bad=0
+  local id local_ids written bad=0
   local_ids="$(gopass ls --flat watchtower 2>/dev/null || true)"
+  written="$(gcloud secrets list --project "$PROJECT" --filter labels.writer=deploy --format 'value(name)')"
   while read -r id; do
     if ! exists "$id"; then
       echo "missing  ${id}: no such secret (scripts/bootstrap.sh)"
       bad=1
-    elif [[ -z "$(gcloud secrets versions list "$id" --project "$PROJECT" \
+      continue
+    fi
+    if [[ -z "$(gcloud secrets versions list "$id" --project "$PROJECT" \
       --filter state=ENABLED --limit 1 --format 'value(name)')" ]]; then
+      # The deploy fills these; until the first one, empty is expected.
+      if grep -qxF "$id" <<<"$written"; then
+        echo "pending  ${id}: the deploy writes it"
+        continue
+      fi
       echo "empty    ${id}: no enabled version (scripts/secret.sh put ${id})"
       bad=1
     fi
     if ! grep -qxF "watchtower/${id}" <<<"$local_ids"; then
-      echo "no copy  ${id}: not in gopass as watchtower/${id}"
+      if grep -qxF "$id" <<<"$written"; then
+        echo "no copy  ${id}: not in gopass yet (scripts/secret.sh pull ${id})"
+      else
+        echo "no copy  ${id}: not in gopass as watchtower/${id}"
+      fi
       bad=1
     fi
   done < <({
@@ -188,6 +212,11 @@ case "$1" in
   deploy-ids)
     [[ $# -eq 1 ]] || usage
     deploy_ids
+    ;;
+  pull)
+    [[ $# -eq 2 ]] || usage
+    valid "$2"
+    pull "$2"
     ;;
   *) usage ;;
 esac

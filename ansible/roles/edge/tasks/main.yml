@@ -98,3 +98,6 @@
     host: "{{ watchtower_tunnel_ip }}"
     port: "{{ watchtower_ports.edge.loki }}"
     timeout: 180
+
+- name: The owner's first VPN peer
+  ansible.builtin.include_tasks: owner-peer.yml

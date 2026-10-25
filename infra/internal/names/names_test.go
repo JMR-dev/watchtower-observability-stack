@@ -2,7 +2,9 @@ package names
 
 import (
 	"os"
+	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -121,6 +123,13 @@ func TestWorkflowReadsEverySecret(t *testing.T) {
 		}
 		ownerOnly[id] = true
 	}
+	written := map[string]bool{}
+	for _, id := range DeployWrittenSecrets {
+		if !known[id] {
+			t.Errorf("deploy-written %s is not in Secrets()", id)
+		}
+		written[id] = true
+	}
 	// The setup action's `secrets:` lines: NAME=id or @NAME=id.
 	line := regexp.MustCompile(`(?m)^\s+@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)\s*$`)
 	matches := line.FindAllStringSubmatch(string(b), -1)
@@ -138,10 +147,31 @@ func TestWorkflowReadsEverySecret(t *testing.T) {
 		if ownerOnly[m[1]] {
 			t.Errorf("deploy.yml reads owner-only %s through the deployer", m[1])
 		}
+		// The deployer may add to these, never read them.
+		if written[m[1]] {
+			t.Errorf("deploy.yml reads %s, which the deploy only writes", m[1])
+		}
 	}
 	for _, id := range Secrets() {
-		if !read[id] && !ownerOnly[id] {
+		if !read[id] && !ownerOnly[id] && !written[id] {
 			t.Errorf("deploy.yml never reads %s, so bootstrap.sh would not create or grant it", id)
 		}
+	}
+}
+
+// scripts/bootstrap.sh grants the deployer secretVersionAdder on every
+// secret the deploy writes; a missing grant fails the first deploy late.
+func TestBootstrapGrantsDeployWrittenSecrets(t *testing.T) {
+	b, err := os.ReadFile("../../../scripts/bootstrap.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^deploy_written=\(([a-z0-9 -]*)\)$`).FindStringSubmatch(string(b))
+	if m == nil {
+		t.Fatal("bootstrap.sh has no deploy_written=(...) list")
+	}
+	got := strings.Fields(m[1])
+	if !reflect.DeepEqual(got, DeployWrittenSecrets) {
+		t.Errorf("bootstrap.sh deploy_written = %v, want %v", got, DeployWrittenSecrets)
 	}
 }

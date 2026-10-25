@@ -38,12 +38,12 @@ Typical bases:
 
 | Data | Where |
 |---|---|
-| Telemetry (Loki, Mimir, Tempo buckets) | Hetzner Object Storage, nbg1 |
+| Telemetry (Loki, Mimir, Tempo buckets) | Hetzner Object Storage, fsn1 |
 | WALs, Kafka's log (24 h of traces), Postgres (Grafana's database), wg-easy's database | Hetzner Volumes, fsn1 (LUKS) |
-| Log archive (container logs, journals, audit logs) | Hetzner Object Storage, nbg1 |
-| Backups of Grafana's database | Hetzner Object Storage, nbg1 |
+| Log archive (container logs, journals, audit logs) | Hetzner Object Storage, fsn1 |
+| Backups of Grafana's database | Hetzner Object Storage, fsn1 |
 | Backup and host-health alerts | Healthchecks.io (no personal data: host and service names, disk use, the backup run's own log) |
-| Pulumi state | Hetzner Object Storage, nbg1 |
+| Pulumi state | Hetzner Object Storage, fsn1 |
 | DNS records | Google Cloud DNS (global; no personal data) |
 | Credentials (API tokens, keys, passwords) | Google Secret Manager, payloads replicated to europe-west3 only (no personal data) |
 | Our container images (Caddy, Patroni) | Google Artifact Registry, europe-west3 (no personal data) |

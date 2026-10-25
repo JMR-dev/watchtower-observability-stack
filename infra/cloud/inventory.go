@@ -9,9 +9,10 @@ import (
 type obj = map[string]interface{}
 
 // inventoryJSON renders the Ansible inventory (JSON is valid YAML, so it is
-// saved as hosts.yml). Two groups, `proxy` and `nodes`. Ansible connects over
-// `ansible_host`, the public IPv4; everything between the hosts goes over
-// `mesh_ip` on wg1.
+// saved as hosts.yml). Two groups, `proxy` and `nodes`. Ansible reaches the
+// proxy on `public_ip` (or the tunnel address, from a VPN peer) and the nodes
+// on `private_ip` through the proxy (inventory/group_vars/{proxy,nodes}.yml);
+// everything between the hosts goes over `mesh_ip` on wg1.
 //
 // Every name the roles need from internal/names travels here as a group var,
 // so the playbooks never spell a bucket, an address or a retention period
@@ -25,9 +26,9 @@ func inventoryJSON(cfg *Config, hs *hosts) pulumi.StringOutput {
 	return pulumi.All(vals...).ApplyT(func(v []interface{}) (string, error) {
 		vars := func(i int, h *host) obj {
 			return obj{
-				"ansible_host": v[2*i].(string),
-				"private_ip":   h.privateIP,
-				"mesh_ip":      h.meshIP,
+				"public_ip":  v[2*i].(string),
+				"private_ip": h.privateIP,
+				"mesh_ip":    h.meshIP,
 				// roles/storage finds the volume as
 				// /dev/disk/by-id/scsi-0HC_Volume_<id>.
 				"volume_id": v[2*i+1].(int),
@@ -53,9 +54,9 @@ func inventoryJSON(cfg *Config, hs *hosts) pulumi.StringOutput {
 				"ansible_python_interpreter": "/usr/bin/python3",
 
 				// roles/firewall mirrors the Hetzner firewalls from the same
-				// lists: SSH from admin and CI addresses, WireGuard (proxy
-				// only) from wireguardAllowCidrs.
-				"watchtower_admin_cidrs":     append(append([]string{}, cfg.AdminCIDRs...), cfg.CICIDRs...),
+				// lists: SSH to the proxy from the deploy runners, WireGuard
+				// (proxy only) from wireguardAllowCidrs.
+				"watchtower_ci_cidrs":        cfg.CICIDRs,
 				"watchtower_wireguard_cidrs": cfg.WireGuardCIDRs,
 				"watchtower_wireguard_port":  names.PortWireGuard,
 				"watchtower_private_cidr":    names.SubnetCIDR,

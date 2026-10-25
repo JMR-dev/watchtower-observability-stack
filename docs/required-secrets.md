@@ -96,6 +96,12 @@ every 90 days.
 | `gar-push-key` | The `GAR_PUSH_KEY` Actions secret's source. Never granted to the deployer, so a leaked deployer key can't push images |
 | `healthchecks-jasonmross-dev-api-key` | Read-write API key of the Healthchecks.io project `jasonmross.dev`, for `scripts/healthchecks.sh`. Never granted to the deployer: the deploy holds ping URLs, which can't pause, change or delete a check |
 
+### Written by the deploy
+
+| Id | What |
+|---|---|
+| `wireguard-owner-peer` | The owner's first WireGuard peer config, created by the first deploy in wg-easy (client `owner`). The deployer holds `secretVersionAdder` on it alone: it may add a version, never read one. Fetch it with `scripts/secret.sh pull wireguard-owner-peer`; `secret.sh check` reports it pending until the first deploy |
+
 ## Stack config
 
 `infra/cloud/Pulumi.prod.yaml` holds public values only, and a test fails if

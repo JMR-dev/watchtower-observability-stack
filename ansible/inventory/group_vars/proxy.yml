@@ -1,0 +1,4 @@
+---
+# SSH to the proxy: its public address from the deploy runners, the tunnel
+# address from a WireGuard peer (watchtower_ssh_via, group_vars/all/main.yml).
+ansible_host: "{{ watchtower_tunnel_ip if watchtower_ssh_via == 'vpn' else public_ip }}"

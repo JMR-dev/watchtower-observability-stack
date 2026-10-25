@@ -18,9 +18,12 @@
 #
 # Runs from the deploy runner over SSH, with the inventory and pinned host
 # keys the job wrote (ansible/inventory/{hosts.yml,known_hosts}) and the key
-# in ANSIBLE_PRIVATE_KEY_FILE. The checks through Caddy run on the proxy
-# itself, against 10.8.0.1, so they cover TLS, Caddy's routing and every
-# backend without a VPN peer. Needs: ssh, jq, aws (admin S3 key in AWS_*).
+# in ANSIBLE_PRIVATE_KEY_FILE: to the proxy on its public address, to the
+# nodes on their private ones through the proxy. From a WireGuard peer, set
+# WATCHTOWER_SSH_VIA=vpn to reach the proxy on the tunnel address instead.
+# The checks through Caddy run on the proxy itself, against 10.8.0.1, so
+# they cover TLS, Caddy's routing and every backend without a VPN peer.
+# Needs: ssh, jq, aws (admin S3 key in AWS_*).
 
 set -euo pipefail
 
@@ -39,16 +42,24 @@ domain="$(var watchtower_domain)"
 tunnel="$(var watchtower_tunnel_ip)"
 s3="https://$(var watchtower_s3_endpoint)"
 region="$(var watchtower_s3_region)"
-proxy_ip="$(host proxy 0 ansible_host)"
-node_ip="$(host nodes 0 ansible_host)"
+proxy_ip="$(host proxy 0 public_ip)"
+[[ "${WATCHTOWER_SSH_VIA:-public}" == vpn ]] && proxy_ip="$tunnel"
+node_ip="$(host nodes 0 private_ip)"
 node_mesh="$(host nodes 0 mesh_ip)"
 nodes="$(jq '.all.children.nodes.hosts | length' "$inv")"
 
-on() { # public-ip command: run on a host as root
-  local ip=$1
+ssh_opts=(-i "${ANSIBLE_PRIVATE_KEY_FILE:?}" -o IdentitiesOnly=yes -o BatchMode=yes
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known")
+# The callers' arguments are the remote command, expanded here on purpose.
+# shellcheck disable=SC2029
+on() { # address command...: run as root on the proxy, or on a node (its private address) through the proxy
+  local addr=$1
   shift
-  ssh -i "${ANSIBLE_PRIVATE_KEY_FILE:?}" -o IdentitiesOnly=yes -o BatchMode=yes \
-    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known" "root@${ip}" "$@"
+  if [[ "$addr" == "$proxy_ip" ]]; then
+    ssh "${ssh_opts[@]}" "root@${addr}" "$@"
+  else
+    ssh "${ssh_opts[@]}" -o ProxyCommand="ssh $(printf '%q ' "${ssh_opts[@]}")-W %h:%p root@${proxy_ip}" "root@${addr}" "$@"
+  fi
 }
 # edge <port> <curl args...>: a request to the domain through Caddy, from the
 # proxy. --resolve pins the name to the tunnel address; TLS is verified.
@@ -145,7 +156,7 @@ backup_prefix="$(var watchtower_postgres_backup_prefix)"
 since="${backup_prefix}grafana-$(date -u -d '-2 min' +%Y%m%dT%H%M%SZ)"
 # Only the Postgres leader dumps; on the others the run checks a leader exists.
 for ((i = 0; i < nodes; i++)); do
-  on "$(host nodes "$i" ansible_host)" systemctl start watchtower-pg-backup.service ||
+  on "$(host nodes "$i" private_ip)" systemctl start watchtower-pg-backup.service ||
     fail "the backup failed on node $((i + 1)): journalctl -u watchtower-pg-backup there"
 done
 newest="$(aws --endpoint-url "$s3" --region "$region" s3api list-objects-v2 --bucket "$backups" \
@@ -155,7 +166,7 @@ echo "    $(cut -f1 <<<"$newest") ($(cut -f2 <<<"$newest") bytes)"
 
 # ---------------------------------------------------------------------------
 log "8/8 every host's own health check"
-for ip in "$proxy_ip" $(jq -r '.all.children.nodes.hosts[].ansible_host' "$inv"); do
+for ip in "$proxy_ip" $(jq -r '.all.children.nodes.hosts[].private_ip' "$inv"); do
   problems="$(on "$ip" watchtower-health check)" || fail "${ip}: ${problems}"
 done
 echo "    the proxy and ${nodes} nodes are healthy"

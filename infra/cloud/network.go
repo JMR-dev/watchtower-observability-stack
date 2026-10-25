@@ -62,14 +62,17 @@ func newNetwork(ctx *pulumi.Context, cfg *Config, p *providers) (*network, error
 		return nil, err
 	}
 
-	ops := append(append([]string{}, cfg.AdminCIDRs...), cfg.CICIDRs...)
-	ssh := rule("tcp", "22", "SSH (Ansible, operators)", ops)
-	nodes, err := newFirewall(ctx, p, "watchtower-nodes", names.RoleNode, ssh)
+	// The nodes take nothing on their public addresses: the deploy reaches
+	// them through the proxy over the private network, people through the
+	// VPN and then the proxy.
+	nodes, err := newFirewall(ctx, p, "watchtower-nodes", names.RoleNode)
 	if err != nil {
 		return nil, err
 	}
-	// Only the proxy takes WireGuard: it is where the tunnel ends.
-	proxy, err := newFirewall(ctx, p, "watchtower-proxy", names.RoleProxy, ssh,
+	// The proxy: SSH from the deploy runners only, and WireGuard, since the
+	// tunnel ends there.
+	proxy, err := newFirewall(ctx, p, "watchtower-proxy", names.RoleProxy,
+		rule("tcp", "22", "SSH (the deploy runners)", cfg.CICIDRs),
 		rule("udp", strconv.Itoa(names.PortWireGuard), "WireGuard", cfg.WireGuardCIDRs))
 	if err != nil {
 		return nil, err

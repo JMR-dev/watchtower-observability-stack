@@ -73,12 +73,12 @@ jobs:
           set -euo pipefail
           # The role's `validate: nft --check` only runs on the hosts, so a
           # broken template would otherwise surface mid-deploy. Rendered from
-          # the sample inventory, once as is and once with no IPv6 admin
+          # the sample inventory, once as is and once with no IPv6 CI
           # addresses (an empty set), and checked by the kernel in a network
           # namespace of its own.
           for variant in sample v4-only; do
             extra=()
-            [[ $variant == v4-only ]] && extra=(-e '{"watchtower_admin_cidrs": ["192.0.2.0/24"]}')
+            [[ $variant == v4-only ]] && extra=(-e '{"watchtower_ci_cidrs": ["192.0.2.0/24"]}')
             ansible-playbook -i inventory/hosts.sample.yml playbooks/render.yml "${extra[@]}" >/dev/null
             for nft in .render/*/watchtower.nft; do
               unshare --user --map-root-user --net nft --check --file "$nft"

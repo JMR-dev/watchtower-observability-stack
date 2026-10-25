@@ -5,12 +5,20 @@
 
 timezone: Etc/UTC
 
-# Addresses fail2ban never bans: the Gitea Actions runners' egress (a ban
-# would break every deploy) and loopback. Add your own.
-fail2ban_ignoreip:
-  - 127.0.0.1/8
-  - "::1"
-  - 34.26.149.196/32
+# How Ansible reaches the hosts (inventory/group_vars/{proxy,nodes}.yml):
+#   public  the proxy on its public address, which takes SSH only from the
+#           deploy runners (ciCidrs); the deploy's way in
+#   vpn     the proxy on the tunnel address, from a WireGuard peer:
+#           ansible-playbook ... -e watchtower_ssh_via=vpn
+# The nodes always through the proxy, on their private addresses.
+watchtower_ssh_via: public
+
+# Addresses fail2ban never bans: loopback, the deploy runners (a ban would
+# break every deploy) and, on the nodes, the proxy, which every SSH session
+# to a node comes through.
+fail2ban_ignoreip: >-
+  {{ ['127.0.0.1/8', '::1'] + watchtower_ci_cidrs
+     + (groups['proxy'] | map('extract', hostvars, 'private_ip') | list if 'nodes' in group_names else []) }}
 
 # The LUKS volume (roles/storage) is mounted here; every service keeps its
 # state in a directory of its own below it.

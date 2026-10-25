@@ -19,12 +19,11 @@ const (
 	// through the tunnel (split tunnel), so the proxy forwards nothing.
 	TunnelCIDR = "10.8.0.0/24"
 
-	// S3Endpoint and S3Region are Hetzner Object Storage in Nuremberg.
-	// Everything (telemetry, log archive, backups, Pulumi state) lives here.
-	// The servers are in fsn1: both are in eu-central, where Hetzner charges
-	// nothing for traffic.
-	S3Endpoint = "nbg1.your-objectstorage.com"
-	S3Region   = "nbg1"
+	// S3Endpoint and S3Region are Hetzner Object Storage in Falkenstein, the
+	// servers' location. Everything (telemetry, log archive, backups, Pulumi
+	// state) lives here.
+	S3Endpoint = "fsn1.your-objectstorage.com"
+	S3Region   = "fsn1"
 
 	// GCPProject holds the DNS zone, the service accounts, the image
 	// registry and every secret.
@@ -110,7 +109,17 @@ const (
 	// project (scripts/healthchecks.sh). Owner only: the deploy gets ping
 	// URLs, never a key that could pause or delete checks.
 	SecretHealthchecksAPIKey = "healthchecks-jasonmross-dev-api-key"
+
+	// SecretWireGuardOwnerPeer is the owner's first WireGuard peer config,
+	// which the deploy creates in wg-easy and adds here (ansible/roles/edge);
+	// the owner fetches it with `scripts/secret.sh pull`. The deployer may
+	// add versions but never read one.
+	SecretWireGuardOwnerPeer = "wireguard-owner-peer"
 )
+
+// DeployWrittenSecrets are written by the deploy, never read by it:
+// scripts/bootstrap.sh grants the deployer secretVersionAdder on each.
+var DeployWrittenSecrets = []string{SecretWireGuardOwnerPeer}
 
 // OwnerOnlySecrets are never read by the deploy, so never granted to the
 // deployer (scripts/bootstrap.sh grants what deploy.yml reads).
@@ -130,6 +139,7 @@ func Secrets() []string {
 		SecretPostgresSuperuserPassword, SecretPostgresReplicationPassword, SecretPatroniRESTAPIPassword,
 		SecretWGEasyPassword, SecretCaddyDNSKey, SecretHealthchecksPGBackupURL, SecretHealthchecksHostURLs,
 		SecretGARPushKey, SecretHealthchecksAPIKey,
+		SecretWireGuardOwnerPeer,
 	}
 	for _, k := range append([]string{KeyAdmin}, Keys...) {
 		out = append(out, S3AccessKeySecret(k), S3SecretKeySecret(k))

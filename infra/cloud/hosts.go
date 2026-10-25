@@ -68,7 +68,6 @@ func newHost(ctx *pulumi.Context, cfg *Config, p *providers, net *network,
 		Name:             pulumi.String(name + "-ipv4"),
 		Type:             pulumi.String("ipv4"),
 		Location:         pulumi.String(cfg.Location),
-		AssigneeType:     pulumi.String("server"),
 		AutoDelete:       pulumi.Bool(false),
 		DeleteProtection: pulumi.Bool(cfg.DeleteProtection),
 		Labels:           labels(hostLabels),
@@ -80,7 +79,6 @@ func newHost(ctx *pulumi.Context, cfg *Config, p *providers, net *network,
 		Name:             pulumi.String(name + "-ipv6"),
 		Type:             pulumi.String("ipv6"),
 		Location:         pulumi.String(cfg.Location),
-		AssigneeType:     pulumi.String("server"),
 		AutoDelete:       pulumi.Bool(false),
 		DeleteProtection: pulumi.Bool(cfg.DeleteProtection),
 		Labels:           labels(hostLabels),
@@ -197,7 +195,10 @@ func renderCloudInit(private, public string) string {
 	).Replace(cloudInit)
 }
 
-// knownHosts is the known_hosts file Ansible checks every host against.
+// knownHosts is the known_hosts file Ansible checks every host against, under
+// every address SSH reaches it on: the public one (the proxy, from the
+// deploy), the private one (the nodes, through the proxy) and, for the
+// proxy, the tunnel address (from a VPN peer).
 func knownHosts(all []*host) pulumi.StringOutput {
 	var parts []interface{}
 	for _, h := range all {
@@ -206,7 +207,12 @@ func knownHosts(all []*host) pulumi.StringOutput {
 	return pulumi.All(parts...).ApplyT(func(v []interface{}) string {
 		var b strings.Builder
 		for i, h := range all {
-			b.WriteString(v[2*i].(string) + "," + h.name + " " + strings.TrimSpace(v[2*i+1].(string)) + "\n")
+			addrs := []string{v[2*i].(string), h.privateIP}
+			if h.role == names.RoleProxy {
+				addrs = append(addrs, names.TunnelIP)
+			}
+			addrs = append(addrs, h.name)
+			b.WriteString(strings.Join(addrs, ",") + " " + strings.TrimSpace(v[2*i+1].(string)) + "\n")
 		}
 		return b.String()
 	}).(pulumi.StringOutput)

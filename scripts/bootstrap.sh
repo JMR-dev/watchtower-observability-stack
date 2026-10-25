@@ -30,7 +30,9 @@
 #      europe-west3 only, and lets watchtower-deployer read each: a grant per
 #      secret, never secretAccessor on the project. Owner-only secrets such
 #      as gar-push-key are never read by the deploy, so never granted.
-#      Values go in with scripts/secret.sh.
+#      Values go in with scripts/secret.sh. The secrets the deploy writes
+#      (deploy_written; wireguard-owner-peer, the owner's first VPN peer) it
+#      may add versions to and never read: secretVersionAdder alone.
 #
 # Keys are made by scripts/rotate-gcp-key.sh.
 #
@@ -52,8 +54,8 @@ PARENT_PROJECT="${PARENT_PROJECT:-dns-jasonmross-dev}"
 PARENT_ZONE="${PARENT_ZONE:-jasonmross-dev}"
 ZONE="${ZONE:-watchtower}"
 DOMAIN="watchtower.jasonmross.dev"
-S3_ENDPOINT="https://nbg1.your-objectstorage.com"
-S3_REGION="nbg1"
+S3_ENDPOINT="https://fsn1.your-objectstorage.com"
+S3_REGION="fsn1"
 GAR_LOCATION="${GAR_LOCATION:-europe-west3}"
 GAR_REPO="${GAR_REPO:-watchtower}"
 
@@ -277,13 +279,24 @@ for id in "${secret_ids[@]}"; do
   granted=$((granted + 1))
 done
 
+# Written by the deploy, read only by the owner (`secret.sh pull`). A Go test
+# keeps this list equal to names.DeployWrittenSecrets.
+deploy_written=(wireguard-owner-peer)
+"${repo_root}/scripts/secret.sh" ensure "${deploy_written[@]}"
+for id in "${deploy_written[@]}"; do
+  gcloud secrets update "$id" --project "$GCP_PROJECT" --update-labels writer=deploy >/dev/null
+  retry_iam gcloud secrets add-iam-policy-binding "$id" --project "$GCP_PROJECT" \
+    --member "serviceAccount:${DEPLOYER}" --role roles/secretmanager.secretVersionAdder
+done
+
 cat <<EOF
 
 Done.
   State bucket : s3://${STATE_BUCKET} (admin key only)
   DNS          : zone ${ZONE} (${DOMAIN}.), delegated from ${PARENT_ZONE} in ${PARENT_PROJECT}
   Registry     : ${GAR_LOCATION}-docker.pkg.dev/${GCP_PROJECT}/${GAR_REPO}
-  Secrets      : the ${#secret_ids[@]} the deploy reads, in ${GCP_PROJECT}; ${granted} readable by ${DEPLOYER}
+  Secrets      : the ${#secret_ids[@]} the deploy reads, in ${GCP_PROJECT}; ${granted} readable by ${DEPLOYER},
+                 which may only add to ${deploy_written[*]}
 
 Next (docs/runbook.md, "First deploy"):
   1. dig +short NS ${DOMAIN}

@@ -33,7 +33,7 @@ const (
 	ilmType        = "minio:index/ilmPolicy:IlmPolicy"
 	recordType     = "gcp:dns/recordSet:RecordSet"
 	zoneToken      = "gcp:dns/getManagedZone:getManagedZone"
-	secretToken    = "gcp:secretmanager/getSecretVersion:getSecretVersion"
+	secretToken    = "gcp:secretmanager/getSecretVersionAccess:getSecretVersionAccess"
 	nodeAddress    = "203.0.113.10"
 	proxyAddress   = "198.51.100.7"
 )
@@ -43,7 +43,6 @@ func baseConfig() map[string]string {
 		"watchtower:sshPublicKey":     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItest test@example",
 		"watchtower:bucketPrefix":     "test-wt",
 		"watchtower:hetznerProjectId": "1234",
-		"watchtower:adminCidrs":       `["198.51.100.0/24"]`,
 		"watchtower:ciCidrs":          `["34.26.149.196/32"]`,
 	}
 }
@@ -209,8 +208,8 @@ func ports(r pulumitest.Resource) map[string][]string {
 	return out
 }
 
-// SSH from admin and CI addresses everywhere; WireGuard on the proxy only;
-// nothing else from the internet.
+// SSH only to the proxy and only from the deploy runners; WireGuard on the
+// proxy only; nothing else from the internet.
 func TestFirewalls(t *testing.T) {
 	m := mustRun(t, baseConfig())
 	fws := map[string]pulumitest.Resource{}
@@ -220,14 +219,15 @@ func TestFirewalls(t *testing.T) {
 	if len(fws) != 2 {
 		t.Fatalf("want two firewalls, got %v", keysOf(fws))
 	}
-	ops := []string{"198.51.100.0/24", "34.26.149.196/32"}
+	ci := []string{"34.26.149.196/32"}
 	world := []string{"0.0.0.0/0", "::/0"}
 	for name, want := range map[string]struct {
 		role  string
 		rules map[string][]string
 	}{
-		"watchtower-nodes": {names.RoleNode, map[string][]string{"tcp/22": ops, "icmp/": world}},
-		"watchtower-proxy": {names.RoleProxy, map[string][]string{"tcp/22": ops, "udp/51820": world, "icmp/": world}},
+		// No public SSH on the nodes; the proxy's only from the deploy.
+		"watchtower-nodes": {names.RoleNode, map[string][]string{"icmp/": world}},
+		"watchtower-proxy": {names.RoleProxy, map[string][]string{"tcp/22": ci, "udp/51820": world, "icmp/": world}},
 	} {
 		fw := fws[name]
 		if got := ports(fw); !reflect.DeepEqual(got, want.rules) {
@@ -456,18 +456,22 @@ func TestLifecycle(t *testing.T) {
 		var parts []string
 		for _, r := range p.Inputs["rules"].ArrayValue() {
 			rule := r.ObjectValue()
-			parts = append(parts, pulumitest.Str(rule, "filter")+pulumitest.Str(rule, "expiration")+"/"+pulumitest.Str(rule, "status"))
+			// No status: the provider sets it and refuses one given.
+			if _, set := rule["status"]; set {
+				t.Errorf("%s sets a rule status", p.Name)
+			}
+			parts = append(parts, pulumitest.Str(rule, "filter")+pulumitest.Str(rule, "expiration"))
 		}
 		got[p.Name] = strings.Join(parts, " ")
 	}
 	want := map[string]string{
-		"test-wt-loki-lifecycle":         "60d/Enabled",
-		"test-wt-mimir-blocks-lifecycle": "180d/Enabled",
-		"test-wt-tempo-lifecycle":        "60d/Enabled",
+		"test-wt-loki-lifecycle":         "60d",
+		"test-wt-mimir-blocks-lifecycle": "180d",
+		"test-wt-tempo-lifecycle":        "60d",
 		// gdpr-audit/ is deliberately absent: erasure records are kept.
-		"test-wt-logs-archive-lifecycle": "containers/90d/Enabled journal/90d/Enabled audit/90d/Enabled",
+		"test-wt-logs-archive-lifecycle": "containers/90d journal/90d audit/90d",
 		// The backups' retention is this rule alone.
-		"test-wt-postgres-backups-lifecycle": "90d/Enabled",
+		"test-wt-postgres-backups-lifecycle": "90d",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("lifecycle %v, want %v", got, want)
@@ -579,7 +583,7 @@ func TestInventoryGroups(t *testing.T) {
 		t.Errorf("nodes = %v", got)
 	}
 	n := nodes["watchtower-2"].(map[string]interface{})
-	if n["ansible_host"] != nodeAddress || n["private_ip"] != names.PrivateIP(2) || n["mesh_ip"] != names.MeshIP(2) ||
+	if n["public_ip"] != nodeAddress || n["private_ip"] != names.PrivateIP(2) || n["mesh_ip"] != names.MeshIP(2) ||
 		n["node_index"] != 2.0 || n["zone"] != "b" {
 		t.Errorf("node vars %v", n)
 	}
@@ -588,7 +592,7 @@ func TestInventoryGroups(t *testing.T) {
 		t.Errorf("volume_id %v", n["volume_id"])
 	}
 	p := group(inv, "proxy")[names.ProxyName].(map[string]interface{})
-	if p["ansible_host"] != proxyAddress || p["mesh_ip"] != names.MeshIP(0) || p["private_ip"] != names.PrivateIP(0) {
+	if p["public_ip"] != proxyAddress || p["mesh_ip"] != names.MeshIP(0) || p["private_ip"] != names.PrivateIP(0) {
 		t.Errorf("proxy vars %v", p)
 	}
 	if _, ok := p["zone"]; ok {
@@ -599,13 +603,12 @@ func TestInventoryGroups(t *testing.T) {
 // Ansible gets every shared name from here, never spelling one itself.
 func TestInventoryVars(t *testing.T) {
 	inv := inventory(t, with(map[string]string{
-		"watchtower:adminCidrs":          `["198.51.100.0/24","2001:db8::/32"]`,
-		"watchtower:ciCidrs":             `["203.0.113.9/32"]`,
+		"watchtower:ciCidrs":             `["203.0.113.9/32","2001:db8::9/128"]`,
 		"watchtower:wireguardAllowCidrs": `["192.0.2.0/24"]`,
 	}))
 	vars := inv["all"].(map[string]interface{})["vars"].(map[string]interface{})
 	for key, want := range map[string]interface{}{
-		"watchtower_admin_cidrs":     []interface{}{"198.51.100.0/24", "2001:db8::/32", "203.0.113.9/32"},
+		"watchtower_ci_cidrs":        []interface{}{"203.0.113.9/32", "2001:db8::9/128"},
 		"watchtower_wireguard_cidrs": []interface{}{"192.0.2.0/24"},
 		"watchtower_wireguard_port":  float64(names.PortWireGuard),
 		"watchtower_private_cidr":    names.SubnetCIDR,
@@ -657,9 +660,10 @@ func TestInventoryEncodeFailure(t *testing.T) {
 func TestKnownHosts(t *testing.T) {
 	got := withHosts(t, baseConfig(), func(_ *Config, hs *hosts) pulumi.StringOutput { return knownHosts(hs.all()) })
 	key := " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostKey\n"
-	want := proxyAddress + "," + names.ProxyName + key
+	// The proxy under the tunnel address too: a VPN peer's way in.
+	want := proxyAddress + "," + names.PrivateIP(0) + "," + names.TunnelIP + "," + names.ProxyName + key
 	for i := 1; i <= 3; i++ {
-		want += nodeAddress + "," + names.NodeName(i) + key
+		want += nodeAddress + "," + names.PrivateIP(i) + "," + names.NodeName(i) + key
 	}
 	if got != want {
 		t.Errorf("knownHosts =\n%s\nwant\n%s", got, want)
@@ -676,10 +680,10 @@ func TestConfigValidation(t *testing.T) {
 		"small node volume":   {with(map[string]string{"watchtower:nodeVolumeGb": "9"}), "nodeVolumeGb 9"},
 		"huge proxy volume":   {with(map[string]string{"watchtower:proxyVolumeGb": "10241"}), "proxyVolumeGb 10241"},
 		"rsa key":             {with(map[string]string{"watchtower:sshPublicKey": "ssh-rsa AAAA"}), "ed25519"},
-		"no admin cidrs":      {with(map[string]string{"watchtower:adminCidrs": "[]"}), "adminCidrs must not be empty"},
-		"missing admin cidrs": {with(map[string]string{"watchtower:adminCidrs": ""}), "watchtower:adminCidrs"},
+		"no ci cidrs":         {with(map[string]string{"watchtower:ciCidrs": "[]"}), "ciCidrs must not be empty"},
+		"missing ci cidrs":    {with(map[string]string{"watchtower:ciCidrs": ""}), "watchtower:ciCidrs"},
 		"no wireguard cidrs":  {with(map[string]string{"watchtower:wireguardAllowCidrs": "[]"}), "wireguardAllowCidrs must not be empty"},
-		"bad cidr":            {with(map[string]string{"watchtower:adminCidrs": `["300.1.1.1/8"]`}), "invalid CIDR"},
+		"bad cidr":            {with(map[string]string{"watchtower:ciCidrs": `["300.1.1.1/8"]`}), "invalid CIDR"},
 		"open ci cidr":        {with(map[string]string{"watchtower:ciCidrs": `["0.0.0.0/0"]`}), "ciCidrs must not contain"},
 		"bad bucket prefix":   {with(map[string]string{"watchtower:bucketPrefix": "Bad_Prefix"}), "bucketPrefix"},
 		"zero project":        {with(map[string]string{"watchtower:hetznerProjectId": "0"}), "numeric project ID"},
@@ -743,7 +747,7 @@ func TestStackFileKeys(t *testing.T) {
 		t.Error("Pulumi.prod.yaml holds a secret; store it in Secret Manager (scripts/secret.sh put)")
 	}
 	for _, key := range []string{
-		"bucketPrefix", "hetznerProjectId: \"16527471\"", "sshPublicKey", "adminCidrs", "ciCidrs",
+		"bucketPrefix", "hetznerProjectId: \"16527471\"", "sshPublicKey", "ciCidrs",
 		"location: fsn1", "nodeServerType: cax31", "proxyServerType: cax11", "nodeCount: \"3\"", "deleteProtection: \"true\"",
 	} {
 		if !strings.Contains(s, "watchtower:"+key) {

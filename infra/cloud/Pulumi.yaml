@@ -13,7 +13,7 @@ description: |
 backend:
   # Hetzner Object Storage, a bucket of its own made by scripts/bootstrap.sh.
   # Credentials: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (the admin S3 key).
-  url: s3://jmr-watchtower-pulumi-state?endpoint=nbg1.your-objectstorage.com&region=nbg1&s3ForcePathStyle=true
+  url: s3://jmr-watchtower-pulumi-state?endpoint=fsn1.your-objectstorage.com&region=fsn1&s3ForcePathStyle=true
 config:
   # Every provider is explicit. A resource that forgot its provider would
   # otherwise fall through to a default one configured from whatever is in

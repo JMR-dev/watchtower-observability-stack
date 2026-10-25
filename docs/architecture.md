@@ -5,8 +5,7 @@
 Watchtower runs Mimir (metrics), Loki (logs), Tempo (traces) and Grafana
 (UI) for several tenants, as podman containers on three ARM servers in
 Hetzner's Falkenstein location (fsn1), behind one small ARM proxy, with
-Object Storage in Nuremberg (nbg1); both are in Hetzner's eu-central
-network zone, where traffic between them is free. Clients
+their Object Storage in the same location. Clients
 ship telemetry over WireGuard to the private endpoint
 `watchtower.jasonmross.dev`, which resolves to the in-tunnel address 10.8.0.1
 and nothing else.
@@ -39,7 +38,7 @@ and nothing else.
  └───────────┬────────────┘ └───────────┬────────────┘ └───────────┬────────────┘
              └──────────────────────────┼──────────────────────────┘
                                         ▼  the cluster S3 key
-                         Hetzner Object Storage (nbg1)
+                         Hetzner Object Storage (fsn1)
      <prefix>-loki · -mimir-blocks · -mimir-ruler · -mimir-alertmanager
      <prefix>-tempo · -logs-archive and -postgres-backups (write-only for the cluster key)
      <prefix>-pulumi-state (admin only)
@@ -135,8 +134,8 @@ and nothing else.
 
 | Layer | Control |
 |---|---|
-| Edge | Hetzner Cloud Firewalls: SSH from admin/CI addresses only; WireGuard on the proxy only, from `wireguardAllowCidrs` |
-| Host | nftables (no firewalld) mirroring the cloud firewalls; on the mesh, nodes reach each other fully and the proxy only Caddy's backend ports; Kafka, etcd and Postgres from nodes only. SELinux enforcing; fail2ban (sshd, recidive); security updates nightly, reboots one host a week, gated on the others' health |
+| Edge | Hetzner Cloud Firewalls: the nodes take nothing on their public addresses; the proxy takes SSH from the deploy runners only and WireGuard from `wireguardAllowCidrs`. People SSH in over the VPN, and to a node through the proxy |
+| Host | nftables (no firewalld) mirroring the cloud firewalls; SSH to a node only from the proxy's private address; on the mesh, nodes reach each other fully and the proxy only Caddy's backend ports; Kafka, etcd and Postgres from nodes only. SELinux enforcing; fail2ban (sshd, recidive); security updates nightly, reboots one host a week, gated on the others' health |
 | Containers | Non-root where the image allows, read-only roots, every capability dropped but what each needs; only wg-easy (wg0, iptables) and Fluent Bit (the host's journal and audit log) run without SELinux confinement |
 | Credentials | Two S3 keys, fenced by bucket policies: the cluster key can't touch Pulumi state and can only write to the archive and the backups. Every secret in Secret Manager, read by the deployer through a grant per secret; the image jobs hold only a push key for the one registry repo |
 | Encryption | WireGuard (clients, and every byte between hosts), TLS on every client-facing endpoint, LUKS volumes |

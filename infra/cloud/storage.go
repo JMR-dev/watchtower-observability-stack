@@ -149,19 +149,20 @@ func newBuckets(ctx *pulumi.Context, cfg *Config, p *providers) (pulumi.StringMa
 	return out, nil
 }
 
-// lifecycleRules expires the whole bucket, or only the listed prefixes.
+// lifecycleRules expires the whole bucket, or only the listed prefixes. A
+// rule's status is the provider's to set (always Enabled); it refuses one
+// given here.
 func lifecycleRules(b names.Bucket) minio.IlmPolicyRuleArray {
 	expiration := pulumi.String(fmt.Sprintf("%dd", b.LifecycleDays))
 	if len(b.LifecyclePrefixes) == 0 {
 		return minio.IlmPolicyRuleArray{&minio.IlmPolicyRuleArgs{
-			Id: pulumi.String("expire"), Status: pulumi.String("Enabled"), Expiration: expiration,
+			Id: pulumi.String("expire"), Expiration: expiration,
 		}}
 	}
 	var rules minio.IlmPolicyRuleArray
 	for _, prefix := range b.LifecyclePrefixes {
 		rules = append(rules, &minio.IlmPolicyRuleArgs{
 			Id:         pulumi.String("expire-" + strings.TrimSuffix(prefix, "/")),
-			Status:     pulumi.String("Enabled"),
 			Filter:     pulumi.String(prefix),
 			Expiration: expiration,
 		})
