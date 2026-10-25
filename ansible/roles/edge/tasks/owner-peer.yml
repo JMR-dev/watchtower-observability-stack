@@ -25,12 +25,17 @@
   delay: 5
   no_log: true
 
+# Only the id: wg-easy's client records carry the peer's private key, which
+# no fact (and so no -v output) may hold.
 - name: Find the owner's peer
   ansible.builtin.set_fact:
-    edge_owner_peer: "{{ edge_wg_clients.json | selectattr('name', 'equalto', edge_owner_peer_name) | first | default(none) }}"
+    edge_owner_peer_id: >-
+      {{ edge_wg_clients.json | selectattr('name', 'equalto', edge_owner_peer_name)
+         | map(attribute='id') | first | default('') }}
+  no_log: true
 
 - name: Create the owner's peer, with no forced DNS
-  when: edge_owner_peer is none
+  when: edge_owner_peer_id | string | length == 0
   block:
     - name: Read wg-easy's client defaults
       ansible.builtin.uri:
@@ -69,11 +74,11 @@
 
     - name: Remember its id
       ansible.builtin.set_fact:
-        edge_owner_peer: {id: "{{ edge_owner_created.json.clientId }}"}
+        edge_owner_peer_id: "{{ edge_owner_created.json.clientId }}"
 
 - name: The owner's peer config
   ansible.builtin.uri:
-    url: "{{ edge_wg_easy_api }}/client/{{ edge_owner_peer.id }}/configuration"
+    url: "{{ edge_wg_easy_api }}/client/{{ edge_owner_peer_id }}/configuration"
     url_username: admin
     url_password: "{{ watchtower_secret.wg_easy_password }}"
     force_basic_auth: true
