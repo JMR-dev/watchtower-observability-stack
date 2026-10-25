@@ -67,8 +67,8 @@ gopass.
    Commit `Pulumi.prod.yaml`: `stack init` only adds the `encryptionsalt`.
 6. **Gitea:** in Settings → Branches, protect main and require the `ci`
    checks: `go`, `ansible`, `configs`, `images (caddy)`, `images (patroni)`,
-   `semgrep`, `shell`, `alloy`.
-7. **Merge to main.** `deploy.yml` builds both images, creates the hosts,
+   `images (wg-easy)`, `semgrep`, `shell`, `alloy`.
+7. **Merge to main.** `deploy.yml` builds our images, creates the hosts,
    installs everything (all three nodes at once the first time), and
    verifies it end to end.
 8. **Your VPN peer.** The deploy created the wg-easy client `owner` and
@@ -109,7 +109,7 @@ source scripts/env.sh       # the key, as ANSIBLE_PRIVATE_KEY_FILE and in ssh-ag
 (cd ansible && ansible all -m ping -e watchtower_ssh_via=vpn)
 ssh root@10.8.0.1                       # the proxy
 ssh -J root@10.8.0.1 root@10.20.1.11    # watchtower-1 (10.20.1.1<n>)
-WATCHTOWER_SSH_VIA=vpn scripts/verify.sh <caddy-digest> <archive-bucket>
+WATCHTOWER_SSH_VIA=vpn scripts/verify.sh <archive-bucket>
 ```
 
 For plain `ssh`, add the pinned host keys to your own known_hosts once:
@@ -289,6 +289,36 @@ each. If their node is down for long, move them: change
 `ansible/inventory/group_vars/all/placement.yml` and merge. The deploy stops
 the component on the old node and starts it on the new one. Kafka keeps 24
 hours of traces for the block builder to catch up on.
+
+## Our images
+
+`build/<name>/` holds each of our images: Caddy and wg-easy on Alpine,
+Patroni on the Postgres image. Each image's tag is its version, the Alpine
+release it's built on and its revision, e.g. `15.5.0-alpine3.24.3-r1`
+(`scripts/image-tag.sh <name>`; Patroni's has no Alpine part). Tags in
+Artifact Registry are immutable, and the deploy reuses a tag that's
+already there instead of rebuilding it.
+
+- **Alpine patch releases come in on their own.** The Dockerfiles name only
+  Alpine's minor release (`ARG ALPINE=docker.io/library/alpine:3.24`).
+  Each deploy's guard job resolves its newest patch release once (`image-tag.sh
+  --alpine`). Every Alpine image then builds on it, by digest, and the hosts
+  install the tags that name it. When Alpine ships 3.24.4, the next deploy
+  rebuilds those images as `…-alpine3.24.4-r1` and rolls them out. Nothing
+  deploys until something merges (or you dispatch `deploy.yml`).
+- **Any other change needs a new tag.** If you change anything under
+  `build/<name>/` without a new version (`org.opencontainers.image.version`),
+  bump `watchtower.image.revision`; set it back to 1 with a new version.
+  CI's `images` jobs fail a pull request that changes an image but keeps its
+  tag, since the deploy would keep serving the old image under it.
+- **Package fixes between Alpine releases.** `apk add` takes the packages
+  current at build time, and a reused tag isn't rebuilt. To pick up a fix
+  Alpine shipped as a package update, not a new release, bump the revision.
+- **A new Alpine minor** (3.25): change `ARG ALPINE` in every Dockerfile
+  together; `image-tag.sh` refuses a mix.
+- **Building one locally:** `scripts/build-image.sh <name> <ref>` (docker;
+  render the configs first with `ansible/playbooks/render.yml`). It builds,
+  checks and scans the image just as CI does.
 
 ## Rebuilding a host
 

@@ -16,7 +16,7 @@ reachable only through WireGuard at the private endpoint
 - **Backups:** Grafana's database dumped nightly to Object Storage and kept 90 days, with a Healthchecks.io alert the moment a run fails
 - **Host health:** every host checks its services, disks and SELinux every 5 minutes and reports to its own Healthchecks.io check, so a lost node is noticed even though users aren't affected
 - **Access:** WireGuard (wg-easy) on the proxy; Caddy (with the Coraza WAF) answers only on the tunnel address
-- **Images:** our two (Caddy, Patroni) in a private Artifact Registry repo, built natively per architecture, scanned by Trivy
+- **Images:** our own (Caddy, wg-easy, Patroni) in a private Artifact Registry repo, minimal Alpine where they can be, built natively for ARM, scanned by Trivy
 - **DNS:** the Cloud DNS zone `watchtower.jasonmross.dev`, delegated from `jasonmross.dev`
 - **CI/CD:** Gitea Actions: `ci.yml` (status checks), `deploy.yml` (deploy on merge to main)
 
@@ -29,6 +29,7 @@ reachable only through WireGuard at the private endpoint
 | `ansible/` | Everything on the hosts: one role per service, `playbooks/site.yml`, `playbooks/render.yml` |
 | `build/caddy/` | The proxy image: Caddy + Coraza WAF + Cloud DNS DNS-01 |
 | `build/patroni/` | Patroni + PostgreSQL 18 for the nodes, built with uv |
+| `build/wg-easy/` | The client VPN and its UI, on Alpine with nftables-backed iptables |
 | `scripts/` | Bootstrap, secrets, Healthchecks.io checks, key rotation, image builds and checks, deploy verification, tenant onboarding, GDPR erasure |
 | `config/alloy/` | Client-side Alloy config with PII scrubbing |
 | `docs/` | Architecture, runbook, secrets, multi-tenancy, GDPR |
@@ -63,8 +64,8 @@ CONTAINER_RUNTIME=podman scripts/check-configs.sh
 
 renders every host's configs from the sample inventory and checks each with
 the program that reads it (quadlet, Loki, Mimir, Tempo, Fluent Bit;
-shellcheck for the host scripts), as CI's `configs` job does. `scripts/build-image.sh` checks the Caddyfile and
-`patroni.yml` with the images it builds.
+shellcheck for the host scripts), as CI's `configs` job does. `scripts/build-image.sh` checks the Caddyfile,
+`patroni.yml` and wg-easy's tools with the images it builds.
 
 ## Documentation
 

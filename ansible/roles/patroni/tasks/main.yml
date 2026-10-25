@@ -6,10 +6,10 @@
 # A config change never restarts the leader under Grafana's feet: the
 # restart handler first moves leadership to a healthy replica (switchover).
 
-- name: Patroni needs its image
+- name: Patroni needs its image's tag
   ansible.builtin.assert:
-    that: patroni_image is defined and patroni_image | length > 0
-    fail_msg: pass -e patroni_image=<registry>/patroni@sha256:... (the deploy workflow does)
+    that: watchtower_image_tags['patroni'] | default('') | length > 0
+    fail_msg: pass -e @image-tags.json from scripts/image-tag.sh --vars (the deploy workflow does)
 
 - name: Patroni directories
   ansible.builtin.file:

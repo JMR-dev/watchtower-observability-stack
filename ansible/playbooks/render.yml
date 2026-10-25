@@ -11,8 +11,6 @@
   gather_facts: false
   vars:
     render_dir: "{{ playbook_dir }}/../.render/{{ inventory_hostname }}"
-    caddy_image: europe-west3-docker.pkg.dev/watchtower-observe/watchtower/caddy@sha256:{{ '0' * 64 }}
-    patroni_image: europe-west3-docker.pkg.dev/watchtower-observe/watchtower/patroni@sha256:{{ '0' * 64 }}
     common:
       - {src: firewall/templates/watchtower.nft.j2, dest: watchtower.nft}
       - {src: mesh/templates/wg1.conf.j2, dest: wg1.conf}
