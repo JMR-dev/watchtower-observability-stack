@@ -189,9 +189,29 @@ ensure_sa() {
   fi
 }
 
+# gcloud has no add-iam-policy-binding for managed zones, so read, add and
+# write back; set-iam-policy sends the etag it read, so a concurrent change
+# fails and retry_iam starts over.
+zone_bind() {
+  local member=$1 role=$2 policy file
+  policy="$(gcloud dns managed-zones get-iam-policy "$ZONE" --project "$GCP_PROJECT" --format json)" || return 1
+  if jq -e --arg m "$member" --arg r "$role" \
+    'any(.bindings[]?; .role == $r and any(.members[]; . == $m))' <<<"$policy" >/dev/null; then
+    return 0
+  fi
+  file="$(mktemp)"
+  jq --arg m "$member" --arg r "$role" '
+    .bindings = ((.bindings // []) as $b
+      | if any($b[]; .role == $r)
+        then $b | map(if .role == $r then .members = (.members + [$m] | unique) else . end)
+        else $b + [{role: $r, members: [$m]}] end)' <<<"$policy" >"$file"
+  gcloud dns managed-zones set-iam-policy "$ZONE" --project "$GCP_PROJECT" --policy-file "$file" >/dev/null \
+    || { rm -f "$file"; return 1; }
+  rm -f "$file"
+}
+
 zone_admin() {
-  retry_iam gcloud dns managed-zones add-iam-policy-binding "$ZONE" --project "$GCP_PROJECT" \
-    --member "serviceAccount:$(sa_email "$1")" --role roles/dns.admin
+  retry_iam zone_bind "serviceAccount:$(sa_email "$1")" roles/dns.admin
 }
 
 DEPLOYER="$(sa_email watchtower-deployer)"
