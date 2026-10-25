@@ -25,11 +25,12 @@
 #      caddy and patroni images, plus two service accounts scoped to that one
 #      repo: watchtower-image-pusher (CI writes) and watchtower-image-puller
 #      (the hosts read).
-#   6. Creates every secret in scripts/secret-names.txt in Secret Manager,
-#      empty, with its payload replicated to europe-west3 only, and lets
-#      watchtower-deployer read each one but gar-push-key: a grant per
-#      secret, never secretAccessor on the project. Values go in with
-#      scripts/secret.sh.
+#   6. Creates every secret the deploy workflow reads (`secret.sh
+#      deploy-ids`) in Secret Manager, empty, with its payload replicated to
+#      europe-west3 only, and lets watchtower-deployer read each: a grant per
+#      secret, never secretAccessor on the project. Owner-only secrets such
+#      as gar-push-key are never read by the deploy, so never granted.
+#      Values go in with scripts/secret.sh.
 #
 # Keys are made by scripts/rotate-gcp-key.sh.
 #
@@ -260,14 +261,16 @@ ensure_sa watchtower-image-puller "The hosts pull watchtower's images from ${GAR
 repo_role watchtower-image-puller roles/artifactregistry.reader
 
 # ---------------------------------------------------------------------------
-log "6/6 Secret Manager: every secret, readable by watchtower-deployer"
+log "6/6 Secret Manager: every secret the deploy reads, readable by watchtower-deployer"
 # ---------------------------------------------------------------------------
-mapfile -t secret_ids < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "${repo_root}/scripts/secret-names.txt")
+mapfile -t secret_ids < <("${repo_root}/scripts/secret.sh" deploy-ids)
+[[ "${#secret_ids[@]}" -gt 0 ]] || die "deploy.yml reads no secrets; is the setup action's secrets: block intact?"
 "${repo_root}/scripts/secret.sh" ensure "${secret_ids[@]}"
 granted=0
 for id in "${secret_ids[@]}"; do
-  # The image job gets the push key as its own Actions secret; a leaked
-  # deployer key must not be able to push images too.
+  # deploy.yml never reads the push key (a Go test keeps it so): the image
+  # job gets it as its own Actions secret, and a leaked deployer key must
+  # not be able to push images too. Checked here as well.
   [[ "$id" == gar-push-key ]] && continue
   retry_iam gcloud secrets add-iam-policy-binding "$id" --project "$GCP_PROJECT" \
     --member "serviceAccount:${DEPLOYER}" --role roles/secretmanager.secretAccessor
@@ -280,7 +283,7 @@ Done.
   State bucket : s3://${STATE_BUCKET} (admin key only)
   DNS          : zone ${ZONE} (${DOMAIN}.), delegated from ${PARENT_ZONE} in ${PARENT_PROJECT}
   Registry     : ${GAR_LOCATION}-docker.pkg.dev/${GCP_PROJECT}/${GAR_REPO}
-  Secrets      : ${#secret_ids[@]} in ${GCP_PROJECT}, ${granted} readable by ${DEPLOYER}
+  Secrets      : the ${#secret_ids[@]} the deploy reads, in ${GCP_PROJECT}; ${granted} readable by ${DEPLOYER}
 
 Next (docs/runbook.md, "First deploy"):
   1. dig +short NS ${DOMAIN}

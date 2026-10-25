@@ -3,7 +3,6 @@ package names
 import (
 	"os"
 	"regexp"
-	"strings"
 	"testing"
 )
 
@@ -87,50 +86,26 @@ func TestGDPRRecordsNeverExpire(t *testing.T) {
 	}
 }
 
-// scripts/secret-names.txt is what scripts/bootstrap.sh creates and grants;
-// a secret missing from it would fail the deploy that first reads it.
-func TestSecretListMatchesFile(t *testing.T) {
-	b, err := os.ReadFile("../../../scripts/secret-names.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	inFile := map[string]bool{}
-	for _, line := range strings.Split(string(b), "\n") {
-		id := strings.TrimSpace(line)
-		if id == "" || strings.HasPrefix(id, "#") {
-			continue
-		}
-		if inFile[id] {
-			t.Errorf("%s is listed twice", id)
-		}
-		inFile[id] = true
-	}
-	inGo := map[string]bool{}
+// Secret ids are unique and fit the setup action's `secrets:` lines.
+func TestSecretIDs(t *testing.T) {
+	seen := map[string]bool{}
+	valid := regexp.MustCompile(`^[a-z0-9-]{1,255}$`)
 	for _, id := range Secrets() {
-		if inGo[id] {
+		if seen[id] {
 			t.Errorf("Secrets() lists %s twice", id)
 		}
-		inGo[id] = true
-		if !inFile[id] {
-			t.Errorf("%s is missing from scripts/secret-names.txt", id)
-		}
-	}
-	for id := range inFile {
-		if !inGo[id] {
-			t.Errorf("scripts/secret-names.txt lists %s, which names.Secrets() does not", id)
-		}
-	}
-	// Secret Manager ids: letters, digits, dashes and underscores.
-	valid := regexp.MustCompile(`^[a-z0-9-]{1,255}$`)
-	for id := range inGo {
+		seen[id] = true
 		if !valid.MatchString(id) {
 			t.Errorf("secret id %q", id)
 		}
 	}
 }
 
-// Every secret the deploy workflow asks the setup action for must exist.
-func TestWorkflowReadsOnlyListedSecrets(t *testing.T) {
+// The deploy workflow reads every secret but the owner-only push key, and
+// nothing else. scripts/bootstrap.sh creates and grants exactly what it
+// reads (`secret.sh deploy-ids`), so a secret it missed would fail the
+// deploy that first needs it.
+func TestWorkflowReadsEverySecret(t *testing.T) {
 	b, err := os.ReadFile("../../../.gitea/workflows/deploy.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +120,9 @@ func TestWorkflowReadsOnlyListedSecrets(t *testing.T) {
 	if len(matches) == 0 {
 		t.Fatal("deploy.yml reads no secrets through the setup action")
 	}
+	read := map[string]bool{}
 	for _, m := range matches {
+		read[m[1]] = true
 		if !known[m[1]] {
 			t.Errorf("deploy.yml reads %s, which is not a known secret", m[1])
 		}
@@ -153,6 +130,11 @@ func TestWorkflowReadsOnlyListedSecrets(t *testing.T) {
 		// as its own Actions secret.
 		if m[1] == SecretGARPushKey {
 			t.Errorf("deploy.yml reads %s through the deployer", m[1])
+		}
+	}
+	for _, id := range Secrets() {
+		if !read[id] && id != SecretGARPushKey {
+			t.Errorf("deploy.yml never reads %s, so bootstrap.sh would not create or grant it", id)
 		}
 	}
 }

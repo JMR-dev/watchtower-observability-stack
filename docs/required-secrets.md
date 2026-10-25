@@ -8,12 +8,15 @@ publicly. Every secret lives in two places:
 2. **gopass** as `watchtower/<id>`, the local copy. `scripts/env.sh`
    exports from it for owner-run commands.
 
-The ids are the same in both, and
-[`scripts/secret-names.txt`](../scripts/secret-names.txt) lists them all.
-`scripts/bootstrap.sh` creates each one empty in Secret Manager, and
-`scripts/secret.sh put <id>` stores a value in both places.
-`scripts/secret.sh check` lists any secret still missing a value or a gopass
-copy.
+The ids are the same in both; the tables below list them all.
+`scripts/secret.sh put <id>` stores a value in both places, for any Secret
+Manager id. `scripts/bootstrap.sh` creates, empty, every secret the deploy
+workflow reads (its setup steps' `secrets:` lines; `scripts/secret.sh
+deploy-ids` prints them) and grants the deployer each. A new secret the
+deploy needs therefore goes in `deploy.yml` first, then `bootstrap.sh`
+again. `scripts/secret.sh check` lists any secret still missing a value or
+a gopass copy: every one the deploy reads, and every one labelled
+`app=watchtower` in Secret Manager.
 
 ```bash
 openssl rand -base64 48 | scripts/secret.sh put pulumi-passphrase

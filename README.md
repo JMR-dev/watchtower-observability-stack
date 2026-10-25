@@ -27,7 +27,7 @@ private endpoint **watchtower.jasonmross.dev**.
 | `ansible/` | Everything on the hosts: one role per service, `playbooks/site.yml`, `playbooks/render.yml` |
 | `build/caddy/` | The proxy image: Caddy + Coraza WAF + Cloud DNS DNS-01 |
 | `build/patroni/` | Patroni + PostgreSQL 18 for the nodes, built with uv |
-| `scripts/` | Bootstrap, secrets (`secret-names.txt` lists them all), key rotation, image builds and checks, deploy verification, tenant onboarding, GDPR erasure |
+| `scripts/` | Bootstrap, secrets, key rotation, image builds and checks, deploy verification, tenant onboarding, GDPR erasure |
 | `config/alloy/` | Client-side Alloy config with PII scrubbing |
 | `docs/` | Architecture, runbook, secrets, multi-tenancy, GDPR |
 

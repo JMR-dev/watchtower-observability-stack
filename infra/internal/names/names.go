@@ -73,8 +73,9 @@ const (
 )
 
 // Secret Manager secrets in GCPProject. Each is also in gopass as
-// watchtower/<id>, and scripts/secret-names.txt lists them all (a test keeps
-// the two lists equal). Nothing secret is stack config.
+// watchtower/<id>. The deploy workflow reads every one but SecretGARPushKey
+// (a test keeps it so), and scripts/bootstrap.sh creates and grants what it
+// reads. Nothing secret is stack config.
 const (
 	// Read by the deploy workflow's cloud job.
 	SecretPulumiPassphrase = "pulumi-passphrase"

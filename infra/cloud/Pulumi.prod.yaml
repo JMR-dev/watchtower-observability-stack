@@ -1,6 +1,6 @@
 # Production stack. Public values only: the repo is mirrored publicly, and
 # every secret (the S3 access key IDs the bucket policies name included) is
-# read from Secret Manager at deploy time (scripts/secret-names.txt).
+# read from Secret Manager at deploy time (docs/required-secrets.md).
 # `pulumi stack init prod --secrets-provider passphrase` adds encryptionsalt.
 config:
   watchtower:location: nbg1

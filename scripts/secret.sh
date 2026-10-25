@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Store and check the stack's secrets. Each lives in two places: Secret
 # Manager in watchtower-observe, which the deploy reads, and gopass as
-# watchtower/<id>, the local copy. The ids are scripts/secret-names.txt;
-# anything else is refused.
+# watchtower/<id>, the local copy. Any Secret Manager id is accepted.
 #
 #   scripts/secret.sh put <id>        value from stdin (a pipe or a file), or
 #                                     typed at a hidden prompt
 #   scripts/secret.sh check           which secrets still lack a value or a
-#                                     gopass copy; exits 1 if any do
+#                                     gopass copy; exits 1 if any do. Checks
+#                                     every secret deploy.yml reads and every
+#                                     watchtower secret in Secret Manager
 #   scripts/secret.sh ensure <id>...  create empty secrets (bootstrap.sh does
-#                                     this for every listed id)
+#                                     this for every id deploy.yml reads)
+#   scripts/secret.sh deploy-ids      the ids deploy.yml reads, one a line
 #   scripts/secret.sh gitea <id> <NAME>
 #                                     copy the latest value into the repo's
 #                                     Actions secret NAME (only
@@ -46,13 +48,23 @@ LOCATION="${SECRET_LOCATION:-europe-west3}"
 GITEA_URL="${GITEA_URL:-https://gitea.jasonmross.dev}"
 REPO="${GITEA_REPO:-JMR-dev/watchtower-observability-stack}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-list="${repo_root}/scripts/secret-names.txt"
+workflow="${repo_root}/.gitea/workflows/deploy.yml"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
-usage() { die "usage: $0 put <id> | check | ensure <id>... | gitea <id> <NAME>"; }
+usage() { die "usage: $0 put <id> | check | ensure <id>... | gitea <id> <NAME> | deploy-ids"; }
 
-ids() { sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$list"; }
-known() { grep -qxF -- "$1" < <(ids) || die "${1} is not in scripts/secret-names.txt"; }
+# Secret Manager's id rule, less a leading dash: ids go on gcloud command
+# lines, where one would read as a flag.
+valid() {
+  [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,254}$ ]] ||
+    die "${1} is not a Secret Manager id (letters, digits, _ and -, up to 255)"
+}
+
+# The ids the deploy workflow reads: its setup steps' `secrets:` lines,
+# NAME=id or @NAME=id (.gitea/actions/setup).
+deploy_ids() {
+  sed -nE 's/^[[:space:]]+@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)[[:space:]]*$/\1/p' "$workflow" | sort -u
+}
 
 exists() { gcloud secrets describe "$1" --project "$PROJECT" >/dev/null 2>&1; }
 
@@ -143,7 +155,10 @@ check() {
       echo "no copy  ${id}: not in gopass as watchtower/${id}"
       bad=1
     fi
-  done < <(ids)
+  done < <({
+    deploy_ids
+    gcloud secrets list --project "$PROJECT" --filter labels.app=watchtower --format 'value(name)'
+  } | sort -u)
   [[ "$bad" == 0 ]] && echo "every secret has a value in Secret Manager and a gopass copy"
   return "$bad"
 }
@@ -152,7 +167,7 @@ check() {
 case "$1" in
   put)
     [[ $# -eq 2 ]] || usage
-    known "$2"
+    valid "$2"
     put "$2"
     ;;
   check)
@@ -162,13 +177,17 @@ case "$1" in
   ensure)
     [[ $# -ge 2 ]] || usage
     shift
-    for id in "$@"; do known "$id"; done
+    for id in "$@"; do valid "$id"; done
     for id in "$@"; do ensure "$id"; done
     ;;
   gitea)
     [[ $# -eq 3 && "$3" =~ ^[A-Z][A-Z0-9_]*$ ]] || usage
-    known "$2"
+    valid "$2"
     gitea "$2" "$3"
+    ;;
+  deploy-ids)
+    [[ $# -eq 1 ]] || usage
+    deploy_ids
     ;;
   *) usage ;;
 esac

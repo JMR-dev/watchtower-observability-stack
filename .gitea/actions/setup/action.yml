@@ -24,8 +24,9 @@ description: |
   uv and those three also install on arm64 runners (the Patroni image job);
   every other tool is amd64 only.
 
-  Secrets: every line of `secrets` is NAME=id or @NAME=id, an id from
-  scripts/secret-names.txt. NAME=id exports the value as NAME (one line
+  Secrets: every line of `secrets` is NAME=id or @NAME=id, id a Secret
+  Manager secret (scripts/bootstrap.sh creates and grants every id
+  deploy.yml names here). NAME=id exports the value as NAME (one line
   only); @NAME=id writes it to a 0600 file and exports its path as NAME (for
   key files). Every line of every value is masked in the log first. Reading
   needs `gcp-key` and installs gcloud.

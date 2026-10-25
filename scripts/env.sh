@@ -6,11 +6,11 @@
 #   source scripts/env.sh
 #
 # gopass holds the local copy of every secret as watchtower/<id>, with the
-# same ids as Secret Manager (scripts/secret-names.txt; scripts/secret.sh put
-# writes both). CI reads the same values from Secret Manager instead. One
-# entry exists only here and in Gitea: watchtower/gcp-deployer-key, the JSON
-# key of watchtower-deployer@ (scripts/rotate-gcp-key.sh deployer), which
-# Pulumi uses to read the rest.
+# same ids as Secret Manager (scripts/secret.sh put writes both). CI reads
+# the same values from Secret Manager instead. One entry exists only here
+# and in Gitea: watchtower/gcp-deployer-key, the JSON key of
+# watchtower-deployer@ (scripts/rotate-gcp-key.sh deployer), which Pulumi
+# uses to read the rest.
 
 # -o prints only an entry's first line; -n prints all of it, for key files.
 _wt_get() { gopass show -o "watchtower/$1"; }
