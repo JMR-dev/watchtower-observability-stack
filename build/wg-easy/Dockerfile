@@ -43,11 +43,17 @@ RUN npm install --no-save --omit=dev "libsql@${LIBSQL_VERSION}"
 
 FROM ${ALPINE}
 LABEL org.opencontainers.image.version="15.5.0"
-LABEL watchtower.image.revision="1"
+LABEL watchtower.image.revision="2"
 LABEL org.opencontainers.image.source="https://github.com/wg-easy/wg-easy"
 
+# Every package upgraded to the build day's (IMAGE_DATE, set by
+# scripts/build-image.sh): a new day misses the build cache from here, so the
+# upgrade really runs.
+ARG IMAGE_DATE=unset
+LABEL watchtower.image.date="${IMAGE_DATE}"
 # wg-quick is bash and needs ip; iptables runs the interface's hooks.
-RUN apk add --no-cache nodejs dumb-init bash iproute2 iptables wireguard-tools
+RUN apk upgrade --no-cache \
+ && apk add --no-cache nodejs dumb-init bash iproute2 iptables wireguard-tools
 
 WORKDIR /app
 COPY --from=build /build/src/.output /app

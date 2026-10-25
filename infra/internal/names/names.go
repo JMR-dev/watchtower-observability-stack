@@ -101,6 +101,10 @@ const (
 	// name to URL (scripts/healthchecks.sh); each host gets only its own
 	// (ansible/roles/health).
 	SecretHealthchecksHostURLs = "healthchecks-host-urls"
+	// The Healthchecks.io ping URL of the deploy (scripts/healthchecks.sh):
+	// every run pings it, /fail when a job failed, and the daily run's
+	// absence alerts too.
+	SecretHealthchecksDeployURL = "healthchecks-deploy-url"
 
 	// SecretGARPushKey is copied to the GAR_PUSH_KEY Actions secret by the
 	// owner (scripts/secret.sh gitea). The deployer is never granted it.
@@ -138,6 +142,7 @@ func Secrets() []string {
 		SecretGrafanaAdminPassword, SecretGrafanaSecretKey, SecretGrafanaDBPassword,
 		SecretPostgresSuperuserPassword, SecretPostgresReplicationPassword, SecretPatroniRESTAPIPassword,
 		SecretWGEasyPassword, SecretCaddyDNSKey, SecretHealthchecksPGBackupURL, SecretHealthchecksHostURLs,
+		SecretHealthchecksDeployURL,
 		SecretGARPushKey, SecretHealthchecksAPIKey,
 		SecretWireGuardOwnerPeer,
 	}

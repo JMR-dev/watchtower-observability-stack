@@ -55,9 +55,15 @@ RUN /usr/local/bin/caddy list-modules | grep -qx 'http.handlers.waf' \
 # ── Runtime image: Alpine, CA certificates and the static binary ────────────
 FROM ${ALPINE}
 LABEL org.opencontainers.image.version="2.11.7"
-LABEL watchtower.image.revision="1"
+LABEL watchtower.image.revision="2"
 
-RUN apk add --no-cache ca-certificates \
+# Every package upgraded to the build day's (IMAGE_DATE, set by
+# scripts/build-image.sh): a new day misses the build cache from here, so the
+# upgrade really runs.
+ARG IMAGE_DATE=unset
+LABEL watchtower.image.date="${IMAGE_DATE}"
+RUN apk upgrade --no-cache \
+    && apk add --no-cache ca-certificates \
     && addgroup -S -g 1000 caddy \
     && adduser -S -D -H -u 1000 -G caddy caddy
 

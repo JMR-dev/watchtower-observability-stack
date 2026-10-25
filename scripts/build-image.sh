@@ -12,8 +12,10 @@
 # tests.
 #
 # An image on Alpine builds on the release in ALPINE_RELEASE and
-# ALPINE_DIGEST (the deploy resolves them once), else on the newest patch
-# release of its Dockerfile's minor (scripts/image-tag.sh --alpine).
+# ALPINE_DIGEST, with every package upgraded as of IMAGE_DATE (the deploy
+# fixes all three once), else on the newest patch release of its
+# Dockerfile's minor, today (scripts/image-tag.sh --inputs). A new
+# IMAGE_DATE misses the build cache at the Dockerfile's `apk upgrade`.
 #
 # Checks, per image:
 #   caddy    `caddy validate` on the proxy's rendered Caddyfile, run the way
@@ -64,12 +66,13 @@ esac
 
 build_args=()
 if grep -q '^ARG ALPINE=' "${repo_root}/build/${what}/Dockerfile"; then
-  if [[ -z "${ALPINE_RELEASE:-}" || -z "${ALPINE_DIGEST:-}" ]]; then
-    alpine="$("${repo_root}/scripts/image-tag.sh" --alpine)"
-    while read -r kv; do export "${kv?}"; done <<<"$alpine"
+  if [[ -z "${ALPINE_RELEASE:-}" || -z "${ALPINE_DIGEST:-}" || -z "${IMAGE_DATE:-}" ]]; then
+    inputs="$("${repo_root}/scripts/image-tag.sh" --inputs)"
+    while read -r kv; do export "${kv?}"; done <<<"$inputs"
   fi
-  echo "==> Building on Alpine ${ALPINE_RELEASE} (${ALPINE_DIGEST})"
-  build_args+=(--build-arg "ALPINE=docker.io/library/alpine:${ALPINE_RELEASE}@${ALPINE_DIGEST}")
+  echo "==> Building on Alpine ${ALPINE_RELEASE} (${ALPINE_DIGEST}), packages as of ${IMAGE_DATE}"
+  build_args+=(--build-arg "ALPINE=docker.io/library/alpine:${ALPINE_RELEASE}@${ALPINE_DIGEST}"
+    --build-arg "IMAGE_DATE=${IMAGE_DATE}")
 fi
 
 DOCKER_BUILDKIT=1 docker build "${build_args[@]}" -t "$ref" "${repo_root}/build/${what}"

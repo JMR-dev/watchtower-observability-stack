@@ -1,31 +1,38 @@
 #!/usr/bin/env bash
-# The tag of one of our images: its version, the Alpine release it's built
-# on, and its revision, e.g. 15.5.0-alpine3.24.3-r1 (2.11.7 ... for Caddy,
-# 4.1.5-r1 for Patroni, which isn't on Alpine).
+# The tag of one of our images. On Alpine: its version, the Alpine release,
+# its revision and the day it was built, e.g. 15.5.0-alpine3.24.3-r1-20261025.
+# Patroni, which isn't on Alpine: version and revision, 4.1.5-r1.
 #
 #   scripts/image-tag.sh <name>          one image's tag
 #   scripts/image-tag.sh --names         every image's name, one a line
 #   scripts/image-tag.sh --vars          every image's tag as Ansible extra
 #                                        vars: {"watchtower_image_tags": {...}}
-#   scripts/image-tag.sh --alpine        the Alpine release to build on:
+#   scripts/image-tag.sh --inputs        what this deploy builds on:
 #                                        ALPINE_RELEASE=3.24.3
 #                                        ALPINE_DIGEST=sha256:...
+#                                        IMAGE_DATE=20261025 (UTC)
 #   scripts/image-tag.sh --check <base>  fail if an image changed since the
 #                                        commit <base> but its tag didn't
 #
 # The Dockerfiles take Alpine's minor release (ARG ALPINE=...alpine:3.24),
-# and every build uses that minor's newest patch release: the deploy resolves
-# it once (--alpine, in its guard job) and hands ALPINE_RELEASE and
-# ALPINE_DIGEST to every job, so the images it builds and the tags it
-# installs agree even if Alpine publishes mid-run. Without them, this
-# resolves the release itself. A new Alpine patch release changes every
-# Alpine image's tag, so the next deploy rebuilds them all on it.
+# and every build uses that minor's newest patch release, upgrading every
+# package to the day's (apk upgrade). The deploy fixes both once (--inputs,
+# in its guard job) and hands them to every job, so the images it builds
+# and the tags it installs agree even if Alpine publishes, or the day turns,
+# mid-run. Without them, this resolves them itself.
+#
+# The day in the tag makes the first deploy of each day (UTC) rebuild every
+# Alpine image with that day's packages; the deploy runs at 05:00 UTC Monday
+# to Saturday for that (deploy.yml), so the images are at most a day behind
+# Alpine's package fixes, two over Sunday. Later deploys that day reuse
+# those builds.
 #
 # Tags in Artifact Registry are immutable and a tag that's there is reused
 # (scripts/publish-image.sh), so any other change to build/<name>/ needs a
-# new tag: a new version (org.opencontainers.image.version), or else the
-# next revision (watchtower.image.revision; back to 1 with a new version).
-# CI's --check makes sure of it.
+# new tag, or a deploy later the same day would keep the morning's image: a
+# new version (org.opencontainers.image.version), or else the next revision
+# (watchtower.image.revision; back to 1 with a new version). CI's --check
+# makes sure of it, and Patroni's tag has nothing else to change it.
 
 set -euo pipefail
 
@@ -63,6 +70,11 @@ alpine() {
   printf 'ALPINE_RELEASE=%s\nALPINE_DIGEST=%s\n' "$release" "$digest"
 }
 
+inputs() {
+  alpine
+  printf 'IMAGE_DATE=%s\n' "$(date -u +%Y%m%d)"
+}
+
 # The tag without its Alpine release: version and revision.
 own_part() { # Dockerfile text on stdin
   local text version revision
@@ -84,17 +96,19 @@ tag() {
     printf '%s-r%s\n' "$version" "$revision"
     return
   fi
-  need_alpine
+  need_inputs
   [[ "${ALPINE_RELEASE:-}" == "${minor}".* ]] ||
-    die "build/$1 builds on Alpine ${minor}, but ALPINE_RELEASE is '${ALPINE_RELEASE:-}' (scripts/image-tag.sh --alpine)"
-  printf '%s-alpine%s-r%s\n' "$version" "$ALPINE_RELEASE" "$revision"
+    die "build/$1 builds on Alpine ${minor}, but ALPINE_RELEASE is '${ALPINE_RELEASE:-}' (scripts/image-tag.sh --inputs)"
+  [[ "${IMAGE_DATE:-}" =~ ^[0-9]{8}$ ]] || die "IMAGE_DATE is '${IMAGE_DATE:-}', not YYYYMMDD"
+  printf '%s-alpine%s-r%s-%s\n' "$version" "$ALPINE_RELEASE" "$revision" "$IMAGE_DATE"
 }
 
-# The Alpine tags need the release; resolve it unless the caller did.
-need_alpine() {
-  [[ -n "${ALPINE_RELEASE:-}" ]] && return
+# The Alpine tags need the release and the day; resolve them unless the
+# caller did.
+need_inputs() {
+  [[ -n "${ALPINE_RELEASE:-}" && -n "${ALPINE_DIGEST:-}" && -n "${IMAGE_DATE:-}" ]] && return
   local out kv
-  out="$(alpine)"
+  out="$(inputs)"
   while read -r kv; do export "${kv?}"; done <<<"$out"
 }
 
@@ -120,13 +134,13 @@ check() { # base commit
 
 case "${1:-}" in
   --names) names ;;
-  --alpine) alpine ;;
+  --inputs) inputs ;;
   --check) [[ $# -eq 2 ]] || die "usage: $0 --check <base-commit>"; check "$2" ;;
   --vars)
-    need_alpine # once, not once per image
+    need_inputs # once, not once per image
     while read -r name; do printf '%s\t%s\n' "$name" "$(tag "$name")"; done < <(names) |
       jq -R -s -c 'split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add | {watchtower_image_tags: .}'
     ;;
-  "" | -*) die "usage: $0 <name> | --names | --vars | --alpine | --check <base-commit>" ;;
+  "" | -*) die "usage: $0 <name> | --names | --vars | --inputs | --check <base-commit>" ;;
   *) tag "$1" ;;
 esac

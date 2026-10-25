@@ -26,7 +26,7 @@ gopass.
    scripts/secret.sh put hcloud-token
    scripts/secret.sh put healthchecks-pg-backup-url
    scripts/secret.sh put healthchecks-jasonmross-dev-api-key
-   scripts/healthchecks.sh   # a check per host; stores healthchecks-host-urls
+   scripts/healthchecks.sh   # a check per host and one for the deploy; stores their ping URLs
    for k in admin cluster; do
      scripts/secret.sh put "s3-$k-access-key"
      scripts/secret.sh put "s3-$k-secret-key"
@@ -264,7 +264,8 @@ It reports to the host's own Healthchecks.io check (`watchtower-proxy`,
 
 `scripts/healthchecks.sh` creates the checks (one per host from
 `nodeCount`; re-run it after changing that) and stores their ping URLs as
-`healthchecks-host-urls`. The deploy gives each host only its own URL.
+`healthchecks-host-urls`. The deploy gives each host only its own URL. The
+same script creates `watchtower-deploy` (see "Our images").
 On a host, `watchtower-health check` prints what it sees now, without
 reporting. Every deploy's verify step runs it on each host.
 
@@ -293,27 +294,34 @@ hours of traces for the block builder to catch up on.
 ## Our images
 
 `build/<name>/` holds each of our images: Caddy and wg-easy on Alpine,
-Patroni on the Postgres image. Each image's tag is its version, the Alpine
-release it's built on and its revision, e.g. `15.5.0-alpine3.24.3-r1`
-(`scripts/image-tag.sh <name>`; Patroni's has no Alpine part). Tags in
+Patroni on the Postgres image. An Alpine image's tag is its version, the
+Alpine release, its revision and the day it was built, e.g.
+`15.5.0-alpine3.24.3-r2-20261025`. Patroni's tag is just version and
+revision, e.g. `4.1.5-r1` (`scripts/image-tag.sh <name>`). Tags in
 Artifact Registry are immutable, and the deploy reuses a tag that's
 already there instead of rebuilding it.
 
-- **Alpine patch releases come in on their own.** The Dockerfiles name only
-  Alpine's minor release (`ARG ALPINE=docker.io/library/alpine:3.24`).
-  Each deploy's guard job resolves its newest patch release once (`image-tag.sh
-  --alpine`). Every Alpine image then builds on it, by digest, and the hosts
-  install the tags that name it. When Alpine ships 3.24.4, the next deploy
-  rebuilds those images as `…-alpine3.24.4-r1` and rolls them out. Nothing
-  deploys until something merges (or you dispatch `deploy.yml`).
+- **Rebuilt every day but Sunday.** `deploy.yml` also runs at 05:00 UTC,
+  Monday to Saturday. Sunday is the hosts' reboot morning (from 07:00).
+  - The guard job fixes the run's inputs once (`image-tag.sh --inputs`):
+    the newest patch release of the Alpine minor the Dockerfiles name
+    (`ARG ALPINE=docker.io/library/alpine:3.24`), and the day.
+  - The day's first deploy builds every Alpine image on that release, by
+    digest, with `apk upgrade`, so each package is the day's. It rolls them
+    out one host at a time behind the health gate.
+  - Deploys later that day reuse the morning's builds. The images on the
+    hosts are at most a day behind Alpine's package fixes, two over Sunday.
+  - When Alpine ships 3.24.4, the next run builds `…-alpine3.24.4-…`.
+- **The run alerts.** Every deploy ends by pinging the Healthchecks.io check
+  `watchtower-deploy`. It sends `/fail` as soon as any job failed, which
+  emails at once. A scheduled run that hasn't reported by 07:00 UTC emails
+  too. The ping links the run.
 - **Any other change needs a new tag.** If you change anything under
   `build/<name>/` without a new version (`org.opencontainers.image.version`),
   bump `watchtower.image.revision`; set it back to 1 with a new version.
   CI's `images` jobs fail a pull request that changes an image but keeps its
-  tag, since the deploy would keep serving the old image under it.
-- **Package fixes between Alpine releases.** `apk add` takes the packages
-  current at build time, and a reused tag isn't rebuilt. To pick up a fix
-  Alpine shipped as a package update, not a new release, bump the revision.
+  tag. Otherwise a deploy later that day, or any deploy of Patroni, would
+  keep serving the old image under it.
 - **A new Alpine minor** (3.25): change `ARG ALPINE` in every Dockerfile
   together; `image-tag.sh` refuses a mix.
 - **Building one locally:** `scripts/build-image.sh <name> <ref>` (docker;
@@ -405,6 +413,7 @@ Old versions stay in Secret Manager's history until destroyed:
 | Loki "no org id" | Client without `X-Scope-OrgID` | Fix the Alloy config |
 | Deploy: `S3Bucket ... expected non-nil error with nil state during Create` | Hetzner created the bucket, but it didn't show yet when the provider read it back, so Pulumi never recorded it | Adopt it, then rerun: `pulumi import minio:index/s3Bucket:S3Bucket <bucket> <bucket> --provider hetzner-s3=urn:pulumi:prod::watchtower-cloud::pulumi:providers:minio::hetzner-s3 --generate-code=false` from `infra/cloud` after `source scripts/env.sh` |
 | Healthchecks.io: a host's check is down | The host reported problems twice in a row, or stopped reporting (down, cut off from the internet, its timer dead) | The alert lists the problems. If it went silent: is the server up (Hetzner Console), and `systemctl status watchtower-health.timer` on it. `watchtower-health check` shows what it sees now |
+| Healthchecks.io: `watchtower-deploy` is down | A deploy job failed, or the 05:00 UTC run (Monday to Saturday) never came | The ping's body links the failed run; its log says which job. No run at all: is Gitea's scheduler running, and is `deploy.yml` on main intact? Fix, then dispatch `deploy.yml` (or merge); the next success clears it |
 | Healthchecks.io: the backup check is down | The nightly backup failed or never ran | The alert carries the run's log; else `journalctl -u watchtower-pg-backup -n 50` on the leader. Usual causes: a cluster S3 key replaced but not yet deployed, no Patroni leader, or the volume not mounted. `systemctl start watchtower-pg-backup` on every node retries |
 | Tempo queries miss recent traces | A live-store or the Kafka path | `systemctl status 'tempo-*'` on each node; Kafka's under-replicated partitions |
 

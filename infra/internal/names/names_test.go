@@ -209,3 +209,27 @@ func TestImageMatricesMatchBuildDirs(t *testing.T) {
 		}
 	}
 }
+
+// The deploy's schedule and its Healthchecks.io check's agree: a check
+// expecting a run that the schedule skips would alert every week.
+func TestDeployScheduleMatchesItsCheck(t *testing.T) {
+	wf, err := os.ReadFile("../../../.gitea/workflows/deploy.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc, err := os.ReadFile("../../../scripts/healthchecks.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cron := regexp.MustCompile(`(?m)^\s+- cron: "([^"]+)"$`).FindAllStringSubmatch(string(wf), -1)
+	if len(cron) != 1 {
+		t.Fatalf("deploy.yml has %d schedules, want 1", len(cron))
+	}
+	check := regexp.MustCompile(`(?m)^DEPLOY_SCHEDULE="([^"]+)"`).FindStringSubmatch(string(hc))
+	if check == nil {
+		t.Fatal("healthchecks.sh has no DEPLOY_SCHEDULE")
+	}
+	if cron[0][1] != check[1] {
+		t.Errorf("deploy.yml runs at %q, but its check expects %q", cron[0][1], check[1])
+	}
+}

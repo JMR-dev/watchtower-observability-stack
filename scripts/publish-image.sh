@@ -4,14 +4,14 @@
 #
 #   GAR_PUSH_KEY=<json> scripts/publish-image.sh <name>
 #
-# The tag is the image's version, Alpine release and revision
+# The tag is the image's version, Alpine release, revision and build day
 # (scripts/image-tag.sh), and tags in the repo are immutable
-# (scripts/bootstrap.sh), so a tag that exists is this image, already checked
-# and scanned: it is reused, not rebuilt. deploy.yml runs it on the arm64
-# runner, for each image, with the Alpine release its guard job resolved
-# (ALPINE_RELEASE, ALPINE_DIGEST); without them it resolves the release
-# itself. The key can write only to that one repo. Prints the pushed image's
-# reference by digest.
+# (scripts/bootstrap.sh), so a tag that exists is this image, built today,
+# checked and scanned: it is reused, not rebuilt. deploy.yml runs it on the
+# arm64 runner, for each image, with the inputs its guard job fixed
+# (ALPINE_RELEASE, ALPINE_DIGEST, IMAGE_DATE); without them it resolves
+# them itself. The key can write only to that one repo. Prints the pushed
+# image's reference by digest.
 
 set -euo pipefail
 
@@ -22,10 +22,10 @@ REPO="${REPO:-${REGISTRY}/watchtower-observe/watchtower}"
 what="$1"
 [[ -n "${GAR_PUSH_KEY:-}" ]] || { echo "GAR_PUSH_KEY is not set" >&2; exit 1; }
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# One Alpine release for the tag and the build.
-if [[ -z "${ALPINE_RELEASE:-}" || -z "${ALPINE_DIGEST:-}" ]]; then
-  alpine="$("${repo_root}/scripts/image-tag.sh" --alpine)"
-  while read -r kv; do export "${kv?}"; done <<<"$alpine"
+# One Alpine release and day for the tag and the build.
+if [[ -z "${ALPINE_RELEASE:-}" || -z "${ALPINE_DIGEST:-}" || -z "${IMAGE_DATE:-}" ]]; then
+  inputs="$("${repo_root}/scripts/image-tag.sh" --inputs)"
+  while read -r kv; do export "${kv?}"; done <<<"$inputs"
 fi
 ref="${REPO}/${what}:$("${repo_root}/scripts/image-tag.sh" "$what")"
 
