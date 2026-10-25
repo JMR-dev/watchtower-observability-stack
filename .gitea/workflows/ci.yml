@@ -102,6 +102,9 @@ jobs:
         run: scripts/check-configs.sh
 
   images:
+    # The check names branch protection requires; without this Gitea would
+    # append the runner too.
+    name: images (${{ matrix.image }})
     # Each image builds natively on its architecture's runner.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
