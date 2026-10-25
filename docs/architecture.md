@@ -4,7 +4,9 @@
 
 Watchtower runs Mimir (metrics), Loki (logs), Tempo (traces) and Grafana
 (UI) for several tenants, as podman containers on three ARM servers in
-Hetzner's Nuremberg location (nbg1), behind one small x86 proxy. Clients
+Hetzner's Falkenstein location (fsn1), behind one small ARM proxy, with
+Object Storage in Nuremberg (nbg1); both are in Hetzner's eu-central
+network zone, where traffic between them is free. Clients
 ship telemetry over WireGuard to the private endpoint
 `watchtower.jasonmross.dev`, which resolves to the in-tunnel address 10.8.0.1
 and nothing else.
@@ -16,12 +18,12 @@ and nothing else.
                 │ Hetzner Cloud Firewalls │ 22/tcp ← admin + CI (34.26.149.196), all hosts
                 │ (public interfaces)     │ 51820/udp ← wireguardAllowCidrs, proxy only
                 └────────────┬────────────┘
- ┌ watchtower-proxy (cx23, x86) ───────────────────────────────────────────────────┐
- │ wg-easy: wg0 10.8.0.1/24 (peers, split tunnel)                                   │
+ ┌ watchtower-proxy (cax11, ARM) ────────────────────────────────────────────────────┐
+ │ wg-easy: wg0 10.8.0.1/24 (peers, split tunnel)                                    │
  │ Caddy + Coraza: TLS for watchtower.jasonmross.dev (DNS-01), on 10.8.0.1 only      │
  │   :443 Grafana ×3 · :3100 Loki ×3 · :8080 Mimir ×3 · :3200 Tempo frontends ×2     │
  │   :4317/:4318 Tempo distributors ×3 · :51821 wg-easy UI                           │
- └────────── wg1 mesh 10.30.0.0/24, over the private network 10.20.1.0/24 ─────────┘
+ └────────── wg1 mesh 10.30.0.0/24, over the private network 10.20.1.0/24 ───────────┘
  ┌ watchtower-1 ──────────┐ ┌ watchtower-2 ──────────┐ ┌ watchtower-3 ──────────┐
  │ cax31 ARM, LUKS volume │ │ same                   │ │ same                   │
  │ Loki (all, RF 3)       │ │ Loki                   │ │ Loki                   │
@@ -56,7 +58,7 @@ and nothing else.
 | DNS | Records in the zone `scripts/bootstrap.sh` created and delegated | `infra/cloud/dns.go` |
 | Hosts | Updates, journald, SELinux, nftables, fail2ban, the wg1 mesh, the LUKS volume, gated reboots, Fluent Bit | `ansible/roles/{base,firewall,fail2ban,mesh,storage,reboot,logship}` |
 | Services | One role each; every container a quadlet in `/etc/containers/systemd` | `ansible/roles/{loki,mimir,kafka,tempo,etcd,patroni,grafana,edge}` |
-| Images | Caddy (amd64) and Patroni (arm64), each built natively, checked and scanned | `build/`, `scripts/build-image.sh` |
+| Images | Caddy and Patroni, built natively on the arm64 runner, checked and scanned | `build/`, `scripts/build-image.sh` |
 
 ## Data flow
 
@@ -100,7 +102,7 @@ and nothing else.
 ## Why it is built this way
 
 - **No Kubernetes.** Three cpx42s for Kubernetes cost $246 a month in
-  servers alone. Podman quadlets on 3× cax31 plus a cx23 cost about $100
+  servers alone. Podman quadlets on 3× cax31 plus a cax11 cost about $100
   all in, and fill the account's 26-vCPU cap exactly.
 - **High availability without an orchestrator.** Loki's "HA monolithic"
   mode and Mimir's scaled monolithic mode both take three plain replicas on

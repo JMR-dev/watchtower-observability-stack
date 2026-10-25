@@ -1,6 +1,6 @@
 ---
 # Every upstream image, pinned to the multi-arch index digest of the tag
-# (the nodes are arm64, the proxy amd64). Bump the tag and the digest
+# (every host is arm64; CI's checks run some of them on amd64). Bump the tag and the digest
 # together:
 #   skopeo inspect --raw docker://<image>:<tag> | sha256sum
 # Our own two images (caddy_image, patroni_image) are set by the deploy

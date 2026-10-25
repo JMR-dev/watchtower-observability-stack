@@ -1,11 +1,12 @@
 # Watchtower Observability Stack
 
-GDPR-minded, multi-tenant observability (metrics, logs, traces) in Hetzner's
-Nuremberg location (nbg1): Mimir, Loki, Tempo and Grafana as podman
-containers on three ARM servers, reachable only through WireGuard at the
-private endpoint **watchtower.jasonmross.dev**.
+GDPR-minded, multi-tenant observability (metrics, logs, traces) at Hetzner
+in Germany: Mimir, Loki, Tempo and Grafana as podman containers on three ARM
+servers in Falkenstein (fsn1), with Object Storage in Nuremberg (nbg1),
+reachable only through WireGuard at the private endpoint
+**watchtower.jasonmross.dev**.
 
-- **Hosts:** three cax31 data nodes (ARM64) and one cx23 proxy (x86), AlmaLinux 10, SELinux enforcing; exactly the account's 26-vCPU cap
+- **Hosts:** three cax31 data nodes and one cax11 proxy, all ARM64, in fsn1; AlmaLinux 10, SELinux enforcing; exactly the account's 26-vCPU cap
 - **Infrastructure:** Pulumi in Go (`infra/cloud`), state in a Hetzner Object Storage bucket of its own
 - **Install:** Ansible (`ansible/`) puts everything on the hosts as rootful podman quadlets; no Kubernetes
 - **High availability:** Loki and Mimir as three monolithic replicas (RF 3); Tempo in microservices mode on a 3-broker Kafka; three Grafanas on Postgres kept highly available by Patroni and etcd. Any one data node can be lost; the proxy is the one single point of failure

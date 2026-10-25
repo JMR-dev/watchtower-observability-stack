@@ -265,7 +265,7 @@ func TestServers(t *testing.T) {
 		{"watchtower-2", "cax31", names.RoleNode, names.PrivateIP(2)},
 		{"watchtower-3", "cax31", names.RoleNode, names.PrivateIP(3)},
 		{"watchtower-4", "cax31", names.RoleNode, names.PrivateIP(4)},
-		{names.ProxyName, "cx23", names.RoleProxy, names.PrivateIP(0)},
+		{names.ProxyName, "cax11", names.RoleProxy, names.PrivateIP(0)},
 	}
 	if len(servers) != len(want) {
 		t.Fatalf("want %d servers, got %d", len(want), len(servers))
@@ -275,7 +275,7 @@ func TestServers(t *testing.T) {
 		if s.Name != w.name || pulumitest.Str(s.Inputs, "serverType") != w.typ {
 			t.Errorf("server %d: %s %s, want %s %s", i, s.Name, pulumitest.Str(s.Inputs, "serverType"), w.name, w.typ)
 		}
-		if pulumitest.Str(s.Inputs, "image") != "alma-10" || pulumitest.Str(s.Inputs, "location") != "nbg1" {
+		if pulumitest.Str(s.Inputs, "image") != "alma-10" || pulumitest.Str(s.Inputs, "location") != "fsn1" {
 			t.Errorf("server %s: %v", s.Name, s.Inputs)
 		}
 		if !s.Inputs["deleteProtection"].BoolValue() || !s.Inputs["rebuildProtection"].BoolValue() {
@@ -331,7 +331,7 @@ func TestVolumes(t *testing.T) {
 		if v.Name == names.ProxyName+"-data" {
 			want = 12
 		}
-		if v.Inputs["size"].NumberValue() != want || pulumitest.Str(v.Inputs, "location") != "nbg1" {
+		if v.Inputs["size"].NumberValue() != want || pulumitest.Str(v.Inputs, "location") != "fsn1" {
 			t.Errorf("volume %s: %v", v.Name, v.Inputs)
 		}
 		// Unformatted (LUKS goes on it) and never mounted by Hetzner.
@@ -744,7 +744,7 @@ func TestStackFileKeys(t *testing.T) {
 	}
 	for _, key := range []string{
 		"bucketPrefix", "hetznerProjectId: \"16527471\"", "sshPublicKey", "adminCidrs", "ciCidrs",
-		"nodeServerType: cax31", "proxyServerType: cx23", "nodeCount: \"3\"", "deleteProtection: \"true\"",
+		"location: fsn1", "nodeServerType: cax31", "proxyServerType: cax11", "nodeCount: \"3\"", "deleteProtection: \"true\"",
 	} {
 		if !strings.Contains(s, "watchtower:"+key) {
 			t.Errorf("Pulumi.prod.yaml lacks watchtower:%s", key)

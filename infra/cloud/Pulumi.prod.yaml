@@ -3,12 +3,14 @@
 # read from Secret Manager at deploy time (docs/required-secrets.md).
 # `pulumi stack init prod --secrets-provider passphrase` adds encryptionsalt.
 config:
-  watchtower:location: nbg1
+  # Falkenstein: the one location with cax31 capacity (2026-10-25). Object
+  # Storage stays in nbg1; both are in eu-central, where traffic is free.
+  watchtower:location: fsn1
   watchtower:networkZone: eu-central
-  # 3 ARM nodes (8 vCPU each) and an x86 proxy (2 vCPU): exactly the
+  # 3 ARM nodes (8 vCPU each) and an ARM proxy (2 vCPU): exactly the
   # account's 26-vCPU cap, so servers are replaced delete-first.
   watchtower:nodeServerType: cax31
-  watchtower:proxyServerType: cx23
+  watchtower:proxyServerType: cax11
   watchtower:image: alma-10
   watchtower:nodeCount: "3"
   watchtower:nodeVolumeGb: "30"

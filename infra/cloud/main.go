@@ -1,5 +1,5 @@
 // Command watchtower-cloud provisions the Hetzner side of the stack: the
-// private network, the proxy (x86, Caddy and the WireGuard endpoint) and three
+// private network, the proxy (ARM, Caddy and the WireGuard endpoint) and three
 // (or more) ARM data nodes, each with its own data volume, the two firewalls,
 // and the telemetry and log-archive buckets. It also writes the two records in
 // the Cloud DNS zone watchtower.jasonmross.dev.

@@ -19,8 +19,10 @@ const (
 	// through the tunnel (split tunnel), so the proxy forwards nothing.
 	TunnelCIDR = "10.8.0.0/24"
 
-	// S3Endpoint and S3Region are Hetzner Object Storage in the servers'
-	// location. Everything (telemetry, log archive, Pulumi state) lives here.
+	// S3Endpoint and S3Region are Hetzner Object Storage in Nuremberg.
+	// Everything (telemetry, log archive, backups, Pulumi state) lives here.
+	// The servers are in fsn1: both are in eu-central, where Hetzner charges
+	// nothing for traffic.
 	S3Endpoint = "nbg1.your-objectstorage.com"
 	S3Region   = "nbg1"
 

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Caddy for the proxy (amd64), built with xcaddy:
+# Caddy for the proxy (arm64), built with xcaddy:
 #   - coraza-caddy + the OWASP Core Rule Set, embedded at build time (WAF);
 #   - caddy-dns/googleclouddns, for ACME DNS-01 against the Cloud DNS zone
 #     watchtower.jasonmross.dev (the endpoint is private, so HTTP-01 cannot

@@ -12,8 +12,8 @@
 #                  providers' Go SDKs needs the memory
 #   docker         the Docker-in-Docker runner (amd64); `docker build` and
 #                  every check that runs a container image
-#   docker-arm64   the same on arm64 (Spot, scale-to-zero): the Patroni image,
-#                  built natively for the nodes
+#   docker-arm64   the same on arm64 (Spot, scale-to-zero): both of our
+#                  images, built natively for the hosts, which are all ARM
 #
 # Actions are pinned to a full commit SHA, with the release in a comment.
 name: ci
@@ -105,17 +105,15 @@ jobs:
     # The check names branch protection requires; without this Gitea would
     # append the runner too.
     name: images (${{ matrix.image }})
-    # Each image builds natively on its architecture's runner.
-    runs-on: ${{ matrix.runner }}
+    # Built natively for the hosts, which are all ARM.
+    runs-on: docker-arm64
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
           - image: caddy
-            runner: docker
           - image: patroni
-            runner: docker-arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.gitea/actions/setup

@@ -353,7 +353,7 @@ Old versions stay in Secret Manager's history until destroyed:
 
 ## Cost
 
-About $100 a month (USD, no VAT): three cax31 ($74.97) and one cx23
-($6.49), four primary IPv4s ($2.40), 100 GB of volumes ($7.67), the Object
+About $100 a month (USD, no VAT): three cax31 ($74.97) and one cax11
+($6.99), four primary IPv4s ($2.40), 100 GB of volumes ($7.67), the Object
 Storage base fee (€6.49) and a dollar or two of GCP (DNS, Secret Manager,
 Artifact Registry). No load balancers, no Floating IP.

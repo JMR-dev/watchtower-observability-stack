@@ -2,13 +2,13 @@
 # Build one of our two images, check it can read the config it will run with,
 # and gate it on a Trivy scan.
 #
-#   scripts/build-image.sh caddy   <image-ref>    # amd64, on `docker`
-#   scripts/build-image.sh patroni <image-ref>    # arm64, on `docker-arm64`
+#   scripts/build-image.sh caddy   <image-ref>    # on `docker-arm64`
+#   scripts/build-image.sh patroni <image-ref>    # on `docker-arm64`
 #
 # Shared by ci.yml (build + check + scan) and deploy.yml (which pushes the
 # ref afterwards). Needs docker and the rendered configs
-# (ansible/playbooks/render.yml). Each image builds natively on its
-# architecture's runner; nothing is cross-built. Fails on any fixable
+# (ansible/playbooks/render.yml). Both build natively on the arm64 runner,
+# for the hosts, which are all ARM; nothing is cross-built. Fails on any fixable
 # HIGH/CRITICAL finding.
 #
 #   caddy    `caddy validate` on the proxy's rendered Caddyfile, run the way

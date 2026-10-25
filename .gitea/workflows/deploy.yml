@@ -54,7 +54,8 @@ jobs:
   # can see each other's credentials, so these get only the push key.
   image-caddy:
     needs: guard
-    runs-on: docker
+    # Built natively for the ARM proxy.
+    runs-on: docker-arm64
     timeout-minutes: 40
     outputs:
       ref: ${{ steps.push.outputs.ref }}
@@ -82,7 +83,7 @@ jobs:
 
   image-patroni:
     needs: guard
-    # Built natively for the arm64 nodes.
+    # Built natively for the ARM nodes.
     runs-on: docker-arm64
     timeout-minutes: 40
     outputs:

@@ -16,7 +16,7 @@ type Config struct {
 	Location    string
 	NetworkZone string
 	// NodeServerType is the data nodes' type (ARM cax31), ProxyServerType
-	// the front box's (x86 cx23). The account's vCPU cap fits exactly 3
+	// the front box's (ARM cax11). The account's vCPU cap fits exactly 3
 	// nodes and one proxy.
 	NodeServerType  string
 	ProxyServerType string
@@ -58,10 +58,10 @@ var (
 func loadConfig(ctx *pulumi.Context) (*Config, error) {
 	r := stackcfg.New(ctx, "watchtower")
 	cfg := &Config{
-		Location:         r.String("location", "nbg1"),
+		Location:         r.String("location", "fsn1"),
 		NetworkZone:      r.String("networkZone", "eu-central"),
 		NodeServerType:   r.String("nodeServerType", "cax31"),
-		ProxyServerType:  r.String("proxyServerType", "cx23"),
+		ProxyServerType:  r.String("proxyServerType", "cax11"),
 		Image:            r.String("image", "alma-10"),
 		NodeCount:        r.Int("nodeCount", names.MinNodes),
 		NodeVolumeGB:     r.Int("nodeVolumeGb", 30),

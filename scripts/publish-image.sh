@@ -5,10 +5,10 @@
 #
 #   GAR_PUSH_KEY=<json> scripts/publish-image.sh caddy|patroni <tag>
 #
-# deploy.yml runs it on each image's own runner (amd64 for caddy, arm64 for
-# patroni). Tags are immutable in the repo (scripts/bootstrap.sh), so a tag
-# that exists is this commit's build, already checked and scanned. The key
-# can write only to that one repo.
+# deploy.yml runs it on the arm64 runner, for both. Tags are immutable in
+# the repo (scripts/bootstrap.sh), so a tag that exists is this commit's
+# build, already checked and scanned. The key can write only to that one
+# repo.
 
 set -euo pipefail
 
