@@ -31,7 +31,8 @@ description: |
   deploy.yml names here). NAME=id exports the value as NAME (one line
   only); @NAME=id writes it to a 0600 file and exports its path as NAME (for
   key files). A leading ? (?NAME=id, ?@NAME=id) makes it optional: a secret
-  with no version yet leaves NAME unset instead of failing the job. Every line of every value is masked in the log first. Reading
+  with no version yet leaves NAME unset instead of failing the job. Lines
+  starting with # are comments. Every line of every value is masked in the log first. Reading
   needs `gcp-key` and installs gcloud.
 
   Composite actions have no post step, so a job that passes a key must end
@@ -233,7 +234,8 @@ runs:
         dir="${RUNNER_TEMP}/secrets"
         mkdir -p "$dir"
         while read -r line; do
-          [[ -n "$line" ]] || continue
+          # Blank lines and comments: a # line in the block is text to YAML.
+          [[ -n "$line" && "$line" != \#* ]] || continue
           if [[ ! "$line" =~ ^(\??)(@?)([A-Z][A-Z0-9_]*)=([a-z0-9-]+)$ ]]; then
             echo "bad secrets line: ${line}" >&2
             exit 1
