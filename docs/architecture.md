@@ -58,6 +58,7 @@ and nothing else.
 | Hosts | Updates, journald, SELinux, nftables, fail2ban, the wg1 mesh, the LUKS volume, gated reboots, Fluent Bit | `ansible/roles/{base,firewall,fail2ban,mesh,storage,reboot,logship}` |
 | Services | One role each; every container a quadlet in `/etc/containers/systemd` | `ansible/roles/{loki,mimir,kafka,tempo,etcd,patroni,grafana,edge}` |
 | Images | Caddy, wg-easy (on Alpine) and Patroni, built natively on the arm64 runner, checked and scanned. The Alpine images are rebuilt with the day's packages by the day's first deploy, and tagged version, Alpine release, revision and day | `build/`, `scripts/{image-tag,build-image,publish-image}.sh` |
+| Break glass | `watchtower-bastion`: a GCE e2-micro reached only through IAP with OS Login, whose Cloud NAT address the proxy admits for SSH; the way in when the VPN is down, and the deploy's when the proxy is rebuilt | `scripts/bootstrap.sh` (step 7), `scripts/ssh-config.sh` |
 
 ## Data flow
 
@@ -134,7 +135,7 @@ and nothing else.
 
 | Layer | Control |
 |---|---|
-| Edge | Hetzner Cloud Firewalls: the nodes take nothing on their public addresses; the proxy takes SSH from the deploy runners only and WireGuard from `wireguardAllowCidrs`. People SSH in over the VPN, and to a node through the proxy |
+| Edge | Hetzner Cloud Firewalls: the nodes take nothing on their public addresses; the proxy takes SSH from the deploy runners and the break-glass bastion only, and WireGuard from `wireguardAllowCidrs`. People SSH in over the VPN, and to a node through the proxy. The bastion (GCE, reached only through IAP with OS Login) is the way in when the VPN is down |
 | Host | nftables (no firewalld) mirroring the cloud firewalls; SSH to a node only from the proxy's private address; on the mesh, nodes reach each other fully and the proxy only Caddy's backend ports; Kafka, etcd and Postgres from nodes only. SELinux enforcing; fail2ban (sshd, recidive); security updates nightly, reboots one host a week, gated on the others' health |
 | Containers | Non-root where the image allows, read-only roots, every capability dropped but what each needs; only wg-easy (wg0, iptables) and Fluent Bit (the host's journal and audit log) run without SELinux confinement |
 | Credentials | Two S3 keys, fenced by bucket policies: the cluster key can't touch Pulumi state and can only write to the archive and the backups. Every secret in Secret Manager, read by the deployer through a grant per secret; the image jobs hold only a push key for the one registry repo |

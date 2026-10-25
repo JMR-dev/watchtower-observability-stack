@@ -13,6 +13,12 @@ secrets/
 # Generated from the cloud stack's outputs
 ansible/inventory/hosts.yml
 ansible/inventory/known_hosts
+# scripts/ssh-config.sh: the SSH config, and in bastion mode the bastion's
+# pinned host key and a throwaway OS Login key
+ansible/inventory/ssh_config
+ansible/inventory/bastion_known_hosts
+ansible/inventory/bastion_key
+ansible/inventory/bastion_key.pub
 
 # Ansible (and ansible-lint's cache)
 ansible/.collections/

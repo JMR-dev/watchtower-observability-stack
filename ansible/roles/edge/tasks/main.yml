@@ -104,5 +104,9 @@
     port: "{{ watchtower_ports.edge.loki }}"
     timeout: 180
 
-- name: The owner's first VPN peer
-  ansible.builtin.include_tasks: owner-peer.yml
+- name: The VPN peers the deploy makes (the owner's, and its own)
+  ansible.builtin.include_tasks: peer.yml
+  loop: "{{ edge_peers }}"
+  loop_control:
+    loop_var: edge_peer
+    label: "{{ edge_peer.name }}"

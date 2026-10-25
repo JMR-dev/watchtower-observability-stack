@@ -12,8 +12,9 @@ Germany, so personal data stays in the EU.
   volumes, Object Storage.
 - **Sub-processors:**
   - Google holds the two DNS records of `watchtower.jasonmross.dev` (Cloud
-    DNS), the stack's credentials (Secret Manager, europe-west3) and our two
-    container images (Artifact Registry, europe-west3). No telemetry, no
+    DNS), the stack's credentials (Secret Manager, europe-west3) and our
+    container images (Artifact Registry, europe-west3), and runs the
+    break-glass bastion (Compute Engine, us-east1). No telemetry, no
     personal data.
   - Let's Encrypt issues the TLS certificate (the domain name only).
 
@@ -46,7 +47,8 @@ Typical bases:
 | Pulumi state | Hetzner Object Storage, fsn1 |
 | DNS records | Google Cloud DNS (global; no personal data) |
 | Credentials (API tokens, keys, passwords) | Google Secret Manager, payloads replicated to europe-west3 only (no personal data) |
-| Our container images (Caddy, Patroni) | Google Artifact Registry, europe-west3 (no personal data) |
+| Our container images (Caddy, wg-easy, Patroni) | Google Artifact Registry, europe-west3 (no personal data) |
+| Break-glass SSH sessions | Relayed by the bastion in Google Compute Engine, us-east1 (the free tier exists only in US regions). It relays SSH end to end encrypted to the proxy, holds no key for it and stores nothing. Used only when the VPN is down or the proxy is rebuilt |
 
 ## Retention register
 

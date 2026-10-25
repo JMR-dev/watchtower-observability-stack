@@ -199,6 +199,9 @@ jobs:
           pulumi stack output inventory >../../ansible/inventory/hosts.yml
           pulumi stack output knownHosts >../../ansible/inventory/known_hosts
           echo "ARCHIVE_BUCKET=$(pulumi stack output buckets --json | jq -r '."logs-archive"')" >>"$GITHUB_ENV"
+      # The proxy on its public address, from the runners' NAT (ciCidrs).
+      - name: SSH config for Ansible and verify
+        run: scripts/ssh-config.sh public
       - name: Install every host
         working-directory: ansible
         env:
@@ -223,7 +226,7 @@ jobs:
         run: scripts/verify.sh "$ARCHIVE_BUCKET"
       - name: Remove keys
         if: always()
-        run: rm -rf "${RUNNER_TEMP}/gcp-deployer.json" "${RUNNER_TEMP}/secrets" "${RUNNER_TEMP}/gcloud" ansible/inventory/known_hosts
+        run: rm -rf "${RUNNER_TEMP}/gcp-deployer.json" "${RUNNER_TEMP}/secrets" "${RUNNER_TEMP}/gcloud" ansible/inventory/known_hosts ansible/inventory/ssh_config ansible/inventory/bastion_known_hosts ansible/inventory/bastion_key ansible/inventory/bastion_key.pub
 
   # Its own small job, so a run that failed anywhere, or never reached the
   # hosts, still reports.

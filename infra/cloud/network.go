@@ -69,10 +69,11 @@ func newNetwork(ctx *pulumi.Context, cfg *Config, p *providers) (*network, error
 	if err != nil {
 		return nil, err
 	}
-	// The proxy: SSH from the deploy runners only, and WireGuard, since the
-	// tunnel ends there.
+	// The proxy: SSH from the deploy runners and the break-glass bastion
+	// only, and WireGuard, since the tunnel ends there.
 	proxy, err := newFirewall(ctx, p, "watchtower-proxy", names.RoleProxy,
 		rule("tcp", "22", "SSH (the deploy runners)", cfg.CICIDRs),
+		rule("tcp", "22", "SSH (the break-glass bastion)", cfg.BreakGlassCIDRs),
 		rule("udp", strconv.Itoa(names.PortWireGuard), "WireGuard", cfg.WireGuardCIDRs))
 	if err != nil {
 		return nil, err

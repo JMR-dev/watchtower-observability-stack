@@ -11,7 +11,7 @@ type obj = map[string]interface{}
 // inventoryJSON renders the Ansible inventory (JSON is valid YAML, so it is
 // saved as hosts.yml). Two groups, `proxy` and `nodes`. Ansible reaches the
 // proxy on `public_ip` (or the tunnel address, from a VPN peer) and the nodes
-// on `private_ip` through the proxy (inventory/group_vars/{proxy,nodes}.yml);
+// on `private_ip` through the proxy (scripts/ssh-config.sh);
 // everything between the hosts goes over `mesh_ip` on wg1.
 //
 // Every name the roles need from internal/names travels here as a group var,
@@ -54,9 +54,17 @@ func inventoryJSON(cfg *Config, hs *hosts) pulumi.StringOutput {
 				"ansible_python_interpreter": "/usr/bin/python3",
 
 				// roles/firewall mirrors the Hetzner firewalls from the same
-				// lists: SSH to the proxy from the deploy runners, WireGuard
-				// (proxy only) from wireguardAllowCidrs.
-				"watchtower_ci_cidrs":        cfg.CICIDRs,
+				// lists: SSH to the proxy from the deploy runners and the
+				// bastion, WireGuard (proxy only) from wireguardAllowCidrs.
+				"watchtower_ci_cidrs":          cfg.CICIDRs,
+				"watchtower_break_glass_cidrs": cfg.BreakGlassCIDRs,
+				// scripts/ssh-config.sh bastion: the way in through IAP.
+				"watchtower_bastion": obj{
+					"name":     names.BastionName,
+					"zone":     names.BastionZone,
+					"project":  cfg.GCPProject,
+					"host_key": cfg.BastionHostKey,
+				},
 				"watchtower_wireguard_cidrs": cfg.WireGuardCIDRs,
 				"watchtower_wireguard_port":  names.PortWireGuard,
 				"watchtower_private_cidr":    names.SubnetCIDR,

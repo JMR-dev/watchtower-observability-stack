@@ -131,6 +131,13 @@ func TestWorkflowReadsEverySecret(t *testing.T) {
 		}
 		written[id] = true
 	}
+	readBack := map[string]bool{}
+	for _, id := range DeployReadBackSecrets {
+		if !written[id] {
+			t.Errorf("read-back %s is not in DeployWrittenSecrets", id)
+		}
+		readBack[id] = true
+	}
 	// The setup action's `secrets:` lines: NAME=id or @NAME=id.
 	line := regexp.MustCompile(`(?m)^\s+@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)\s*$`)
 	matches := line.FindAllStringSubmatch(string(b), -1)
@@ -148,8 +155,8 @@ func TestWorkflowReadsEverySecret(t *testing.T) {
 		if ownerOnly[m[1]] {
 			t.Errorf("deploy.yml reads owner-only %s through the deployer", m[1])
 		}
-		// The deployer may add to these, never read them.
-		if written[m[1]] {
+		// The deployer may add to these, and read back only its own.
+		if written[m[1]] && !readBack[m[1]] {
 			t.Errorf("deploy.yml reads %s, which the deploy only writes", m[1])
 		}
 	}
@@ -174,6 +181,28 @@ func TestBootstrapGrantsDeployWrittenSecrets(t *testing.T) {
 	got := strings.Fields(m[1])
 	if !reflect.DeepEqual(got, DeployWrittenSecrets) {
 		t.Errorf("bootstrap.sh deploy_written = %v, want %v", got, DeployWrittenSecrets)
+	}
+	m = regexp.MustCompile(`(?m)^deploy_read_back=\(([a-z0-9 -]*)\)$`).FindStringSubmatch(string(b))
+	if m == nil {
+		t.Fatal("bootstrap.sh has no deploy_read_back=(...) list")
+	}
+	if got := strings.Fields(m[1]); !reflect.DeepEqual(got, DeployReadBackSecrets) {
+		t.Errorf("bootstrap.sh deploy_read_back = %v, want %v", got, DeployReadBackSecrets)
+	}
+}
+
+// scripts/bootstrap.sh makes the bastion the inventory names: the deploy
+// and scripts/ssh-config.sh would look for another VM.
+func TestBootstrapMakesTheBastion(t *testing.T) {
+	b, err := os.ReadFile("../../../scripts/bootstrap.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for v, want := range map[string]string{"BASTION": BastionName, "BASTION_ZONE": BastionZone} {
+		m := regexp.MustCompile(`(?m)^` + v + `="([^"]*)"$`).FindStringSubmatch(string(b))
+		if m == nil || m[1] != want {
+			t.Errorf("bootstrap.sh %s = %v, want %q", v, m, want)
+		}
 	}
 }
 

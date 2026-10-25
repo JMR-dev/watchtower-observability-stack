@@ -102,6 +102,7 @@ every 90 days.
 | Id | What |
 |---|---|
 | `wireguard-owner-peer` | The owner's first WireGuard peer config, created by the first deploy in wg-easy (client `owner`). The deployer holds `secretVersionAdder` on it alone: it may add a version, never read one. Fetch it with `scripts/secret.sh pull wireguard-owner-peer`; `secret.sh check` reports it pending until the first deploy |
+| `wireguard-deploy-peer` | The deploy's own WireGuard peer config, created the same way (client `deploy`): the deploy's way to the proxy over the VPN. The deployer holds `secretVersionAdder` and `secretAccessor` on it: it writes it once and reads it back on every run |
 
 ## Stack config
 

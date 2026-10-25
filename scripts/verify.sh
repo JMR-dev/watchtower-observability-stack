@@ -16,11 +16,9 @@
 #
 #   scripts/verify.sh <logs-archive-bucket>
 #
-# Runs from the deploy runner over SSH, with the inventory and pinned host
-# keys the job wrote (ansible/inventory/{hosts.yml,known_hosts}) and the key
-# in ANSIBLE_PRIVATE_KEY_FILE: to the proxy on its public address, to the
-# nodes on their private ones through the proxy. From a WireGuard peer, set
-# WATCHTOWER_SSH_VIA=vpn to reach the proxy on the tunnel address instead.
+# Runs over SSH to the hosts by their inventory names, through the SSH config
+# scripts/ssh-config.sh wrote (ansible/inventory/ssh_config), the way Ansible
+# does: from the deploy runner, a WireGuard peer or the bastion alike.
 # The checks through Caddy run on the proxy itself, against 10.8.0.1, so
 # they cover TLS, Caddy's routing and every backend without a VPN peer.
 # Needs: ssh, jq, curl, aws (admin S3 key in AWS_*). Takes the deploy's
@@ -33,45 +31,37 @@ archive="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 caddy_tag="$("${repo_root}/scripts/image-tag.sh" caddy)"
 inv="${repo_root}/ansible/inventory/hosts.yml"
-known="${repo_root}/ansible/inventory/known_hosts"
+ssh_config="${repo_root}/ansible/inventory/ssh_config"
+[[ -s "$ssh_config" ]] || { echo "no ${ssh_config}: run scripts/ssh-config.sh first" >&2; exit 1; }
 
 log() { printf '==> %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 var() { jq -r ".all.vars.$1" "$inv"; }
-host() { jq -r ".all.children.$1.hosts | to_entries[$2].value.$3" "$inv"; }
 domain="$(var watchtower_domain)"
 tunnel="$(var watchtower_tunnel_ip)"
 s3="https://$(var watchtower_s3_endpoint)"
 region="$(var watchtower_s3_region)"
-proxy_ip="$(host proxy 0 public_ip)"
-[[ "${WATCHTOWER_SSH_VIA:-public}" == vpn ]] && proxy_ip="$tunnel"
-node_ip="$(host nodes 0 private_ip)"
-node_mesh="$(host nodes 0 mesh_ip)"
+proxy="$(jq -r '.all.children.proxy.hosts | keys[0]' "$inv")"
+node="$(jq -r '.all.children.nodes.hosts | keys[0]' "$inv")"
+node_mesh="$(jq -r --arg n "$node" '.all.children.nodes.hosts[$n].mesh_ip' "$inv")"
 nodes="$(jq '.all.children.nodes.hosts | length' "$inv")"
 
-ssh_opts=(-i "${ANSIBLE_PRIVATE_KEY_FILE:?}" -o IdentitiesOnly=yes -o BatchMode=yes
-  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known")
 # ssh joins its arguments into one line for the remote shell, so each is
 # quoted here: a header like 'Content-Type: application/json' or a JSON body
 # reaches the remote command as one argument, as it was given.
 # shellcheck disable=SC2029
-on() { # address command...: run as root on the proxy, or on a node (its private address) through the proxy
-  local addr=$1 cmd
+on() { # host command...: run as root on a host, by its inventory name
+  local target=$1
   shift
-  cmd="$(printf '%q ' "$@")"
-  if [[ "$addr" == "$proxy_ip" ]]; then
-    ssh "${ssh_opts[@]}" "root@${addr}" "$cmd"
-  else
-    ssh "${ssh_opts[@]}" -o ProxyCommand="ssh $(printf '%q ' "${ssh_opts[@]}")-W %h:%p root@${proxy_ip}" "root@${addr}" "$cmd"
-  fi
+  ssh -F "$ssh_config" "$target" "$(printf '%q ' "$@")"
 }
 # edge <port> <curl args...>: a request to the domain through Caddy, from the
 # proxy. --resolve pins the name to the tunnel address; TLS is verified.
 edge() {
   local port=$1
   shift
-  on "$proxy_ip" curl -fsS --max-time 20 --resolve "${domain}:${port}:${tunnel}" "$@"
+  on "$proxy" curl -fsS --max-time 20 --resolve "${domain}:${port}:${tunnel}" "$@"
 }
 retry() { # tries delay command...: until it succeeds
   local tries=$1 delay=$2 i
@@ -124,22 +114,22 @@ echo "    pushed and read back trace ${trace_id}"
 
 # ---------------------------------------------------------------------------
 log "4/8 Caddy image"
-running="$(on "$proxy_ip" podman inspect caddy --format '{{.ImageName}}')"
+running="$(on "$proxy" podman inspect caddy --format '{{.ImageName}}')"
 [[ "$running" == */watchtower/caddy:"$caddy_tag" ]] || fail "the proxy runs ${running}, not caddy:${caddy_tag}"
 echo "    caddy is ${running}"
 
 # ---------------------------------------------------------------------------
 log "5/8 the clusters are whole"
 active() { # url: ACTIVE members of a dskit ring
-  on "$node_ip" curl -fsS --max-time 10 -H 'Accept: application/json' "$1" \
+  on "$node" curl -fsS --max-time 10 -H 'Accept: application/json' "$1" \
     | jq '[.shards[] | select(.state == "ACTIVE")] | length'
 }
 [[ "$(active "http://${node_mesh}:3100/ring")" == "$nodes" ]] || fail "Loki's ingester ring is missing a node"
 [[ "$(active "http://${node_mesh}:8080/ingester/ring")" == "$nodes" ]] || fail "Mimir's ingester ring is missing a node"
-under="$(on "$node_ip" podman exec kafka /opt/kafka/bin/kafka-topics.sh \
+under="$(on "$node" podman exec kafka /opt/kafka/bin/kafka-topics.sh \
   "--bootstrap-server=${node_mesh}:9092" --describe --under-replicated-partitions)"
 [[ -z "$under" ]] || fail "Kafka has under-replicated partitions: ${under}"
-cluster="$(on "$node_ip" curl -fsS --max-time 10 "http://${node_mesh}:8008/cluster")"
+cluster="$(on "$node" curl -fsS --max-time 10 "http://${node_mesh}:8008/cluster")"
 jq -e --argjson n "$nodes" '([.members[] | select(.role == "leader")] | length) == 1
   and ([.members[] | select(.state == "running" or .state == "streaming")] | length) == $n' \
   <<<"$cluster" >/dev/null || fail "Patroni is not a leader with every replica streaming: ${cluster}"
@@ -167,7 +157,7 @@ backup_prefix="$(var watchtower_postgres_backup_prefix)"
 since="${backup_prefix}grafana-$(date -u -d '-2 min' +%Y%m%dT%H%M%SZ)"
 # Only the Postgres leader dumps; on the others the run checks a leader exists.
 for ((i = 0; i < nodes; i++)); do
-  on "$(host nodes "$i" private_ip)" systemctl start watchtower-pg-backup.service ||
+  on "$(jq -r ".all.children.nodes.hosts | keys[${i}]" "$inv")" systemctl start watchtower-pg-backup.service ||
     fail "the backup failed on node $((i + 1)): journalctl -u watchtower-pg-backup there"
 done
 newest="$(aws --endpoint-url "$s3" --region "$region" s3api list-objects-v2 --bucket "$backups" \
@@ -177,8 +167,8 @@ echo "    $(cut -f1 <<<"$newest") ($(cut -f2 <<<"$newest") bytes)"
 
 # ---------------------------------------------------------------------------
 log "8/8 every host's own health check"
-for ip in "$proxy_ip" $(jq -r '.all.children.nodes.hosts[].private_ip' "$inv"); do
-  problems="$(on "$ip" watchtower-health check)" || fail "${ip}: ${problems}"
+for target in "$proxy" $(jq -r '.all.children.nodes.hosts | keys[]' "$inv"); do
+  problems="$(on "$target" watchtower-health check)" || fail "${target}: ${problems}"
 done
 echo "    the proxy and ${nodes} nodes are healthy"
 
