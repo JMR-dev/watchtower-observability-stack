@@ -1,11 +1,20 @@
 # Deploy main:  images -> Hetzner (Pulumi) -> hosts (Ansible) -> verify.
 #
 #   push to main       deploys
+#   05:00 UTC,         deploys main again: the day's first deploy rebuilds
+#   Monday-Saturday    every Alpine image with the day's packages
+#                      (scripts/image-tag.sh) and rolls them out. Never on
+#                      Sunday, the hosts' reboot morning (roles/reboot,
+#                      from 07:00 UTC)
 #   workflow_dispatch  allow_replace=true to let a preview replace or delete a
 #                      server, an IP, a volume or a bucket (check the runbook
 #                      first: servers are replaced delete-first)
 #
-#   guard ─ images (caddy, patroni, wg-easy) ─ cloud ─ hosts
+#   guard ─ images (caddy, patroni, wg-easy) ─ cloud ─ hosts ─ report
+#
+# Every run ends by pinging the Healthchecks.io check watchtower-deploy
+# (scripts/healthchecks.sh): /fail as soon as any job failed, which alerts
+# at once, and a scheduled run that never comes alerts after the grace time.
 #
 # Credentials: the repo Actions secret GCP_DEPLOYER_KEY (watchtower-deployer@).
 # The cloud and hosts jobs' setup step uses it to read the secrets each needs
@@ -20,6 +29,10 @@ name: deploy
 on:
   push:
     branches: [main]
+  # Gitea runs schedules in UTC. Keep scripts/healthchecks.sh's
+  # DEPLOY_SCHEDULE equal.
+  schedule:
+    - cron: "0 5 * * 1-6"
   workflow_dispatch:
     inputs:
       allow_replace:
@@ -41,8 +54,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      alpine_release: ${{ steps.alpine.outputs.ALPINE_RELEASE }}
-      alpine_digest: ${{ steps.alpine.outputs.ALPINE_DIGEST }}
+      alpine_release: ${{ steps.inputs.outputs.ALPINE_RELEASE }}
+      alpine_digest: ${{ steps.inputs.outputs.ALPINE_DIGEST }}
+      image_date: ${{ steps.inputs.outputs.IMAGE_DATE }}
     steps:
       - name: Deploy only from main
         run: |
@@ -53,13 +67,14 @@ jobs:
           echo "Deploying ${GITHUB_SHA:0:12} (allow_replace=${ALLOW_REPLACE})"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.gitea/actions/setup
-      # Once per deploy: the images jobs build on this release and the hosts
-      # job installs the tags it names, even if Alpine publishes mid-run.
-      - name: The Alpine release to build on (newest patch of our minor)
-        id: alpine
+      # Once per deploy: the images jobs build on this Alpine release and
+      # day, and the hosts job installs the tags that name them, even if
+      # Alpine publishes or the day turns mid-run.
+      - name: The Alpine release and day to build on
+        id: inputs
         run: |
           set -euo pipefail
-          scripts/image-tag.sh --alpine | tee -a "$GITHUB_OUTPUT"
+          scripts/image-tag.sh --inputs | tee -a "$GITHUB_OUTPUT"
 
   # Not GCP_DEPLOYER_KEY on the image jobs: jobs on the shared DinD runners
   # can see each other's credentials, so these get only the push key.
@@ -91,6 +106,7 @@ jobs:
           GAR_PUSH_KEY: ${{ secrets.GAR_PUSH_KEY }}
           ALPINE_RELEASE: ${{ needs.guard.outputs.alpine_release }}
           ALPINE_DIGEST: ${{ needs.guard.outputs.alpine_digest }}
+          IMAGE_DATE: ${{ needs.guard.outputs.image_date }}
         run: scripts/publish-image.sh "${{ matrix.image }}"
       - name: Remove registry credentials
         if: always()
@@ -188,6 +204,7 @@ jobs:
         env:
           ALPINE_RELEASE: ${{ needs.guard.outputs.alpine_release }}
           ALPINE_DIGEST: ${{ needs.guard.outputs.alpine_digest }}
+          IMAGE_DATE: ${{ needs.guard.outputs.image_date }}
         run: |
           set -euo pipefail
           ansible-galaxy collection install -r requirements.yml -p .collections >/dev/null
@@ -201,7 +218,40 @@ jobs:
       - name: Verify
         env:
           ALPINE_RELEASE: ${{ needs.guard.outputs.alpine_release }}
+          ALPINE_DIGEST: ${{ needs.guard.outputs.alpine_digest }}
+          IMAGE_DATE: ${{ needs.guard.outputs.image_date }}
         run: scripts/verify.sh "$ARCHIVE_BUCKET"
       - name: Remove keys
         if: always()
         run: rm -rf "${RUNNER_TEMP}/gcp-deployer.json" "${RUNNER_TEMP}/secrets" "${RUNNER_TEMP}/gcloud" ansible/inventory/known_hosts
+
+  # Its own small job, so a run that failed anywhere, or never reached the
+  # hosts, still reports.
+  report:
+    needs: [guard, images, cloud, hosts]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.gitea/actions/setup
+        with:
+          gcp-key: ${{ secrets.GCP_DEPLOYER_KEY }}
+          secrets: |
+            HEALTHCHECKS_DEPLOY_URL=healthchecks-deploy-url
+      - name: Ping watchtower-deploy (/fail if any job failed)
+        env:
+          RESULTS: ${{ needs.guard.result }} ${{ needs.images.result }} ${{ needs.cloud.result }} ${{ needs.hosts.result }}
+        run: |
+          set -euo pipefail
+          suffix=""
+          for result in $RESULTS; do
+            [[ "$result" == success ]] || suffix=/fail
+          done
+          echo "guard images cloud hosts: ${RESULTS} -> ping${suffix}"
+          # The URL goes to curl in a config on stdin, not on its command line.
+          printf 'url = "%s%s"\n' "$HEALTHCHECKS_DEPLOY_URL" "$suffix" |
+            curl -fsS -m 20 --retry 3 -K - -o /dev/null --data-raw "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_NUMBER}"
+      - name: Remove keys
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/gcp-deployer.json" "${RUNNER_TEMP}/secrets" "${RUNNER_TEMP}/gcloud"

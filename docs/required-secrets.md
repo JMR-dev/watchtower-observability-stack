@@ -88,6 +88,7 @@ every 90 days.
 | `caddy-dns-key` | JSON key of `watchtower-caddy-dns01@` (DNS-01); `scripts/rotate-gcp-key.sh caddy` |
 | `healthchecks-pg-backup-url` | Ping URL of the Healthchecks.io check of the nightly backup (docs/runbook.md, "First deploy"). The nightly backup pings it, or its `/fail` when a run fails. Anyone holding it can ping the check |
 | `healthchecks-host-urls` | One JSON object, host name to the ping URL of its Healthchecks.io check, written by `scripts/healthchecks.sh`. Each host gets only its own URL |
+| `healthchecks-deploy-url` | Ping URL of the Healthchecks.io check `watchtower-deploy`, written by `scripts/healthchecks.sh`. The deploy's last job pings it, or its `/fail` when a job failed. Anyone holding it can ping the check |
 
 ### Owner only
 

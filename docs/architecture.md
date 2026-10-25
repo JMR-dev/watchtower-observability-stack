@@ -57,7 +57,7 @@ and nothing else.
 | DNS | Records in the zone `scripts/bootstrap.sh` created and delegated | `infra/cloud/dns.go` |
 | Hosts | Updates, journald, SELinux, nftables, fail2ban, the wg1 mesh, the LUKS volume, gated reboots, Fluent Bit | `ansible/roles/{base,firewall,fail2ban,mesh,storage,reboot,logship}` |
 | Services | One role each; every container a quadlet in `/etc/containers/systemd` | `ansible/roles/{loki,mimir,kafka,tempo,etcd,patroni,grafana,edge}` |
-| Images | Caddy, wg-easy (on Alpine) and Patroni, built natively on the arm64 runner, checked and scanned; tagged version, Alpine release and revision, and reused while the tag stands | `build/`, `scripts/{image-tag,build-image,publish-image}.sh` |
+| Images | Caddy, wg-easy (on Alpine) and Patroni, built natively on the arm64 runner, checked and scanned. The Alpine images are rebuilt with the day's packages by the day's first deploy, and tagged version, Alpine release, revision and day | `build/`, `scripts/{image-tag,build-image,publish-image}.sh` |
 
 ## Data flow
 
@@ -149,6 +149,7 @@ and nothing else.
   Fluent Bit; shellcheck for the host scripts); our images (native builds,
   their configs checked with the built image, Trivy, a new tag for any
   change); Semgrep; shellcheck, actionlint, the Alloy example.
-- **`deploy.yml`** on merge to main: our images (to Artifact Registry, on
-  Alpine's newest patch release), `infra/cloud`,
-  `ansible/playbooks/site.yml`, then `scripts/verify.sh`.
+- **`deploy.yml`** on merge to main, and at 05:00 UTC Monday to Saturday:
+  our images (to Artifact Registry, on Alpine's newest patch release and
+  the day's packages), `infra/cloud`, `ansible/playbooks/site.yml`,
+  `scripts/verify.sh`, then a ping to its Healthchecks.io check.
