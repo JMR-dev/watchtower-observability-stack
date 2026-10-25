@@ -17,7 +17,9 @@
 #            directive, a missing plugin or a module that can't provision
 #            there (Coraza without a writable /tmp) fails here, not on the
 #            proxy.
-#   patroni  `patroni --validate-config` on a node's rendered patroni.yml.
+#   patroni  `patroni --validate-config` on a node's rendered patroni.yml
+#            (etcd being unreachable from the build is the one complaint
+#            ignored).
 #
 # Configs go in over stdin, and Trivy gets the image over stdin (`docker
 # save | docker run -i`), instead of bind mounts or the docker socket: on the
@@ -56,8 +58,19 @@ case "$what" in
     [[ -f "$config" ]] || { echo "no ${config}; run ansible/playbooks/render.yml first" >&2; exit 1; }
     DOCKER_BUILDKIT=1 docker build -t "$ref" "${repo_root}/build/patroni"
     echo "==> Validating a node's patroni.yml with ${ref}"
-    docker run --rm -i --network none --entrypoint sh "$ref" \
-      -c 'cat >/tmp/patroni.yml && exec patroni --validate-config /tmp/patroni.yml' <"$config"
+    # The passwords come from the environment at run time, as they will on
+    # the nodes. The validator also tries to reach every etcd member, which
+    # no build can; only those complaints are ignored, any other fails.
+    out="$(docker run --rm -i --network none \
+      -e PATRONI_RESTAPI_PASSWORD=x -e PATRONI_SUPERUSER_PASSWORD=x -e PATRONI_REPLICATION_PASSWORD=x \
+      --entrypoint sh "$ref" -c 'cat >/tmp/patroni.yml && exec patroni --validate-config /tmp/patroni.yml' \
+      <"$config" 2>&1)" || true
+    problems="$(grep -v ' is not reachable$' <<<"$out" || true)"
+    if [[ -n "$problems" ]]; then
+      echo "patroni.yml failed validation:" >&2
+      echo "$problems" >&2
+      exit 1
+    fi
     ;;
   *) usage ;;
 esac
