@@ -11,6 +11,7 @@
 #   mimir         mimir -print.config (strict: an unknown key fails)
 #   tempo         tempo -config.verify, per component
 #   fluent-bit    fluent-bit --dry-run
+#   scripts       shellcheck on the host scripts (reboot, Postgres backup)
 # The firewall is checked by the ansible job (it needs a network namespace,
 # not a container); the Caddyfile and patroni.yml where their images are
 # built (scripts/build-image.sh): only our own images carry the modules and
@@ -28,6 +29,8 @@ images="${repo_root}/ansible/inventory/group_vars/all/images.yml"
 rt="${CONTAINER_RUNTIME:-docker}"
 # quadlet from the podman release the hosts run (AlmaLinux 10: 5.8).
 PODMAN_IMAGE="${PODMAN_IMAGE:-quay.io/podman/stable:v5.8.2@sha256:663e0dbf407987b7db3f20d3588c283a8228db17b282d2029a482d4d47e36964}"
+# The shellcheck release the shell job runs (.gitea/actions/setup).
+SHELLCHECK_IMAGE="${SHELLCHECK_IMAGE:-docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d}"
 
 [[ -d "$render" ]] || { echo "nothing rendered in ${render}; run playbooks/render.yml first" >&2; exit 1; }
 
@@ -69,6 +72,10 @@ for host_dir in "$render"/*/; do
 
   check "${host}: fluent-bit" with "${host_dir}fluent-bit" /fluent-bit/etc "$(image fluentbit)" \
     -c /fluent-bit/etc/fluent-bit.conf --dry-run
+
+  for script in "${host_dir}"*.sh; do
+    check "${host}: $(basename "$script")" with "$script" /mnt/script.sh "$SHELLCHECK_IMAGE" /mnt/script.sh
+  done
 
   [[ -f "${host_dir}loki/loki.yaml" ]] || continue
 

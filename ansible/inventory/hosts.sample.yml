@@ -26,8 +26,10 @@ all:
       mimir-alertmanager: jmr-watchtower-mimir-alertmanager
       tempo: jmr-watchtower-tempo
       logs-archive: jmr-watchtower-logs-archive
+      postgres-backups: jmr-watchtower-postgres-backups
     watchtower_archive_prefixes: {containers: containers/, journal: journal/, audit: audit/}
-    watchtower_retention_days: {loki: 30, mimir: 90, tempo: 30, log_archive: 90}
+    watchtower_postgres_backup_prefix: grafana/
+    watchtower_retention_days: {loki: 30, mimir: 90, tempo: 30, log_archive: 90, postgres_backup: 90}
   children:
     proxy:
       hosts:

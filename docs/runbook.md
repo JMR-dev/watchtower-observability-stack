@@ -14,10 +14,16 @@ gopass.
 1. **Hetzner Console**, project `watchtower-observe-prod`:
    - one API token, read/write (Hetzner tokens are project-wide anyway);
    - two S3 credentials: `admin` and `cluster`.
+
+   **Healthchecks.io:** one check for the nightly backup of Grafana's
+   database: `watchtower-prod-pg-backup`, tags `watchtower prod`, schedule
+   Cron `30 2 * * *` in UTC, grace 1 hour, with the project's
+   notifications. Copy its ping URL.
 2. **Store every secret.** Paste each token or key at the hidden prompt;
    generate the rest:
    ```bash
    scripts/secret.sh put hcloud-token
+   scripts/secret.sh put healthchecks-pg-backup-url
    for k in admin cluster; do
      scripts/secret.sh put "s3-$k-access-key"
      scripts/secret.sh put "s3-$k-secret-key"
@@ -153,6 +159,58 @@ and a replica no more than 1 MB behind takes over. The Grafanas reconnect to
 whichever node accepts writes (`target_session_attrs=read-write`). A member
 that comes back behind is rewound or recloned by Patroni.
 
+## Grafana database backups
+
+Patroni's replicas survive a lost node, not a mistake: a deleted dashboard,
+a bad Grafana upgrade or a lost LUKS key reaches every copy at once. So
+every night at 02:30 UTC the Postgres leader dumps the `grafana` database
+(`pg_dump --format=custom`) to
+`s3://jmr-watchtower-postgres-backups/grafana/grafana-<UTC time>.dump`
+(`ansible/roles/pgbackup`). The bucket's lifecycle rule deletes each dump
+after 90 days. The servers' cluster key can only add dumps; reading,
+listing and deleting them takes the admin key.
+
+- **Alerts** come from the Healthchecks.io check `watchtower-prod-pg-backup`:
+  - a failed run reports to it at once, with its log (`OnFailure=`);
+  - a night without a successful run alerts once the check's grace runs
+    out;
+  - a run also fails, and alerts, when no Patroni member reports a leader,
+    since then no node would back up.
+- **A backup now:** `systemctl start watchtower-pg-backup` on every node.
+  Replicas exit; the leader dumps. Every deploy's verify step does this.
+- **Logs:** `journalctl -u watchtower-pg-backup` on the node.
+
+### Restoring
+
+1. Fetch a dump with the admin key:
+   ```bash
+   source scripts/env.sh
+   s3() { aws --endpoint-url https://nbg1.your-objectstorage.com --region nbg1 "$@"; }
+   s3 s3 ls s3://jmr-watchtower-postgres-backups/grafana/ | tail
+   s3 s3 cp s3://jmr-watchtower-postgres-backups/grafana/grafana-<time>.dump ./grafana.dump
+   ```
+2. Stop all three Grafanas, so nothing writes during the restore:
+   `systemctl stop grafana` on every node.
+3. Restore on the leader (`patronictl list` names it). The replicas follow
+   by streaming replication:
+   ```bash
+   ssh root@<leader> podman exec -i patroni \
+     pg_restore --clean --if-exists --single-transaction --dbname=grafana <grafana.dump
+   ```
+4. `systemctl start grafana` on every node, then check the UI.
+
+To get back one dashboard rather than everything, restore into a scratch
+database on the leader instead, with Grafana left running:
+```bash
+ssh root@<leader> podman exec patroni createdb grafana_restore
+ssh root@<leader> podman exec -i patroni pg_restore --dbname=grafana_restore <grafana.dump
+```
+Copy the dashboard's JSON out of its `dashboard` table, import it in
+Grafana, then `podman exec patroni dropdb grafana_restore`.
+
+A dump is only usable with the `grafana-secret-key` in force when it was
+made: Grafana encrypts datasource secrets with it.
+
 ## Kafka
 
 ```bash
@@ -239,6 +297,7 @@ copy. The hosts get it on the next deploy (push to main, or dispatch
 | `luks-passphrase` | `cryptsetup luksAddKey` on every host with the new one, `secret.sh put luks-passphrase`, deploy, then `luksRemoveKey` the old |
 | Pulumi passphrase | `pulumi stack change-secrets-provider passphrase` with the new one, then `secret.sh put pulumi-passphrase` |
 | Hosts' SSH key | new key → `watchtower:sshPublicKey` and `/root/.ssh/authorized_keys` on every host → `secret.sh put ssh-private-key` |
+| Healthchecks.io ping URL | regenerate it on the check → `secret.sh put healthchecks-pg-backup-url` → deploy |
 
 Old versions stay in Secret Manager's history until destroyed:
 `gcloud secrets versions destroy <n> --secret <id> --project watchtower-observe`.
@@ -255,6 +314,7 @@ Old versions stay in Secret Manager's history until destroyed:
 | A host drops traffic it should accept | The address isn't in the lists the ruleset mirrors | `journalctl -k -g nft-drop`; fix the cloud stack's CIDR config and merge |
 | A container is blocked by SELinux | It needs host access it wasn't given | `ausearch -m avc -ts recent`; do not switch SELinux to permissive — fix the quadlet's volume labels or, as a last resort, `SecurityLabelDisable` for that one container |
 | Loki "no org id" | Client without `X-Scope-OrgID` | Fix the Alloy config |
+| Healthchecks.io: `watchtower-prod-pg-backup` is down | The nightly backup failed or never ran | The alert carries the run's log; else `journalctl -u watchtower-pg-backup -n 50` on the leader. Usual causes: a cluster S3 key replaced but not yet deployed, no Patroni leader, or the volume not mounted. `systemctl start watchtower-pg-backup` on every node retries |
 | Tempo queries miss recent traces | A live-store or the Kafka path | `systemctl status 'tempo-*'` on each node; Kafka's under-replicated partitions |
 
 ## Cost

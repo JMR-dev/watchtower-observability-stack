@@ -76,11 +76,13 @@ func inventoryJSON(cfg *Config, hs *hosts) pulumi.StringOutput {
 					"journal":    names.ArchivePrefixJournal,
 					"audit":      names.ArchivePrefixAudit,
 				},
+				"watchtower_postgres_backup_prefix": names.PostgresBackupPrefix,
 				"watchtower_retention_days": obj{
-					"loki":        names.RetentionLokiDays,
-					"mimir":       names.RetentionMimirDays,
-					"tempo":       names.RetentionTempoDays,
-					"log_archive": names.RetentionLogArchiveDays,
+					"loki":            names.RetentionLokiDays,
+					"mimir":           names.RetentionMimirDays,
+					"tempo":           names.RetentionTempoDays,
+					"log_archive":     names.RetentionLogArchiveDays,
+					"postgres_backup": names.RetentionPostgresBackupDays,
 				},
 			},
 			"children": obj{

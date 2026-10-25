@@ -41,6 +41,8 @@ Typical bases:
 | Telemetry (Loki, Mimir, Tempo buckets) | Hetzner Object Storage, nbg1 |
 | WALs, Kafka's log (24 h of traces), Postgres (Grafana's database), wg-easy's database | Hetzner Volumes, nbg1 (LUKS) |
 | Log archive (container logs, journals, audit logs) | Hetzner Object Storage, nbg1 |
+| Backups of Grafana's database | Hetzner Object Storage, nbg1 |
+| Backup alerts | Healthchecks.io (no personal data: a node's name and the backup run's own log) |
 | Pulumi state | Hetzner Object Storage, nbg1 |
 | DNS records | Google Cloud DNS (global; no personal data) |
 | Credentials (API tokens, keys, passwords) | Google Secret Manager, payloads replicated to europe-west3 only (no personal data) |
@@ -54,6 +56,7 @@ Typical bases:
 | Metrics (Mimir) | 90 days (compactor) | 180 days | 90 days |
 | Traces (Tempo) | 30 days (backend scheduler) | 60 days | 30 days |
 | Log archive: container logs, host journals, audit logs | — | 90 days | 90 days |
+| Backups of Grafana's database (users, orgs, dashboards, alert rules) | — | 90 days | 90 days |
 | Traces in Kafka (Tempo's ingest path) | 24 hours (topic retention) | — | 24 hours |
 | GDPR erasure records (`gdpr-audit/`) | kept | none | — (evidence of erasure; no telemetry) |
 
@@ -66,6 +69,12 @@ Coraza's audit log (client tunnel addresses, request paths), Grafana's log
 logs. Tenant telemetry does not go there, only to Loki, Mimir and Tempo. The
 servers' S3 key can only write to the archive, so a compromised host cannot
 read or erase it; the 90-day lifecycle is its erasure.
+
+The **Postgres backups** are nightly dumps of Grafana's database: its
+users' names, email addresses and logins, tenant orgs, dashboards and alert
+rules. A user deleted in Grafana stays in the earlier dumps until they
+expire. As with the archive, the servers' key can only add dumps, and the
+90-day lifecycle is the erasure.
 
 ## PII minimization
 
@@ -107,6 +116,7 @@ identifiers (hashed at the collector), never emails, names or phone numbers.
 | Metrics | Retention only — short window + label discipline | ≤ 90 days |
 | Traces | Retention only | ≤ 30 days |
 | Log archive | Lifecycle only | ≤ 90 days |
+| Grafana users | Delete the user in Grafana; the database backups expire by lifecycle | at once in Grafana; ≤ 90 days in backups |
 
 Each erasure request is recorded in the log archive under `gdpr-audit/`
 (kept indefinitely, writable only with the admin key). Notify the data

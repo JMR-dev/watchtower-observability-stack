@@ -1,0 +1,9 @@
+# Managed by Ansible (roles/pgbackup).
+[Unit]
+Description=Report a failed backup of Grafana's database to Healthchecks.io
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/watchtower-pg-backup report-failure

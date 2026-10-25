@@ -406,35 +406,43 @@ func TestBucketPolicies(t *testing.T) {
 		if !reflect.DeepEqual(first.Resource, want) {
 			t.Errorf("%s: resources %v", name, first.Resource)
 		}
-		if b.WriteOnly != (len(doc.Statement) == 3) {
+		statements := 1
+		if b.WriteOnly {
+			statements++
+		}
+		if b.Suffix == names.BucketLogArchive {
+			statements++
+		}
+		if len(doc.Statement) != statements {
 			t.Errorf("%s: write-only %v but %d statements", name, b.WriteOnly, len(doc.Statement))
 		}
 	}
 }
 
-// The cluster key can write to the log archive and nothing else: a host
-// compromise cannot read back, list or erase it. Policy actions arrive from
-// JSON as []interface{}.
-func TestLogArchiveIsWriteOnlyForTheCluster(t *testing.T) {
+// The cluster key can write to the log archive and the Postgres backups and
+// nothing else: a host compromise cannot read back, list or erase either.
+// Policy actions arrive from JSON as []interface{}.
+func TestWriteOnlyForTheCluster(t *testing.T) {
 	m := mustRun(t, baseConfig())
-	doc := policyOf(t, m, "test-wt-logs-archive")
-	deny := doc.Statement[1]
-	if deny.Effect != "Deny" || deny.Principal == nil || deny.Principal.AWS[0] != principal(1234, "CLUSTERKEY") {
-		t.Fatalf("write-only statement %+v", deny)
-	}
-	denied := map[string]bool{}
-	for _, a := range deny.Action.([]interface{}) {
-		denied[a.(string)] = true
-	}
-	for _, must := range []string{"s3:GetObject", "s3:DeleteObject", "s3:ListBucket", "s3:PutBucketPolicy", "s3:PutLifecycleConfiguration", "s3:DeleteBucket"} {
-		if !denied[must] {
-			t.Errorf("write-only key may still %s", must)
+	for _, bucket := range []string{"test-wt-logs-archive", "test-wt-postgres-backups"} {
+		deny := policyOf(t, m, bucket).Statement[1]
+		if deny.Effect != "Deny" || deny.Principal == nil || deny.Principal.AWS[0] != principal(1234, "CLUSTERKEY") {
+			t.Fatalf("%s: write-only statement %+v", bucket, deny)
+		}
+		denied := map[string]bool{}
+		for _, a := range deny.Action.([]interface{}) {
+			denied[a.(string)] = true
+		}
+		for _, must := range []string{"s3:GetObject", "s3:DeleteObject", "s3:ListBucket", "s3:PutBucketPolicy", "s3:PutLifecycleConfiguration", "s3:DeleteBucket"} {
+			if !denied[must] {
+				t.Errorf("%s: write-only key may still %s", bucket, must)
+			}
+		}
+		if denied["s3:PutObject"] {
+			t.Errorf("%s: write-only key cannot write", bucket)
 		}
 	}
-	if denied["s3:PutObject"] {
-		t.Error("write-only key cannot write")
-	}
-	gdpr := doc.Statement[2]
+	gdpr := policyOf(t, m, "test-wt-logs-archive").Statement[2]
 	if gdpr.Action != "s3:PutObject" || gdpr.Resource[0] != "arn:aws:s3:::test-wt-logs-archive/gdpr-audit/*" ||
 		gdpr.Principal.AWS[0] != principal(1234, "CLUSTERKEY") {
 		t.Errorf("gdpr-audit statement %+v", gdpr)
@@ -458,6 +466,8 @@ func TestLifecycle(t *testing.T) {
 		"test-wt-tempo-lifecycle":        "60d/Enabled",
 		// gdpr-audit/ is deliberately absent: erasure records are kept.
 		"test-wt-logs-archive-lifecycle": "containers/90d/Enabled journal/90d/Enabled audit/90d/Enabled",
+		// The backups' retention is this rule alone.
+		"test-wt-postgres-backups-lifecycle": "90d/Enabled",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("lifecycle %v, want %v", got, want)
@@ -611,8 +621,9 @@ func TestInventoryVars(t *testing.T) {
 		"watchtower_archive_prefixes": map[string]interface{}{
 			"containers": "containers/", "journal": "journal/", "audit": "audit/",
 		},
+		"watchtower_postgres_backup_prefix": "grafana/",
 		"watchtower_retention_days": map[string]interface{}{
-			"loki": 30.0, "mimir": 90.0, "tempo": 30.0, "log_archive": 90.0,
+			"loki": 30.0, "mimir": 90.0, "tempo": 30.0, "log_archive": 90.0, "postgres_backup": 90.0,
 		},
 	} {
 		if !reflect.DeepEqual(vars[key], want) {

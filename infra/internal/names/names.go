@@ -92,6 +92,9 @@ const (
 	SecretPatroniRESTAPIPassword      = "patroni-restapi-password"
 	SecretWGEasyPassword              = "wg-easy-password"
 	SecretCaddyDNSKey                 = "caddy-dns-key"
+	// The Healthchecks.io ping URL of the nightly Postgres backup
+	// (ansible/roles/pgbackup): pinged on success, /fail on failure.
+	SecretHealthchecksPGBackupURL = "healthchecks-pg-backup-url"
 
 	// SecretGARPushKey is copied to the GAR_PUSH_KEY Actions secret by the
 	// owner (scripts/secret.sh gitea). The deployer is never granted it.
@@ -110,7 +113,7 @@ func Secrets() []string {
 		SecretSSHPrivateKey, SecretLUKSPassphrase, SecretGARPullKey,
 		SecretGrafanaAdminPassword, SecretGrafanaSecretKey, SecretGrafanaDBPassword,
 		SecretPostgresSuperuserPassword, SecretPostgresReplicationPassword, SecretPatroniRESTAPIPassword,
-		SecretWGEasyPassword, SecretCaddyDNSKey,
+		SecretWGEasyPassword, SecretCaddyDNSKey, SecretHealthchecksPGBackupURL,
 		SecretGARPushKey,
 	}
 	for _, k := range append([]string{KeyAdmin}, Keys...) {
@@ -126,6 +129,9 @@ const (
 	RetentionMimirDays      = 90
 	RetentionTempoDays      = 30
 	RetentionLogArchiveDays = 90
+	// Nightly dumps of Grafana's database (ansible/roles/pgbackup). Here the
+	// bucket lifecycle is the retention: nothing else deletes a dump.
+	RetentionPostgresBackupDays = 90
 )
 
 // Bucket is one Hetzner Object Storage bucket and the S3 key allowed into it.
@@ -143,6 +149,16 @@ type Bucket struct {
 	LifecyclePrefixes []string
 }
 
+// Bucket suffixes other code refers to by name.
+const (
+	BucketLogArchive      = "logs-archive"
+	BucketPostgresBackups = "postgres-backups"
+)
+
+// PostgresBackupPrefix is where the nightly dumps of Grafana's database go:
+// grafana/grafana-<UTC yyyymmddThhmmssZ>.dump, so keys sort by time.
+const PostgresBackupPrefix = "grafana/"
+
 // Log-archive key prefixes: Fluent Bit writes the first three (and they
 // expire), scripts/gdpr-purge.sh writes erasure records to the last (kept
 // for good: they are the evidence an erasure happened).
@@ -158,8 +174,9 @@ const (
 const KeyAdmin = "admin"
 
 // KeyCluster is the S3 key everything on the servers shares: Loki, Mimir,
-// Tempo and Fluent Bit. Bucket policies keep it out of the Pulumi state
-// bucket and let it only write to the log archive.
+// Tempo, Fluent Bit and the Postgres backup. Bucket policies keep it out of
+// the Pulumi state bucket and let it only write to the log archive and the
+// backups.
 const KeyCluster = "cluster"
 
 // Keys lists the non-admin keys.
@@ -174,9 +191,12 @@ var Buckets = []Bucket{
 	{Suffix: "mimir-alertmanager", Key: KeyCluster},
 	{Suffix: "tempo", Key: KeyCluster, LifecycleDays: 2 * RetentionTempoDays},
 	{
-		Suffix: "logs-archive", Key: KeyCluster, LifecycleDays: RetentionLogArchiveDays, WriteOnly: true,
+		Suffix: BucketLogArchive, Key: KeyCluster, LifecycleDays: RetentionLogArchiveDays, WriteOnly: true,
 		LifecyclePrefixes: []string{ArchivePrefixContainers, ArchivePrefixJournal, ArchivePrefixAudit},
 	},
+	// Write-only, so a node can add a dump but never read, list or delete
+	// one; the operator restores with the admin key.
+	{Suffix: BucketPostgresBackups, Key: KeyCluster, LifecycleDays: RetentionPostgresBackupDays, WriteOnly: true},
 }
 
 // BucketName joins a stack's bucket prefix and a suffix.

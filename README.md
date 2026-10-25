@@ -12,6 +12,7 @@ private endpoint **watchtower.jasonmross.dev**.
 - **Network:** a WireGuard mesh between all four hosts carries every byte between them; Caddy on the proxy load-balances each port across the nodes with health checks
 - **Object storage:** Hetzner Object Storage, nbg1; two S3 keys (admin, and one for the servers, fenced by bucket policies)
 - **Log archive:** every container's log, every host's journal and audit log, kept 90 days in a bucket of their own
+- **Backups:** Grafana's database dumped nightly to Object Storage and kept 90 days, with a Healthchecks.io alert the moment a run fails
 - **Access:** WireGuard (wg-easy) on the proxy; Caddy (with the Coraza WAF) answers only on the tunnel address
 - **Images:** our two (Caddy, Patroni) in a private Artifact Registry repo, built natively per architecture, scanned by Trivy
 - **DNS:** the Cloud DNS zone `watchtower.jasonmross.dev`, delegated from `jasonmross.dev`
@@ -59,8 +60,8 @@ CONTAINER_RUNTIME=podman scripts/check-configs.sh
 ```
 
 renders every host's configs from the sample inventory and checks each with
-the program that reads it (quadlet, Loki, Mimir, Tempo, Fluent Bit), as CI's
-`configs` job does. `scripts/build-image.sh` checks the Caddyfile and
+the program that reads it (quadlet, Loki, Mimir, Tempo, Fluent Bit;
+shellcheck for the host scripts), as CI's `configs` job does. `scripts/build-image.sh` checks the Caddyfile and
 `patroni.yml` with the images it builds.
 
 ## Documentation

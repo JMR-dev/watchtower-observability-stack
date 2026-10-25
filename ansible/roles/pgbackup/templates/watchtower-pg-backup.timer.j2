@@ -1,0 +1,11 @@
+# Managed by Ansible (roles/pgbackup). On every node; only the Postgres
+# leader dumps. Clear of the Sunday reboot window (roles/reboot).
+[Unit]
+Description=Nightly backup of Grafana's database
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -62,6 +62,8 @@
     - mimir
     - tempo
     - grafana
+    # After grafana, which creates the database it dumps.
+    - pgbackup
   post_tasks:
     - name: This node is healthy before the next one goes
       ansible.builtin.include_tasks: tasks/node-health.yml

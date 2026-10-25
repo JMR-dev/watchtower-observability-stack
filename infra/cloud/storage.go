@@ -19,8 +19,9 @@ import (
 // NotAction in a policy but ignores it, so "everything but PutObject" has to
 // be spelled out as a deny list.
 //
-// The list holds only because Fluent Bit uploads with use_put_object: a
-// multipart upload would also need CreateMultipartUpload, UploadPart and
+// The list holds only because both writers upload with a single PutObject
+// (Fluent Bit's use_put_object, the Postgres backup's curl -T): a multipart
+// upload would also need CreateMultipartUpload, UploadPart and
 // CompleteMultipartUpload.
 var writeOnlyDenied = []string{
 	"s3:GetObject",
@@ -91,7 +92,10 @@ func bucketPolicy(cfg *Config, bucket string, b names.Bucket) (string, error) {
 			Action:    writeOnlyDenied,
 			Resource:  resources,
 			Principal: &principals{AWS: []string{owner}},
-		}, statement{
+		})
+	}
+	if b.Suffix == names.BucketLogArchive {
+		doc.Statement = append(doc.Statement, statement{
 			// PutObject can overwrite; keep the shipper away from the
 			// erasure records.
 			Sid:       "OwnerLeavesGDPRRecords",

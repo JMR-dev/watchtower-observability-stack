@@ -34,6 +34,10 @@
       - {src: grafana/templates/grafana.ini.j2, dest: grafana/grafana.ini}
       - {src: grafana/templates/datasources.yaml.j2, dest: grafana/datasources.yaml}
       - {src: grafana/templates/grafana.container.j2, dest: quadlets/grafana.container}
+      - {src: pgbackup/templates/watchtower-pg-backup.sh.j2, dest: watchtower-pg-backup.sh}
+      - {src: pgbackup/templates/watchtower-pg-backup.service.j2, dest: watchtower-pg-backup.service}
+      - {src: pgbackup/templates/watchtower-pg-backup-failed.service.j2, dest: watchtower-pg-backup-failed.service}
+      - {src: pgbackup/templates/watchtower-pg-backup.timer.j2, dest: watchtower-pg-backup.timer}
     per_proxy:
       - {src: edge/templates/Caddyfile.j2, dest: caddy/Caddyfile}
       - {src: edge/templates/caddy.container.j2, dest: quadlets/caddy.container}

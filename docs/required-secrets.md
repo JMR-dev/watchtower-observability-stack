@@ -41,7 +41,8 @@ scripts/secret.sh check
 - **The hosts** get theirs from Ansible, as podman secrets (root-only, out
   of unit files and container listings): the cluster S3 key, the LUKS key,
   the pull key, Grafana's, Postgres's and Patroni's passwords, wg-easy's
-  first-start password and Caddy's DNS-01 key. A new value reaches them on
+  first-start password, Caddy's DNS-01 key and the backup's Healthchecks.io
+  ping URL. A new value reaches them on
   the next deploy, and only the containers that use it restart.
 
 Why a long-lived key: the Gitea runner cluster keeps Actions jobs away from
@@ -72,7 +73,7 @@ every 90 days.
 | Id | What |
 |---|---|
 | `ssh-private-key` | ed25519, root on the hosts (public half: `watchtower:sshPublicKey`); Ansible connects with it |
-| `s3-cluster-access-key`, `s3-cluster-secret-key` | Hetzner S3 credential `cluster`: Loki, Mimir, Tempo and Fluent Bit. The cloud program reads the access key ID too, for the bucket policies |
+| `s3-cluster-access-key`, `s3-cluster-secret-key` | Hetzner S3 credential `cluster`: Loki, Mimir, Tempo, Fluent Bit and the Postgres backup. The cloud program reads the access key ID too, for the bucket policies |
 | `luks-passphrase` | Encrypts every host's data volume. **Losing it loses the volumes' data** |
 | `gar-pull-key` | JSON key of `watchtower-image-puller@`, reader on the `watchtower` repo; the hosts pull Caddy and Patroni with it. `scripts/rotate-gcp-key.sh puller` |
 | `grafana-admin-password` | Grafana's `admin`; `scripts/onboard-tenant.sh` reads the gopass copy |
@@ -82,6 +83,7 @@ every 90 days.
 | `patroni-restapi-password` | Patroni's REST API (switchover, restart) |
 | `wg-easy-password` | wg-easy's first-start admin password |
 | `caddy-dns-key` | JSON key of `watchtower-caddy-dns01@` (DNS-01); `scripts/rotate-gcp-key.sh caddy` |
+| `healthchecks-pg-backup-url` | Ping URL of the Healthchecks.io check `watchtower-prod-pg-backup` (docs/runbook.md, "First deploy"). The nightly backup pings it, or its `/fail` when a run fails. Anyone holding it can ping the check |
 
 ### Owner only
 
@@ -104,6 +106,7 @@ the admin key and the cluster key:
 | `-pulumi-state` | ✓ | |
 | `-loki`, `-mimir-blocks`, `-mimir-ruler`, `-mimir-alertmanager`, `-tempo` | ✓ | ✓ |
 | `-logs-archive` | ✓ | write only, not `gdpr-audit/` |
+| `-postgres-backups` | ✓ | write only |
 
 A side effect: the Hetzner Console can no longer list these buckets'
 objects. Use the admin key with `aws s3`.

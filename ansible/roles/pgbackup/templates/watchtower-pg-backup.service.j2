@@ -1,0 +1,12 @@
+# Managed by Ansible (roles/pgbackup).
+[Unit]
+Description=Dump Grafana's database to Object Storage, if this node leads Postgres
+Wants=network-online.target
+After=network-online.target patroni.service
+# Alerts through Healthchecks.io the moment a run fails.
+OnFailure=watchtower-pg-backup-failed.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/watchtower-pg-backup
+TimeoutStartSec=30min

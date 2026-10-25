@@ -1,0 +1,61 @@
+---
+# A nightly dump of Grafana's database (dashboards, alert rules, users,
+# tenant orgs) to Hetzner Object Storage. Patroni's three copies survive a
+# lost node, not a mistake: a deleted dashboard, a bad Grafana upgrade or a
+# lost LUKS key reaches every copy at once.
+#
+# Every node runs the timer and only the Postgres leader dumps, so the backup
+# follows a failover. The upload uses the cluster S3 key, which may write to
+# the bucket but never read, list or delete there; the bucket's lifecycle
+# rule deletes each dump after watchtower_retention_days.postgres_backup
+# days. Restoring is in docs/runbook.md.
+#
+# Alerting goes through the Healthchecks.io check behind
+# healthchecks-pg-backup-url: a failed run pings /fail at once (OnFailure=),
+# and a night with no successful ping alerts when its grace runs out.
+
+- name: Backup tools
+  ansible.builtin.dnf:
+    name: openssl
+    state: present
+
+- name: Backup staging directory, on the encrypted volume
+  ansible.builtin.file:
+    path: "{{ watchtower_data }}/pg-backup"
+    state: directory
+    mode: "0700"
+    owner: root
+    group: root
+
+- name: The Healthchecks.io ping URL
+  ansible.builtin.include_role:
+    name: quadlet
+    tasks_from: secrets
+  vars:
+    quadlet_secrets:
+      - {name: healthchecks-pg-backup-url, value: "{{ watchtower_secret.healthchecks_pg_backup_url }}"}
+
+- name: Backup script
+  ansible.builtin.template:
+    src: watchtower-pg-backup.sh.j2
+    dest: /usr/local/sbin/watchtower-pg-backup
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Backup units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: /etc/systemd/system/{{ item }}
+    mode: "0644"
+    owner: root
+    group: root
+  loop: [watchtower-pg-backup.service, watchtower-pg-backup-failed.service, watchtower-pg-backup.timer]
+  notify: Reload systemd
+
+- name: Enable the backup timer
+  ansible.builtin.systemd_service:
+    name: watchtower-pg-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true

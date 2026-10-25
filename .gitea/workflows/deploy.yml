@@ -177,6 +177,7 @@ jobs:
             POSTGRES_REPLICATION_PASSWORD=postgres-replication-password
             PATRONI_RESTAPI_PASSWORD=patroni-restapi-password
             WG_EASY_PASSWORD=wg-easy-password
+            HEALTHCHECKS_PG_BACKUP_URL=healthchecks-pg-backup-url
             @CADDY_DNS_KEY_FILE=caddy-dns-key
             @GAR_PULL_KEY_FILE=gar-pull-key
       - name: Inventory and pinned host keys from the cloud stack

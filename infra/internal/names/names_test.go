@@ -24,8 +24,8 @@ func TestNamesAreStable(t *testing.T) {
 	}
 }
 
-// Every bucket's key must be a known key, and only the log archive may be
-// write-only: Loki, Mimir and Tempo read back what they store.
+// Every bucket's key must be a known key, and only the log archive and the
+// backups may be write-only: Loki, Mimir and Tempo read back what they store.
 func TestBucketsUseKnownKeys(t *testing.T) {
 	known := map[string]bool{}
 	for _, k := range Keys {
@@ -35,7 +35,7 @@ func TestBucketsUseKnownKeys(t *testing.T) {
 		if !known[b.Key] {
 			t.Errorf("bucket %s uses unknown key %q", b.Suffix, b.Key)
 		}
-		if b.WriteOnly && b.Suffix != "logs-archive" {
+		if b.WriteOnly != (b.Suffix == BucketLogArchive || b.Suffix == BucketPostgresBackups) {
 			t.Errorf("bucket %s is write-only", b.Suffix)
 		}
 	}
@@ -44,10 +44,11 @@ func TestBucketsUseKnownKeys(t *testing.T) {
 // Lifecycle is a safety net behind application retention, never ahead of it.
 func TestLifecycleNeverUndercutsRetention(t *testing.T) {
 	retention := map[string]int{
-		"loki":         RetentionLokiDays,
-		"mimir-blocks": RetentionMimirDays,
-		"tempo":        RetentionTempoDays,
-		"logs-archive": RetentionLogArchiveDays,
+		"loki":             RetentionLokiDays,
+		"mimir-blocks":     RetentionMimirDays,
+		"tempo":            RetentionTempoDays,
+		"logs-archive":     RetentionLogArchiveDays,
+		"postgres-backups": RetentionPostgresBackupDays,
 	}
 	for _, b := range Buckets {
 		r, ok := retention[b.Suffix]
@@ -63,6 +64,9 @@ func TestLifecycleNeverUndercutsRetention(t *testing.T) {
 	}
 	if RetentionLogArchiveDays != 90 {
 		t.Errorf("log archive retention %d, want 90", RetentionLogArchiveDays)
+	}
+	if RetentionPostgresBackupDays != 90 {
+		t.Errorf("Postgres backup retention %d, want 90", RetentionPostgresBackupDays)
 	}
 }
 

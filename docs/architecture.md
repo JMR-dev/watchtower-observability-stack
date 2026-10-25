@@ -39,7 +39,8 @@ and nothing else.
                                         ▼  the cluster S3 key
                          Hetzner Object Storage (nbg1)
      <prefix>-loki · -mimir-blocks · -mimir-ruler · -mimir-alertmanager
-     <prefix>-tempo · -logs-archive (write-only for the cluster key) · -pulumi-state (admin only)
+     <prefix>-tempo · -logs-archive and -postgres-backups (write-only for the cluster key)
+     <prefix>-pulumi-state (admin only)
 
   Cloud DNS (watchtower-observe), delegated from jasonmross.dev:
     watchtower.jasonmross.dev      A 10.8.0.1        (private, in-tunnel)
@@ -79,6 +80,9 @@ and nothing else.
    local one first.
 7. **Fluent Bit** on every host ships the journal (every container logs
    there) and the audit log to the log archive.
+8. **Every night** the Postgres leader dumps Grafana's database to
+   `-postgres-backups`, kept 90 days, and reports to Healthchecks.io: a
+   failed run alerts at once, a missed night when its grace runs out.
 
 ## What each failure costs
 
@@ -88,6 +92,7 @@ and nothing else.
 | watchtower-1 | Tempo's block builder pauses until moved (`group_vars/all/placement.yml`); Kafka keeps 24 h of traces |
 | watchtower-2 | Tempo's compaction and retention (scheduler) pause until moved |
 | The proxy | Ingest and the UI are down until it is rebuilt (10–15 minutes); Alloy buffers and retries |
+| A mistake in Grafana's database (a deleted dashboard, a bad upgrade) | Every replica has it too; restore last night's dump (runbook, "Grafana database backups") |
 
 ## Why it is built this way
 
@@ -128,7 +133,7 @@ and nothing else.
 | Edge | Hetzner Cloud Firewalls: SSH from admin/CI addresses only; WireGuard on the proxy only, from `wireguardAllowCidrs` |
 | Host | nftables (no firewalld) mirroring the cloud firewalls; on the mesh, nodes reach each other fully and the proxy only Caddy's backend ports; Kafka, etcd and Postgres from nodes only. SELinux enforcing; fail2ban (sshd, recidive); security updates nightly, reboots one host a week, gated on the others' health |
 | Containers | Non-root where the image allows, read-only roots, every capability dropped but what each needs; only wg-easy (wg0, iptables) and Fluent Bit (the host's journal and audit log) run without SELinux confinement |
-| Credentials | Two S3 keys, fenced by bucket policies: the cluster key can't touch Pulumi state and can only write to the archive. Every secret in Secret Manager, read by the deployer through a grant per secret; the image jobs hold only a push key for the one registry repo |
+| Credentials | Two S3 keys, fenced by bucket policies: the cluster key can't touch Pulumi state and can only write to the archive and the backups. Every secret in Secret Manager, read by the deployer through a grant per secret; the image jobs hold only a push key for the one registry repo |
 | Encryption | WireGuard (clients, and every byte between hosts), TLS on every client-facing endpoint, LUKS volumes |
 | WAF | Coraza with the OWASP CRS on Grafana (detection-only until tuned) |
 
@@ -137,7 +142,8 @@ and nothing else.
 - **`ci.yml`** checks every pull request: Go (100% coverage); Ansible syntax
   and lint, every host's firewall through `nft --check`; every rendered
   config through the program that reads it (quadlet, Loki, Mimir, Tempo,
-  Fluent Bit); both images (native builds, their configs checked with the
-  built image, Trivy); Semgrep; shellcheck, actionlint, the Alloy example.
+  Fluent Bit; shellcheck for the host scripts); both images (native builds,
+  their configs checked with the built image, Trivy); Semgrep; shellcheck,
+  actionlint, the Alloy example.
 - **`deploy.yml`** on merge to main: both images (to Artifact Registry),
   `infra/cloud`, `ansible/playbooks/site.yml`, then `scripts/verify.sh`.
