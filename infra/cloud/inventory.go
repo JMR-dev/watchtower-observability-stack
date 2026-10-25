@@ -54,9 +54,8 @@ func inventoryJSON(cfg *Config, hs *hosts) pulumi.StringOutput {
 				"ansible_python_interpreter": "/usr/bin/python3",
 
 				// roles/firewall mirrors the Hetzner firewalls from the same
-				// lists: SSH to the proxy from the deploy runners and the
-				// bastion, WireGuard (proxy only) from wireguardAllowCidrs.
-				"watchtower_ci_cidrs":          cfg.CICIDRs,
+				// lists: SSH to the proxy's public address from the bastion,
+				// WireGuard (proxy only) from wireguardAllowCidrs.
 				"watchtower_break_glass_cidrs": cfg.BreakGlassCIDRs,
 				// scripts/ssh-config.sh bastion: the way in through IAP.
 				"watchtower_bastion": obj{

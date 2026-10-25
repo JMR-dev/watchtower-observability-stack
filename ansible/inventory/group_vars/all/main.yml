@@ -7,15 +7,15 @@ timezone: Etc/UTC
 
 # How Ansible reaches the hosts: by their inventory names, through the SSH
 # config scripts/ssh-config.sh writes (inventory/ssh_config; ansible.cfg
-# passes it with -F). It picks the way to the proxy, public, vpn or bastion;
-# the nodes are always reached through the proxy, on their private
-# addresses.
+# passes it with -F). It picks the way to the proxy, vpn or bastion; the
+# nodes are always reached through the proxy, on their private addresses.
 
-# Addresses fail2ban never bans: loopback, the deploy runners and the
-# break-glass bastion (a ban would lock out the deploy, or break glass) and,
-# on the nodes, the proxy, which every SSH session to a node comes through.
+# Addresses fail2ban never bans: loopback, the VPN's peers (the deploy among
+# them) and the break-glass bastion (a ban would lock out the deploy, or
+# break glass) and, on the nodes, the proxy, which every SSH session to a
+# node comes through.
 fail2ban_ignoreip: >-
-  {{ ['127.0.0.1/8', '::1'] + watchtower_ci_cidrs + watchtower_break_glass_cidrs
+  {{ ['127.0.0.1/8', '::1', watchtower_tunnel_cidr] + watchtower_break_glass_cidrs
      + (groups['proxy'] | map('extract', hostvars, 'private_ip') | list if 'nodes' in group_names else []) }}
 
 # The LUKS volume (roles/storage) is mounted here; every service keeps its

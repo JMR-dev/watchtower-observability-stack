@@ -6,8 +6,7 @@ all:
   vars:
     ansible_user: root
     ansible_python_interpreter: /usr/bin/python3
-    watchtower_ci_cidrs: [34.26.149.196/32, "2001:db8::/32"]
-    watchtower_break_glass_cidrs: [192.0.2.53/32]
+    watchtower_break_glass_cidrs: [192.0.2.53/32, "2001:db8::53/128"]
     watchtower_bastion: {name: watchtower-bastion, zone: us-east1-b, project: watchtower-observe, host_key: ssh-ed25519 sample-not-a-key}
     watchtower_wireguard_cidrs: [0.0.0.0/0, "::/0"]
     watchtower_wireguard_port: 51820

@@ -7,14 +7,13 @@
 # the mesh (wg1) does not exist until the first deploy has made it. Only the
 # way to the proxy changes:
 #
-#   scripts/ssh-config.sh public   its public address, which takes SSH only
-#                                  from breakGlassCidrs and ciCidrs
 #   scripts/ssh-config.sh vpn      the tunnel address, from a WireGuard peer.
 #                                  With WATCHTOWER_VPN_FORWARD=127.0.0.1:2222,
 #                                  that local port instead: wireproxy's TCP
 #                                  tunnel to 10.8.0.1:22, the deploy's way in
-#   scripts/ssh-config.sh bastion  its public address, through the
-#                                  break-glass bastion over IAP, as the gcloud
+#   scripts/ssh-config.sh bastion  its public address, which takes SSH only
+#                                  from the break-glass bastion
+#                                  (breakGlassCidrs), through it over IAP, as the gcloud
 #                                  account in use (OS Login with a key made
 #                                  here, valid 4 hours). For a service
 #                                  account, export
@@ -37,7 +36,7 @@ out="${dir}/ssh_config"
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 mode="${1:-}"
-[[ "$mode" =~ ^(public|vpn|bastion)$ ]] || die "usage: $0 public|vpn|bastion"
+[[ "$mode" =~ ^(vpn|bastion)$ ]] || die "usage: $0 vpn|bastion"
 [[ -s "$inv" ]] || die "no ${inv}: pulumi stack output inventory >${inv}"
 [[ -s "${dir}/known_hosts" ]] || die "no ${dir}/known_hosts: pulumi stack output knownHosts >${dir}/known_hosts"
 
@@ -98,7 +97,6 @@ EOF
   echo
   echo "Host ${proxy}"
   case "$mode" in
-    public) echo "  HostName ${proxy_public}" ;;
     bastion)
       echo "  HostName ${proxy_public}"
       echo "  ProxyJump ${bastion}"

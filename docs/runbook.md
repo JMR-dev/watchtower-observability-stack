@@ -42,8 +42,9 @@ gopass.
    done
    ```
 3. **Stack config.** In `infra/cloud/Pulumi.prod.yaml` set `sshPublicKey`
-   (`watchtower-root.pub`). Commit it. `ciCidrs` is the only public SSH
-   source: the deploy runners, to the proxy.
+   (`watchtower-root.pub`). Commit it. Bootstrap (next) adds
+   `breakGlassCidrs` and `bastionHostKey`: the bastion is the only public
+   SSH source, to the proxy.
 4. **Bootstrap** (state bucket, DNS zone and delegation, service accounts,
    the image registry, the secrets' access grants), then the four GCP keys:
    ```bash
@@ -68,7 +69,10 @@ gopass.
 6. **Gitea:** in Settings → Branches, protect main and require the `ci`
    checks: `go`, `ansible`, `configs`, `images (caddy)`, `images (patroni)`,
    `images (wg-easy)`, `semgrep`, `shell`, `alloy`.
-7. **Merge to main.** `deploy.yml` builds our images, creates the hosts,
+7. **First deploy, through the bastion.** The deploy reaches the hosts over
+   the VPN as its own peer, which the first deploy creates. So, from scratch,
+   dispatch `deploy.yml` with `ssh_via=bastion` (Actions → deploy → Run
+   workflow); a plain push would stop at "No deploy VPN peer yet". It builds our images, creates the hosts,
    installs everything (all three nodes at once the first time), and
    verifies it end to end.
 8. **Your VPN peer.** The deploy created the wg-easy client `owner` and
@@ -95,14 +99,14 @@ SSH is only for WireGuard peers, the deploy, and break glass:
 | From | To | Path |
 |---|---|---|
 | A VPN peer (you) | the proxy | `10.8.0.1`, over the tunnel |
-| The deploy runners (`ciCidrs`) | the proxy | its public address |
-| The break-glass bastion (`breakGlassCidrs`) | the proxy | its public address, the bastion reached through IAP |
+| The deploy | the proxy | `10.8.0.1`, as its own VPN peer (`wireguard-deploy-peer`) through wireproxy (`scripts/vpn-tunnel.sh`) |
+| The break-glass bastion (`breakGlassCidrs`) | the proxy | its public address, the bastion reached through IAP; also the deploy's, dispatched with `ssh_via=bastion` |
 | Any of those | a node | through the proxy, to the node's private address |
 
 The nodes take nothing on their public addresses, and only the proxy's
 private address may reach their SSH.
 
-`scripts/ssh-config.sh public|vpn|bastion` writes
+`scripts/ssh-config.sh vpn|bastion` writes
 `ansible/inventory/ssh_config`, which picks the way to the proxy and jumps
 from it to the nodes, with the pinned host keys. Ansible (`ansible.cfg`),
 `scripts/verify.sh` and you all go through it, by inventory name:
@@ -132,13 +136,13 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
   - It has no external address and no service account.
   - Its SSH is open only to IAP (35.235.240.0/20), with OS Login.
   - Its traffic leaves through Cloud NAT from the one address in
-    `breakGlassCidrs`, the only public SSH source the proxy admits besides
-    the deploy runners.
+    `breakGlassCidrs`, the only public SSH source the proxy admits.
   - It installs security updates daily and reboots at 04:00 UTC when one
     needs it.
 - **Who may use it:** you (project owner), and `watchtower-deployer`, which
   has OS Login on that VM and an IAP tunnel to its port 22, nothing more.
-  The deploy uses it when the proxy is rebuilt.
+  The deploy uses it when dispatched with `ssh_via=bastion`: when wg-easy
+  is down, the proxy is being rebuilt, or the environment is new.
 - **Rebuilding it:**
   - `scripts/bootstrap.sh` (step 7) makes the bastion, and writes its NAT
     address and SSH host key into `infra/cloud/Pulumi.prod.yaml`
@@ -188,9 +192,10 @@ The proxy's reboot is a minute of no ingest and no UI.
 
 Each host runs a raw nftables ruleset in its own table, `inet watchtower`
 (`ansible/roles/firewall`), loaded by `watchtower-nftables.service`. It
-mirrors the Hetzner Cloud Firewalls from the same `ciCidrs` and
-`wireguardAllowCidrs`. SSH: on the proxy from the deploy runners and from
-WireGuard peers on the tunnel address; on a node only from the proxy's
+mirrors the Hetzner Cloud Firewalls from the same `breakGlassCidrs` and
+`wireguardAllowCidrs`. SSH: on the proxy from WireGuard peers (the deploy
+among them) on the tunnel address and from the bastion on its public one;
+on a node only from the proxy's
 private address. On the mesh (wg1), nodes reach each other fully and the
 proxy only the ports Caddy proxies to. Kafka, etcd, Patroni and
 Postgres have no authentication of their own beyond Postgres's: the
@@ -378,6 +383,11 @@ mesh key; every other host's wg1 picks it up in the same run. A rebuild
 from CI instead needs `allow_replace=true` (the preview guard refuses
 otherwise).
 
+**Rebuilding the proxy** takes the VPN down with it, the deploy's way in
+included. Dispatch with `ssh_via=bastion` too: the deploy goes through the
+bastion, reinstalls the proxy, and wg-easy comes back from its database on
+the data volume with every peer, the deploy's own among them.
+
 ## Log archive
 
 ```bash
@@ -444,7 +454,7 @@ Old versions stay in Secret Manager's history until destroyed:
 | Loki "no org id" | Client without `X-Scope-OrgID` | Fix the Alloy config |
 | Deploy: `S3Bucket ... expected non-nil error with nil state during Create` | Hetzner created the bucket, but it didn't show yet when the provider read it back, so Pulumi never recorded it | Adopt it, then rerun: `pulumi import minio:index/s3Bucket:S3Bucket <bucket> <bucket> --provider hetzner-s3=urn:pulumi:prod::watchtower-cloud::pulumi:providers:minio::hetzner-s3 --generate-code=false` from `infra/cloud` after `source scripts/env.sh` |
 | Healthchecks.io: a host's check is down | The host reported problems twice in a row, or stopped reporting (down, cut off from the internet, its timer dead) | The alert lists the problems. If it went silent: is the server up (Hetzner Console), and `systemctl status watchtower-health.timer` on it. `watchtower-health check` shows what it sees now |
-| Healthchecks.io: `watchtower-deploy` is down | A deploy job failed, or the 05:00 UTC run (Monday to Saturday) never came | The ping's body links the failed run; its log says which job. No run at all: is Gitea's scheduler running, and is `deploy.yml` on main intact? Fix, then dispatch `deploy.yml` (or merge); the next success clears it |
+| Healthchecks.io: `watchtower-deploy` is down | A deploy job failed, or the 05:00 UTC run (Monday to Saturday) never came | The ping's body links the failed run; its log says which job. If `hosts` failed with "the tunnel to 10.8.0.1:22 never came up", wg-easy or the proxy is down: dispatch with `ssh_via=bastion`, which reinstalls the proxy without the VPN. No run at all: is Gitea's scheduler running, and is `deploy.yml` on main intact? Fix, then dispatch `deploy.yml` (or merge); the next success clears it |
 | Healthchecks.io: the backup check is down | The nightly backup failed or never ran | The alert carries the run's log; else `journalctl -u watchtower-pg-backup -n 50` on the leader. Usual causes: a cluster S3 key replaced but not yet deployed, no Patroni leader, or the volume not mounted. `systemctl start watchtower-pg-backup` on every node retries |
 | Tempo queries miss recent traces | A live-store or the Kafka path | `systemctl status 'tempo-*'` on each node; Kafka's under-replicated partitions |
 

@@ -2,13 +2,13 @@
 # Watchtower host firewall. Managed by Ansible (roles/firewall).
 #
 # The host layer under the Hetzner Cloud Firewall. It mirrors that firewall
-# from the same lists (the cloud stack's ciCidrs, breakGlassCidrs and wireguardAllowCidrs,
+# from the same lists (the cloud stack's breakGlassCidrs and wireguardAllowCidrs,
 # handed over in the inventory), so a host stays filtered if the cloud
 # firewall is ever detached, and it is the only filter on the private
 # network, the mesh and the tunnel. Layers, outside in:
-#   1. Hetzner Cloud Firewall: on the proxy only, SSH from the deploy runners
-#      and the break-glass bastion, and UDP 51820; the nodes take nothing on
-#      their public addresses
+#   1. Hetzner Cloud Firewall: on the proxy only, SSH from the break-glass
+#      bastion and UDP 51820; the nodes take nothing on their public
+#      addresses
 #   2. this ruleset: the same; SSH to the proxy from WireGuard peers on the
 #      tunnel address, and to a node from the proxy's private address; the
 #      mesh transport from the private network; on wg1, everything between
@@ -52,8 +52,6 @@ table inet watchtower {
 {{ cidr_set('mesh_nodes', 'ipv4_addr', groups['nodes'] | map('extract', hostvars, 'mesh_ip') | list) }}
 {{ cidr_set('mesh_proxy', 'ipv4_addr', groups['proxy'] | map('extract', hostvars, 'mesh_ip') | list) }}
 {% if 'proxy' in group_names %}
-{{ cidr_set('ci_v4', 'ipv4_addr', watchtower_ci_cidrs | reject('search', ':') | list) }}
-{{ cidr_set('ci_v6', 'ipv6_addr', watchtower_ci_cidrs | select('search', ':') | list) }}
 {{ cidr_set('break_glass_v4', 'ipv4_addr', watchtower_break_glass_cidrs | reject('search', ':') | list) }}
 {{ cidr_set('break_glass_v6', 'ipv6_addr', watchtower_break_glass_cidrs | select('search', ':') | list) }}
 {{ cidr_set('wireguard_v4', 'ipv4_addr', watchtower_wireguard_cidrs | reject('search', ':') | list) }}
@@ -104,12 +102,10 @@ table inet watchtower {
         # and nothing else.
         iifname "wg0" ip daddr {{ watchtower_tunnel_ip }} tcp dport { {{ (edge_listeners + [22]) | join(', ') }} } accept
 
-        # SSH on the public address from the deploy runners and the
-        # break-glass bastion only. No rate limit: one shared budget would
-        # let a scanner lock the deploy out. fail2ban bans per address
-        # instead.
-        ip saddr @ci_v4 tcp dport 22 accept
-        ip6 saddr @ci_v6 tcp dport 22 accept
+        # SSH on the public address from the break-glass bastion only; the
+        # deploy and people come in over the tunnel. No rate limit: one
+        # shared budget would let a scanner lock break glass out. fail2ban
+        # bans per address instead.
         ip saddr @break_glass_v4 tcp dport 22 accept
         ip6 saddr @break_glass_v6 tcp dport 22 accept
 {% endif %}

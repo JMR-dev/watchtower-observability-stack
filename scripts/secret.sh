@@ -65,9 +65,9 @@ valid() {
 }
 
 # The ids the deploy workflow reads: its setup steps' `secrets:` lines,
-# NAME=id or @NAME=id (.gitea/actions/setup).
+# NAME=id or @NAME=id, optional with a leading ? (.gitea/actions/setup).
 deploy_ids() {
-  sed -nE 's/^[[:space:]]+@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)[[:space:]]*$/\1/p' "$workflow" | sort -u
+  sed -nE 's/^[[:space:]]+\??@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)[[:space:]]*$/\1/p' "$workflow" | sort -u
 }
 
 exists() { gcloud secrets describe "$1" --project "$PROJECT" >/dev/null 2>&1; }

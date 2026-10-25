@@ -138,8 +138,9 @@ func TestWorkflowReadsEverySecret(t *testing.T) {
 		}
 		readBack[id] = true
 	}
-	// The setup action's `secrets:` lines: NAME=id or @NAME=id.
-	line := regexp.MustCompile(`(?m)^\s+@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)\s*$`)
+	// The setup action's `secrets:` lines: NAME=id or @NAME=id, optional
+	// with a leading ?.
+	line := regexp.MustCompile(`(?m)^\s+\??@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)\s*$`)
 	matches := line.FindAllStringSubmatch(string(b), -1)
 	if len(matches) == 0 {
 		t.Fatal("deploy.yml reads no secrets through the setup action")

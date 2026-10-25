@@ -8,7 +8,10 @@
 #                      from 07:00 UTC)
 #   workflow_dispatch  allow_replace=true to let a preview replace or delete a
 #                      server, an IP, a volume or a bucket (check the runbook
-#                      first: servers are replaced delete-first)
+#                      first: servers are replaced delete-first);
+#                      ssh_via=bastion to reach the proxy through the
+#                      break-glass bastion, when wg-easy is down or the proxy
+#                      is being rebuilt
 #
 #   guard ─ images (caddy, patroni, wg-easy) ─ cloud ─ hosts ─ report
 #
@@ -22,8 +25,9 @@
 # image jobs alone hold another one, GAR_PUSH_KEY, which can only push to the
 # Artifact Registry repo (docs/required-secrets.md). Every job that writes a
 # key ends with the cleanup step, because composite actions have no post
-# hook. The Gitea runners reach SSH from their Cloud NAT address
-# (34.26.149.196), which the Hetzner firewalls admit.
+# hook. The hosts job reaches the proxy over the VPN, as the deploy's own
+# WireGuard peer through wireproxy (scripts/vpn-tunnel.sh), or through the
+# bastion over IAP; no runner address may SSH to the hosts.
 name: deploy
 
 on:
@@ -39,6 +43,11 @@ on:
         description: Allow replacing or deleting servers, IPs, volumes or buckets
         type: boolean
         default: false
+      ssh_via:
+        description: The way to the proxy (bastion when wg-easy is down or the proxy is being rebuilt)
+        type: choice
+        options: [vpn, bastion]
+        default: vpn
 
 # One deploy at a time, and never cancelled: a cancelled `pulumi up` leaves
 # pending operations, a cancelled Ansible run a half-rolled cluster.
@@ -48,6 +57,7 @@ concurrency:
 
 env:
   ALLOW_REPLACE: ${{ inputs.allow_replace || 'false' }}
+  SSH_VIA: ${{ inputs.ssh_via || 'vpn' }}
 
 jobs:
   guard:
@@ -169,7 +179,7 @@ jobs:
       # secrets); the deploy reads them here, masked, and nowhere else.
       - uses: ./.gitea/actions/setup
         with:
-          tools: pulumi ansible awscli
+          tools: pulumi ansible awscli wireproxy
           gcp-key: ${{ secrets.GCP_DEPLOYER_KEY }}
           secrets: |
             PULUMI_CONFIG_PASSPHRASE=pulumi-passphrase
@@ -190,6 +200,9 @@ jobs:
             HEALTHCHECKS_HOST_URLS=healthchecks-host-urls
             @CADDY_DNS_KEY_FILE=caddy-dns-key
             @GAR_PULL_KEY_FILE=gar-pull-key
+            # None before the first deploy makes it (a fresh environment
+            # deploys with ssh_via=bastion).
+            ?@WIREGUARD_DEPLOY_PEER_FILE=wireguard-deploy-peer
       - name: Inventory and pinned host keys from the cloud stack
         working-directory: infra/cloud
         run: |
@@ -199,34 +212,48 @@ jobs:
           pulumi stack output inventory >../../ansible/inventory/hosts.yml
           pulumi stack output knownHosts >../../ansible/inventory/known_hosts
           echo "ARCHIVE_BUCKET=$(pulumi stack output buckets --json | jq -r '."logs-archive"')" >>"$GITHUB_ENV"
-      # The proxy on its public address, from the runners' NAT (ciCidrs).
-      - name: SSH config for Ansible and verify
-        run: scripts/ssh-config.sh public
-      - name: Install every host
-        working-directory: ansible
+      # One step, so the VPN tunnel (a background wireproxy) lives through
+      # both the install and the verify.
+      - name: Install every host, then verify (via ${{ env.SSH_VIA }})
         env:
           ALPINE_RELEASE: ${{ needs.guard.outputs.alpine_release }}
           ALPINE_DIGEST: ${{ needs.guard.outputs.alpine_digest }}
           IMAGE_DATE: ${{ needs.guard.outputs.image_date }}
         run: |
           set -euo pipefail
-          ansible-galaxy collection install -r requirements.yml -p .collections >/dev/null
-          # Our images' tags: the ones the images jobs just pushed or found.
-          ../scripts/image-tag.sh --vars >image-tags.json
-          cat image-tags.json
-          # -vvv: the deploy log shows each task's arguments, results and SSH
-          # traffic. no_log tasks stay hidden at any verbosity, and every
-          # secret value this job read is masked.
-          ansible-playbook -vvv playbooks/site.yml -e @image-tags.json
-      - name: Verify
-        env:
-          ALPINE_RELEASE: ${{ needs.guard.outputs.alpine_release }}
-          ALPINE_DIGEST: ${{ needs.guard.outputs.alpine_digest }}
-          IMAGE_DATE: ${{ needs.guard.outputs.image_date }}
-        run: scripts/verify.sh "$ARCHIVE_BUCKET"
+          # The way to the proxy (docs/runbook.md, "Host access"): over the
+          # VPN as the deploy's own peer, through wireproxy; or through the
+          # break-glass bastion over IAP, as the deployer.
+          if [[ "$SSH_VIA" == bastion ]]; then
+            export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$GOOGLE_APPLICATION_CREDENTIALS"
+            scripts/ssh-config.sh bastion
+          else
+            if [[ -z "${WIREGUARD_DEPLOY_PEER_FILE:-}" ]]; then
+              echo "No deploy VPN peer yet (a fresh environment): dispatch deploy.yml with ssh_via=bastion" >&2
+              exit 1
+            fi
+            trap 'scripts/vpn-tunnel.sh stop' EXIT
+            forward="$(scripts/vpn-tunnel.sh start "$WIREGUARD_DEPLOY_PEER_FILE")"
+            export "${forward?}"
+            scripts/ssh-config.sh vpn
+          fi
+          (
+            cd ansible
+            ansible-galaxy collection install -r requirements.yml -p .collections >/dev/null
+            # Our images' tags: the ones the images jobs just pushed or found.
+            ../scripts/image-tag.sh --vars >image-tags.json
+            cat image-tags.json
+            # -vvv: the deploy log shows each task's arguments, results and
+            # SSH traffic. no_log tasks stay hidden at any verbosity, and
+            # every secret value this job read is masked.
+            ansible-playbook -vvv playbooks/site.yml -e @image-tags.json
+          )
+          scripts/verify.sh "$ARCHIVE_BUCKET"
       - name: Remove keys
         if: always()
-        run: rm -rf "${RUNNER_TEMP}/gcp-deployer.json" "${RUNNER_TEMP}/secrets" "${RUNNER_TEMP}/gcloud" ansible/inventory/known_hosts ansible/inventory/ssh_config ansible/inventory/bastion_known_hosts ansible/inventory/bastion_key ansible/inventory/bastion_key.pub
+        run: |
+          scripts/vpn-tunnel.sh stop || true
+          rm -rf "${RUNNER_TEMP}/gcp-deployer.json" "${RUNNER_TEMP}/secrets" "${RUNNER_TEMP}/gcloud" ansible/inventory/known_hosts ansible/inventory/ssh_config ansible/inventory/bastion_known_hosts ansible/inventory/bastion_key ansible/inventory/bastion_key.pub
 
   # Its own small job, so a run that failed anywhere, or never reached the
   # hosts, still reports.

@@ -43,7 +43,6 @@ func baseConfig() map[string]string {
 		"watchtower:sshPublicKey":     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItest test@example",
 		"watchtower:bucketPrefix":     "test-wt",
 		"watchtower:hetznerProjectId": "1234",
-		"watchtower:ciCidrs":          `["34.26.149.196/32"]`,
 		"watchtower:breakGlassCidrs":  `["35.231.222.153/32"]`,
 	}
 	// Any ed25519 public key will do for the bastion's.
@@ -212,7 +211,7 @@ func ports(r pulumitest.Resource) map[string][]string {
 	return out
 }
 
-// SSH only to the proxy and only from the deploy runners; WireGuard on the
+// SSH only to the proxy and only from the bastion; WireGuard on the
 // proxy only; nothing else from the internet.
 func TestFirewalls(t *testing.T) {
 	m := mustRun(t, baseConfig())
@@ -223,14 +222,13 @@ func TestFirewalls(t *testing.T) {
 	if len(fws) != 2 {
 		t.Fatalf("want two firewalls, got %v", keysOf(fws))
 	}
-	ssh := []string{"34.26.149.196/32", "35.231.222.153/32"}
+	ssh := []string{"35.231.222.153/32"}
 	world := []string{"0.0.0.0/0", "::/0"}
 	for name, want := range map[string]struct {
 		role  string
 		rules map[string][]string
 	}{
-		// No public SSH on the nodes; the proxy's only from the deploy
-		// runners and the bastion.
+		// No public SSH on the nodes; the proxy's only from the bastion.
 		"watchtower-nodes": {names.RoleNode, map[string][]string{"icmp/": world}},
 		"watchtower-proxy": {names.RoleProxy, map[string][]string{"tcp/22": ssh, "udp/51820": world, "icmp/": world}},
 	} {
@@ -612,15 +610,13 @@ func TestInventoryGroups(t *testing.T) {
 // Ansible gets every shared name from here, never spelling one itself.
 func TestInventoryVars(t *testing.T) {
 	cfg := with(map[string]string{
-		"watchtower:ciCidrs":             `["203.0.113.9/32","2001:db8::9/128"]`,
-		"watchtower:breakGlassCidrs":     `["198.51.100.99/32"]`,
+		"watchtower:breakGlassCidrs":     `["198.51.100.99/32","2001:db8::9/128"]`,
 		"watchtower:wireguardAllowCidrs": `["192.0.2.0/24"]`,
 	})
 	inv := inventory(t, cfg)
 	vars := inv["all"].(map[string]interface{})["vars"].(map[string]interface{})
 	for key, want := range map[string]interface{}{
-		"watchtower_ci_cidrs":          []interface{}{"203.0.113.9/32", "2001:db8::9/128"},
-		"watchtower_break_glass_cidrs": []interface{}{"198.51.100.99/32"},
+		"watchtower_break_glass_cidrs": []interface{}{"198.51.100.99/32", "2001:db8::9/128"},
 		"watchtower_bastion": map[string]interface{}{
 			"name": names.BastionName, "zone": names.BastionZone,
 			"project": names.GCPProject, "host_key": cfg["watchtower:bastionHostKey"],
@@ -696,16 +692,13 @@ func TestConfigValidation(t *testing.T) {
 		"small node volume":     {with(map[string]string{"watchtower:nodeVolumeGb": "9"}), "nodeVolumeGb 9"},
 		"huge proxy volume":     {with(map[string]string{"watchtower:proxyVolumeGb": "10241"}), "proxyVolumeGb 10241"},
 		"rsa key":               {with(map[string]string{"watchtower:sshPublicKey": "ssh-rsa AAAA"}), "ed25519"},
-		"no ci cidrs":           {with(map[string]string{"watchtower:ciCidrs": "[]"}), "ciCidrs must not be empty"},
 		"no break-glass cidrs":  {with(map[string]string{"watchtower:breakGlassCidrs": "[]"}), "breakGlassCidrs must not be empty"},
 		"missing break glass":   {with(map[string]string{"watchtower:breakGlassCidrs": ""}), "watchtower:breakGlassCidrs"},
 		"open break-glass cidr": {with(map[string]string{"watchtower:breakGlassCidrs": `["::/0"]`}), "breakGlassCidrs must not contain"},
 		"bad bastion host key":  {with(map[string]string{"watchtower:bastionHostKey": "ssh-rsa AAAA"}), "bastionHostKey must be"},
 		"missing bastion key":   {with(map[string]string{"watchtower:bastionHostKey": ""}), "watchtower:bastionHostKey"},
-		"missing ci cidrs":      {with(map[string]string{"watchtower:ciCidrs": ""}), "watchtower:ciCidrs"},
 		"no wireguard cidrs":    {with(map[string]string{"watchtower:wireguardAllowCidrs": "[]"}), "wireguardAllowCidrs must not be empty"},
-		"bad cidr":              {with(map[string]string{"watchtower:ciCidrs": `["300.1.1.1/8"]`}), "invalid CIDR"},
-		"open ci cidr":          {with(map[string]string{"watchtower:ciCidrs": `["0.0.0.0/0"]`}), "ciCidrs must not contain"},
+		"bad cidr":              {with(map[string]string{"watchtower:breakGlassCidrs": `["300.1.1.1/8"]`}), "invalid CIDR"},
 		"bad bucket prefix":     {with(map[string]string{"watchtower:bucketPrefix": "Bad_Prefix"}), "bucketPrefix"},
 		"zero project":          {with(map[string]string{"watchtower:hetznerProjectId": "0"}), "numeric project ID"},
 		"placeholder project":   {with(map[string]string{"watchtower:hetznerProjectId": "REPLACE"}), "hetznerProjectId"},
@@ -768,7 +761,7 @@ func TestStackFileKeys(t *testing.T) {
 		t.Error("Pulumi.prod.yaml holds a secret; store it in Secret Manager (scripts/secret.sh put)")
 	}
 	for _, key := range []string{
-		"bucketPrefix", "hetznerProjectId: \"16527471\"", "sshPublicKey", "ciCidrs", "breakGlassCidrs", "bastionHostKey",
+		"bucketPrefix", "hetznerProjectId: \"16527471\"", "sshPublicKey", "breakGlassCidrs", "bastionHostKey",
 		"location: fsn1", "nodeServerType: cax31", "proxyServerType: cax11", "nodeCount: \"3\"", "deleteProtection: \"true\"",
 	} {
 		if !strings.Contains(s, "watchtower:"+key) {
