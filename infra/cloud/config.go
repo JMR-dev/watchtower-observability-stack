@@ -29,11 +29,10 @@ type Config struct {
 	ProxyVolumeGB int
 
 	SSHPublicKey string
-	// CICIDRs reach SSH on the proxy's public address: the deploy runners.
-	CICIDRs []string
-	// BreakGlassCIDRs reach it too: the break-glass bastion's Cloud NAT
-	// address (scripts/bootstrap.sh), the way in when the VPN is down and the
-	// deploy's when the proxy is rebuilt. People come in over the VPN.
+	// BreakGlassCIDRs alone reach SSH on the proxy's public address: the
+	// break-glass bastion's Cloud NAT address (scripts/bootstrap.sh), the
+	// way in when the VPN is down and the deploy's when the proxy is
+	// rebuilt. People and the deploy come in over the VPN.
 	BreakGlassCIDRs []string
 	// BastionHostKey is the bastion's SSH host key, pinned like the hosts'.
 	BastionHostKey string
@@ -80,7 +79,6 @@ func loadConfig(ctx *pulumi.Context) (*Config, error) {
 		GCPProject:       r.String("gcpProject", names.GCPProject),
 		DNSZone:          r.String("dnsZone", "watchtower"),
 	}
-	r.Object("ciCidrs", &cfg.CICIDRs, true)
 	r.Object("breakGlassCidrs", &cfg.BreakGlassCIDRs, true)
 	r.Object("wireguardAllowCidrs", &cfg.WireGuardCIDRs, false)
 	cfg.validate(r)
@@ -108,28 +106,23 @@ func (c *Config) validate(r *stackcfg.Reader) {
 	if !sshKeyRE.MatchString(c.BastionHostKey) {
 		r.Fail("bastionHostKey must be an ed25519 public key")
 	}
-	if len(c.CICIDRs) == 0 {
-		r.Fail("ciCidrs must not be empty: the deploy reaches the hosts from there")
-	}
 	if len(c.BreakGlassCIDRs) == 0 {
 		r.Fail("breakGlassCidrs must not be empty: the bastion reaches the proxy from there")
 	}
 	if len(c.WireGuardCIDRs) == 0 {
 		r.Fail("wireguardAllowCidrs must not be empty")
 	}
-	for _, list := range [][]string{c.CICIDRs, c.BreakGlassCIDRs, c.WireGuardCIDRs} {
+	for _, list := range [][]string{c.BreakGlassCIDRs, c.WireGuardCIDRs} {
 		for _, cidr := range list {
 			if _, _, err := net.ParseCIDR(cidr); err != nil {
 				r.Fail("invalid CIDR %q", cidr)
 			}
 		}
 	}
-	// SSH is never open to the world: its sources must be specific.
-	for key, list := range map[string][]string{"ciCidrs": c.CICIDRs, "breakGlassCidrs": c.BreakGlassCIDRs} {
-		for _, cidr := range list {
-			if strings.HasSuffix(cidr, "/0") {
-				r.Fail("%s must not contain %q", key, cidr)
-			}
+	// SSH is never open to the world: its source must be specific.
+	for _, cidr := range c.BreakGlassCIDRs {
+		if strings.HasSuffix(cidr, "/0") {
+			r.Fail("breakGlassCidrs must not contain %q", cidr)
 		}
 	}
 	if !bucketPrefixRE.MatchString(c.BucketPrefix) {

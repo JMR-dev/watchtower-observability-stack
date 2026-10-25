@@ -10,6 +10,8 @@ description: |
     uv          uv-<arch>-unknown-linux-gnu.tar.gz.sha256 on the GitHub release
     alloy       SHA256SUMS on the GitHub release
     actionlint  actionlint_<v>_checksums.txt on the GitHub release
+    wireproxy   checksums.txt on the GitHub release (windtf/wireproxy,
+                formerly whyvl/wireproxy)
     shellcheck  computed from the GitHub release tarball on 2026-10-23
                 (the project publishes no checksum file)
     awscli      computed from the official zip on 2026-10-23 (AWS publishes
@@ -28,7 +30,8 @@ description: |
   Manager secret (scripts/bootstrap.sh creates and grants every id
   deploy.yml names here). NAME=id exports the value as NAME (one line
   only); @NAME=id writes it to a 0600 file and exports its path as NAME (for
-  key files). Every line of every value is masked in the log first. Reading
+  key files). A leading ? (?NAME=id, ?@NAME=id) makes it optional: a secret
+  with no version yet leaves NAME unset instead of failing the job. Every line of every value is masked in the log first. Reading
   needs `gcp-key` and installs gcloud.
 
   Composite actions have no post step, so a job that passes a key must end
@@ -36,7 +39,7 @@ description: |
 
 inputs:
   tools:
-    description: Space-separated subset of "go pulumi alloy shellcheck actionlint awscli gcloud ansible ansible-lint semgrep"
+    description: Space-separated subset of "go pulumi alloy shellcheck actionlint wireproxy awscli gcloud ansible ansible-lint semgrep"
     required: false
     default: ""
   gcp-key:
@@ -71,6 +74,8 @@ runs:
         ALLOY_SHA256: 1eadb46a0640127184250173acd9b4145e4d590680db37ffe66fa8afd07f04cf
         ACTIONLINT_VERSION: "1.7.12"
         ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        WIREPROXY_VERSION: "1.1.3"
+        WIREPROXY_SHA256: e88c1d090740373fc606c1bafd81d9a5eadc642cce5667616e20e9d7a444f51c
         SHELLCHECK_VERSION: "0.11.0"
         SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
         AWSCLI_VERSION: "2.38.5"
@@ -155,6 +160,11 @@ runs:
                 "$ACTIONLINT_SHA256" "${tools_dir}/actionlint.tgz"
               tar -C "$bin" -xzf "${tools_dir}/actionlint.tgz" actionlint
               ;;
+            wireproxy)
+              fetch "https://github.com/windtf/wireproxy/releases/download/v${WIREPROXY_VERSION}/wireproxy_linux_amd64.tar.gz" \
+                "$WIREPROXY_SHA256" "${tools_dir}/wireproxy.tgz"
+              tar -C "$bin" -xzf "${tools_dir}/wireproxy.tgz" wireproxy
+              ;;
             awscli)
               fetch "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip" "$AWSCLI_SHA256" "${tools_dir}/awscli.zip"
               unzip -q -o "${tools_dir}/awscli.zip" -d "$tools_dir"
@@ -224,13 +234,24 @@ runs:
         mkdir -p "$dir"
         while read -r line; do
           [[ -n "$line" ]] || continue
-          if [[ ! "$line" =~ ^(@?)([A-Z][A-Z0-9_]*)=([a-z0-9-]+)$ ]]; then
+          if [[ ! "$line" =~ ^(\??)(@?)([A-Z][A-Z0-9_]*)=([a-z0-9-]+)$ ]]; then
             echo "bad secrets line: ${line}" >&2
             exit 1
           fi
-          as_file="${BASH_REMATCH[1]}" name="${BASH_REMATCH[2]}" id="${BASH_REMATCH[3]}"
+          optional="${BASH_REMATCH[1]}" as_file="${BASH_REMATCH[2]}" name="${BASH_REMATCH[3]}" id="${BASH_REMATCH[4]}"
           file="${dir}/${id}"
-          "$gcloud" secrets versions access latest --secret "$id" --project "$PROJECT" --out-file "$file"
+          if ! "$gcloud" secrets versions access latest --secret "$id" --project "$PROJECT" --out-file "$file" 2>"${dir}/.err"; then
+            # ?NAME=id: a secret that may have no version yet, which the job
+            # copes with (the deploy's own VPN peer, before the first deploy).
+            if [[ -n "$optional" ]]; then
+              echo "${id} has no version yet; ${name} stays unset"
+              rm -f "$file" "${dir}/.err"
+              continue
+            fi
+            cat "${dir}/.err" >&2
+            exit 1
+          fi
+          rm -f "${dir}/.err"
           # Masked before anything could print it. Semgrep's add-mask rule
           # warns that a job which stops workflow commands defeats masking;
           # here, anyone able to change a workflow that gets these secrets
