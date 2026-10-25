@@ -48,7 +48,23 @@
       SystemMaxUse=2G
       SystemMaxFileSize=128M
       MaxRetentionSec=14day
-  notify: Restart journald
+  notify: [Restart journald, Flush the journal to disk]
+
+# Storage=persistent alone isn't enough on AlmaLinux 10: a restarted
+# journald keeps writing to /run/log/journal until /var/log/journal exists
+# and the journal is flushed into it.
+- name: The persistent journal's directory
+  ansible.builtin.file:
+    path: /var/log/journal
+    state: directory
+    mode: "2755"
+    owner: root
+    group: systemd-journal
+  notify: [Restart journald, Flush the journal to disk]
+
+# Now, not at the end of the play: Fluent Bit (roles/logship) reads it.
+- name: Apply the journal settings
+  ansible.builtin.meta: flush_handlers
 
 - name: Ensure SELinux enforcing
   ansible.posix.selinux:

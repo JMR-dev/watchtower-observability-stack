@@ -4,16 +4,19 @@
 # runs sharded across the three. Mimir's documented way to scale monolithic
 # mode; 3.2.3 crashes if ingest storage is enabled in a -target=all process.
 
+# The config directory is mounted whole into a container that runs as a
+# non-root user, which has to be able to enter it: 0755. It holds no secrets
+# (those come from podman secrets).
 - name: Mimir directories
   ansible.builtin.file:
     path: "{{ item.path }}"
     state: directory
-    mode: "0750"
+    mode: "{{ item.mode }}"
     owner: "{{ item.owner }}"
     group: "{{ item.owner }}"
   loop:
-    - {path: "{{ watchtower_data }}/mimir", owner: 10001}
-    - {path: "{{ watchtower_config }}/mimir", owner: root}
+    - {path: "{{ watchtower_data }}/mimir", owner: 10001, mode: "0750"}
+    - {path: "{{ watchtower_config }}/mimir", owner: root, mode: "0755"}
 
 - name: Mimir config and runtime overrides
   ansible.builtin.template:

@@ -6,11 +6,14 @@
 # workers compact and enforce retention, metrics generators turn spans into
 # Mimir series.
 
+# The config directory is mounted whole into a container that runs as a
+# non-root user, which has to be able to enter it: 0755. It holds no secrets
+# (those come from podman secrets).
 - name: Tempo directories
   ansible.builtin.file:
     path: "{{ item.0 }}/{{ item.1 }}"
     state: directory
-    mode: "0750"
+    mode: "{{ '0750' if item.0 == watchtower_data + '/tempo' else '0755' }}"
     owner: "{{ 10001 if item.0 == watchtower_data + '/tempo' else 'root' }}"
     group: "{{ 10001 if item.0 == watchtower_data + '/tempo' else 'root' }}"
   loop: "{{ [watchtower_data + '/tempo', watchtower_config + '/tempo'] | product(tempo_components) | list }}"

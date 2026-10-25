@@ -4,19 +4,22 @@
 # whichever instance Caddy picks. Unified alerting runs as an HA cluster over
 # the mesh, so a notification goes out once.
 
+# The config directory is mounted whole into a container that runs as a
+# non-root user, which has to be able to enter it: 0755. It holds no secrets
+# (those come from podman secrets).
 - name: Grafana directories
   ansible.builtin.file:
     path: "{{ item.path }}"
     state: directory
-    mode: "0750"
+    mode: "{{ item.mode }}"
     owner: "{{ item.owner }}"
     group: "{{ item.owner }}"
   loop:
     # The image's grafana user.
-    - {path: "{{ watchtower_data }}/grafana", owner: 472}
-    - {path: "{{ watchtower_config }}/grafana", owner: root}
-    - {path: "{{ watchtower_config }}/grafana/provisioning", owner: root}
-    - {path: "{{ watchtower_config }}/grafana/provisioning/datasources", owner: root}
+    - {path: "{{ watchtower_data }}/grafana", owner: 472, mode: "0750"}
+    - {path: "{{ watchtower_config }}/grafana", owner: root, mode: "0755"}
+    - {path: "{{ watchtower_config }}/grafana/provisioning", owner: root, mode: "0755"}
+    - {path: "{{ watchtower_config }}/grafana/provisioning/datasources", owner: root, mode: "0755"}
 
 # The database and its owner, once, on whichever member leads.
 - name: Find the Postgres leader
