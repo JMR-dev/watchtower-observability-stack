@@ -1,8 +1,7 @@
 ---
 # Host firewall: raw nftables in a table of our own (templates/watchtower.nft.j2),
-# loaded by a unit of our own. No firewalld: it rejects pod-to-pod traffic
-# addressed by pod IP unless the pod and Service ranges are trusted, which
-# breaks Loki's memberlist gossip among other things.
+# loaded by a unit of our own. No firewalld: one ruleset we can read and
+# check in CI, the same on every host.
 
 - name: Install nftables
   ansible.builtin.dnf:
@@ -49,7 +48,7 @@
 - name: Gather service facts
   ansible.builtin.service_facts:
 
-# Only once our ruleset is loaded, so the node is never left unfiltered.
+# Only once our ruleset is loaded, so the host is never left unfiltered.
 - name: Stop firewalld
   ansible.builtin.systemd_service:
     name: firewalld

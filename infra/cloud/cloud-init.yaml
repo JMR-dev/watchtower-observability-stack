@@ -1,6 +1,6 @@
 #cloud-config
 # Minimal bootstrap: python3 for Ansible and SSH hardening. Everything else,
-# including the Kubernetes install, is Ansible (ansible/playbooks/site.yml).
+# podman and every container included, is Ansible (ansible/playbooks/site.yml).
 # Pulumi ignores later changes to this file: it only runs on first boot.
 
 package_update: true

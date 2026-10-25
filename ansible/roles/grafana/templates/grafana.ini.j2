@@ -1,0 +1,66 @@
+; Managed by Ansible (roles/grafana). Secrets are read from podman secret
+; files with $__file{}; none is in this file.
+
+[server]
+http_addr = {{ mesh_ip }}
+http_port = {{ watchtower_ports.grafana.http }}
+domain = {{ watchtower_domain }}
+root_url = https://{{ watchtower_domain }}/
+enforce_domain = false
+
+[database]
+type = postgres
+; Every node's Postgres; with PGTARGETSESSIONATTRS=read-write the driver
+; settles on whichever is primary.
+host = {{ watchtower_node_ips | join(',') }}:{{ watchtower_ports.postgres }}
+name = grafana
+user = grafana
+password = $__file{/run/secrets/grafana-db-password}
+ssl_mode = disable
+
+[security]
+admin_user = admin
+admin_password = $__file{/run/secrets/grafana-admin-password}
+; The same on all three: it encrypts datasource secrets in the shared DB.
+secret_key = $__file{/run/secrets/grafana-secret-key}
+disable_initial_admin_creation = false
+cookie_secure = true
+cookie_samesite = lax
+allow_embedding = false
+strict_transport_security = true
+content_security_policy = true
+
+[users]
+allow_sign_up = false
+allow_org_create = false
+auto_assign_org = false
+viewers_can_edit = false
+
+[auth.anonymous]
+enabled = false
+
+[analytics]
+reporting_enabled = false
+check_for_updates = false
+check_for_plugin_updates = false
+feedback_links_enabled = false
+
+[snapshots]
+external_enabled = false
+
+; A dead node behind the mesh drops packets instead of refusing; a short
+; dial timeout moves a query to the next address in seconds.
+[dataproxy]
+dialTimeout = 3
+
+[unified_alerting]
+enabled = true
+ha_listen_address = {{ mesh_ip }}:{{ watchtower_ports.grafana.alerting }}
+ha_advertise_address = {{ mesh_ip }}:{{ watchtower_ports.grafana.alerting }}
+ha_peers = {% for ip in watchtower_node_ips %}{{ ip }}:{{ watchtower_ports.grafana.alerting }}{{ ',' if not loop.last }}{% endfor %}
+
+
+; stdout only: Fluent Bit ships it to the log archive.
+[log]
+mode = console
+level = info

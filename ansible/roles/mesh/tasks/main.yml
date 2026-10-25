@@ -1,0 +1,56 @@
+---
+# wg1: the WireGuard mesh every byte between the servers goes through, over
+# the private network. Each host makes its own key here and the private half
+# never leaves it (wg1.conf loads it from the key file at PostUp); only the
+# public halves travel, as facts.
+
+- name: Ensure /etc/wireguard exists
+  ansible.builtin.file:
+    path: /etc/wireguard
+    state: directory
+    mode: "0700"
+    owner: root
+    group: root
+
+- name: Generate this host's mesh key
+  ansible.builtin.shell: umask 077 && wg genkey >/etc/wireguard/wg1.key
+  args:
+    creates: /etc/wireguard/wg1.key
+
+- name: Read this host's public key
+  ansible.builtin.shell: wg pubkey </etc/wireguard/wg1.key
+  register: mesh_pubkey
+  changed_when: false
+
+- name: Publish it to the other hosts
+  ansible.builtin.set_fact:
+    mesh_public_key: "{{ mesh_pubkey.stdout }}"
+
+- name: Render wg1.conf
+  ansible.builtin.template:
+    src: wg1.conf.j2
+    dest: /etc/wireguard/wg1.conf
+    mode: "0600"
+    owner: root
+    group: root
+  notify: Restart wg1
+
+- name: Enable and start wg1
+  ansible.builtin.systemd_service:
+    name: wg-quick@wg1
+    enabled: true
+    state: started
+
+# A changed peer list must be live before the services bind and the next
+# host joins.
+- name: Apply mesh changes now
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for every peer to answer over the mesh
+  ansible.builtin.command: ping -c 1 -W 2 {{ hostvars[item].mesh_ip }}
+  loop: "{{ (groups['proxy'] + groups['nodes']) | reject('equalto', inventory_hostname) | list }}"
+  register: mesh_ping
+  until: mesh_ping.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false

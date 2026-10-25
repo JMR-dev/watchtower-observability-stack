@@ -1,0 +1,56 @@
+---
+# Fluent Bit on every host: the journal (every container logs there, with
+# LogDriver=journald, so container logs travel this way too) and the audit
+# log, to the log-archive bucket, which keeps 90 days. The cluster key may
+# only write there (bucket policy), which is why every output uploads with
+# use_put_object.
+
+- name: Fluent Bit directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+    owner: root
+    group: root
+  loop:
+    - "{{ watchtower_data }}/fluent-bit"
+    - "{{ watchtower_config }}/fluent-bit"
+
+- name: Fluent Bit config
+  ansible.builtin.template:
+    src: fluent-bit.conf.j2
+    dest: "{{ watchtower_config }}/fluent-bit/fluent-bit.conf"
+    mode: "0644"
+  notify: Restart fluent-bit
+
+- name: Fluent Bit's S3 key
+  ansible.builtin.include_role:
+    name: quadlet
+    tasks_from: secrets
+  vars:
+    quadlet_secrets:
+      - {name: s3-cluster-access-key, value: "{{ watchtower_secret.s3_cluster_access_key }}"}
+      - {name: s3-cluster-secret-key, value: "{{ watchtower_secret.s3_cluster_secret_key }}"}
+
+- name: Restart Fluent Bit when its key changed
+  ansible.builtin.debug:
+    msg: S3 key changed
+  changed_when: quadlet_secrets_changed | bool
+  notify: Restart fluent-bit
+
+- name: Pull Fluent Bit
+  containers.podman.podman_image:
+    name: "{{ watchtower_images.fluentbit }}"
+
+- name: Fluent Bit quadlet
+  ansible.builtin.template:
+    src: fluent-bit.container.j2
+    dest: /etc/containers/systemd/fluent-bit.container
+    mode: "0644"
+  notify: Restart fluent-bit
+
+- name: Start Fluent Bit
+  ansible.builtin.systemd_service:
+    name: fluent-bit
+    state: started
+    daemon_reload: true

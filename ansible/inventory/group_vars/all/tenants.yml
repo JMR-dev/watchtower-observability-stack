@@ -1,0 +1,7 @@
+---
+# Tenants: one X-Scope-OrgID each. Grafana's main org gets a Mimir, Loki and
+# Tempo datasource per tenant (roles/grafana); scripts/onboard-tenant.sh gives
+# a tenant an org of its own.
+watchtower_tenants:
+  - slug: default
+    org_name: Default

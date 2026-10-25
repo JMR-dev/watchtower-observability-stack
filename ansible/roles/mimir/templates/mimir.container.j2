@@ -1,0 +1,34 @@
+# Managed by Ansible (roles/mimir).
+[Unit]
+Description=Mimir (monolithic, one of {{ groups['nodes'] | length }})
+Wants=network-online.target wg-quick@wg1.service
+After=network-online.target wg-quick@wg1.service
+RequiresMountsFor={{ watchtower_data }}
+
+[Container]
+Image={{ watchtower_images.mimir }}
+ContainerName=mimir
+Network=host
+# The image runs as root; nothing here needs it.
+User=10001
+Group=10001
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+LogDriver=journald
+Volume={{ watchtower_data }}/mimir:/data:Z
+Volume={{ watchtower_config }}/mimir:/etc/mimir:ro,Z
+Secret=s3-cluster-access-key,type=env,target=AWS_ACCESS_KEY_ID
+Secret=s3-cluster-secret-key,type=env,target=AWS_SECRET_ACCESS_KEY
+Exec=-config.file=/etc/mimir/mimir.yaml
+PodmanArgs=--memory={{ watchtower_memory.mimir }}m
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+# Ingesters flush and hand over on the way down.
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target

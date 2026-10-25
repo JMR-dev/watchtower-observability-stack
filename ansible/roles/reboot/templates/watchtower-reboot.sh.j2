@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Managed by Ansible (roles/reboot). Reboots this host if an update needs it
+# and, on a node, only when the other nodes can carry the load. Any doubt
+# means skip until next week, logged.
+set -euo pipefail
+log() { echo "watchtower-reboot: $*"; }
+
+if needs-restarting -r >/dev/null 2>&1; then
+  log "no reboot needed"
+  exit 0
+fi
+{% if 'nodes' in group_names %}
+
+skip() { log "$*; skipping this week"; exit 0; }
+
+# Loki and Mimir replicate three ways: the other two must be ready.
+{% for h in groups['nodes'] if h != inventory_hostname %}
+curl -fsS -m 5 http://{{ hostvars[h].mesh_ip }}:{{ watchtower_ports.loki.http }}/ready >/dev/null || skip "Loki on {{ h }} is not ready"
+curl -fsS -m 5 http://{{ hostvars[h].mesh_ip }}:{{ watchtower_ports.mimir.http }}/ready >/dev/null || skip "Mimir on {{ h }} is not ready"
+{% endfor %}
+
+# Kafka needs every partition fully replicated before a broker leaves.
+under="$(podman exec kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server={{ mesh_ip }}:{{ watchtower_ports.kafka.broker }} \
+  --describe --under-replicated-partitions)" || skip "Kafka did not answer"
+[[ -z "$under" ]] || skip "Kafka has under-replicated partitions"
+
+# Patroni: a leader and both replicas streaming.
+cluster="$(curl -fsS -m 5 http://{{ mesh_ip }}:{{ watchtower_ports.patroni }}/cluster)" || skip "Patroni did not answer"
+running="$(jq '[.members[] | select(.state == "running" or .state == "streaming")] | length' <<<"$cluster")"
+leader="$(jq -r '[.members[] | select(.role == "leader") | .name] | first // empty' <<<"$cluster")"
+[[ "$running" == {{ groups['nodes'] | length }} && -n "$leader" ]] || skip "Patroni is not fully healthy"
+
+if [[ "$leader" == "{{ inventory_hostname }}" ]]; then
+  log "handing Postgres leadership to a replica"
+  podman exec patroni patronictl -c /etc/patroni/patroni.yml switchover --leader {{ inventory_hostname }} --force
+  for _ in $(seq 30); do
+    curl -fs -m 2 http://{{ mesh_ip }}:{{ watchtower_ports.patroni }}/replica >/dev/null && break
+    sleep 2
+  done
+  curl -fs -m 2 http://{{ mesh_ip }}:{{ watchtower_ports.patroni }}/replica >/dev/null || skip "the switchover did not finish"
+fi
+{% endif %}
+
+log "rebooting for updates"
+systemctl reboot

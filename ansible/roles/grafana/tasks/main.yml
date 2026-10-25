@@ -1,0 +1,101 @@
+---
+# Grafana: three instances, one per node, sharing one Postgres database
+# (roles/patroni), so logins, orgs, dashboards and alert state are the same
+# whichever instance Caddy picks. Unified alerting runs as an HA cluster over
+# the mesh, so a notification goes out once.
+
+- name: Grafana directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+  loop:
+    # The image's grafana user.
+    - {path: "{{ watchtower_data }}/grafana", owner: 472}
+    - {path: "{{ watchtower_config }}/grafana", owner: root}
+    - {path: "{{ watchtower_config }}/grafana/provisioning", owner: root}
+    - {path: "{{ watchtower_config }}/grafana/provisioning/datasources", owner: root}
+
+# The database and its owner, once, on whichever member leads.
+- name: Find the Postgres leader
+  ansible.builtin.uri:
+    url: http://{{ hostvars[item].mesh_ip }}:{{ watchtower_ports.patroni }}/primary
+    status_code: [200, 503]
+  loop: "{{ groups['nodes'] }}"
+  register: grafana_pg_primary
+  run_once: true
+
+- name: Create Grafana's role and database (or reset its password)
+  ansible.builtin.command:
+    argv: [podman, exec, -i, patroni, psql, -d, postgres, -v, ON_ERROR_STOP=1, -q]
+    stdin: |
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'grafana') THEN
+          CREATE ROLE grafana LOGIN PASSWORD '{{ watchtower_secret.grafana_db_password | replace("'", "''") }}';
+        ELSE
+          ALTER ROLE grafana LOGIN PASSWORD '{{ watchtower_secret.grafana_db_password | replace("'", "''") }}';
+        END IF;
+      END
+      $$;
+      SELECT 'CREATE DATABASE grafana OWNER grafana' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'grafana')\gexec
+  delegate_to: "{{ (grafana_pg_primary.results | selectattr('status', 'equalto', 200) | first).item }}"
+  run_once: true
+  changed_when: false
+  no_log: true
+
+- name: Grafana config and datasources
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ watchtower_config }}/grafana/{{ item.dest }}"
+    mode: "0644"
+  loop:
+    - {src: grafana.ini.j2, dest: grafana.ini}
+    - {src: datasources.yaml.j2, dest: provisioning/datasources/watchtower.yaml}
+  notify: Restart grafana
+
+- name: Grafana's secrets
+  ansible.builtin.include_role:
+    name: quadlet
+    tasks_from: secrets
+  vars:
+    quadlet_secrets:
+      - {name: grafana-admin-password, value: "{{ watchtower_secret.grafana_admin_password }}"}
+      - {name: grafana-secret-key, value: "{{ watchtower_secret.grafana_secret_key }}"}
+      - {name: grafana-db-password, value: "{{ watchtower_secret.grafana_db_password }}"}
+
+- name: Restart Grafana when a secret changed
+  ansible.builtin.debug:
+    msg: secrets changed
+  changed_when: quadlet_secrets_changed | bool
+  notify: Restart grafana
+
+- name: Pull Grafana
+  containers.podman.podman_image:
+    name: "{{ watchtower_images.grafana }}"
+
+- name: Grafana quadlet
+  ansible.builtin.template:
+    src: grafana.container.j2
+    dest: /etc/containers/systemd/grafana.container
+    mode: "0644"
+  notify: Restart grafana
+
+- name: Start Grafana
+  ansible.builtin.systemd_service:
+    name: grafana
+    state: started
+    daemon_reload: true
+
+- name: Apply Grafana changes now
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for Grafana
+  ansible.builtin.uri:
+    url: http://{{ mesh_ip }}:{{ watchtower_ports.grafana.http }}/api/health
+  register: grafana_health
+  until: grafana_health.status == 200
+  retries: 30
+  delay: 5

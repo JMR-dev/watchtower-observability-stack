@@ -1,0 +1,56 @@
+---
+# Every host checks itself every 5 minutes and reports to its own
+# Healthchecks.io check, which emails when the host is unhealthy for two
+# runs in a row or stops reporting at all (down, cut off, timer dead). The
+# stack's HA hides a lost node from users, so this is what says one is gone.
+#
+# The checks and their ping URLs come from scripts/healthchecks.sh; each
+# host gets only its own URL. Last in its play, so a host only starts
+# reporting once everything on it is installed.
+
+- name: This host's ping URL
+  ansible.builtin.set_fact:
+    health_ping_url: >-
+      {{ (watchtower_secret.healthchecks_host_urls
+          if watchtower_secret.healthchecks_host_urls is mapping
+          else watchtower_secret.healthchecks_host_urls | from_json).get(inventory_hostname, '') }}
+  no_log: true
+
+- name: This host has a Healthchecks.io check
+  ansible.builtin.assert:
+    that: health_ping_url | length > 0
+    fail_msg: healthchecks-host-urls has no check for {{ inventory_hostname }}; run scripts/healthchecks.sh
+    quiet: true
+
+- name: The ping URL, as a podman secret
+  ansible.builtin.include_role:
+    name: quadlet
+    tasks_from: secrets
+  vars:
+    quadlet_secrets:
+      - {name: healthchecks-host-url, value: "{{ health_ping_url }}"}
+
+- name: Health script
+  ansible.builtin.template:
+    src: watchtower-health.sh.j2
+    dest: /usr/local/sbin/watchtower-health
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Health units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: /etc/systemd/system/{{ item }}
+    mode: "0644"
+    owner: root
+    group: root
+  loop: [watchtower-health.service, watchtower-health.timer]
+  notify: Reload systemd
+
+- name: Enable the health timer
+  ansible.builtin.systemd_service:
+    name: watchtower-health.timer
+    enabled: true
+    state: started
+    daemon_reload: true

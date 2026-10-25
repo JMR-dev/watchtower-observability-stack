@@ -1,0 +1,67 @@
+# Managed by Ansible (roles/patroni). Passwords come from PATRONI_*_PASSWORD
+# (podman secrets); nothing secret is in this file.
+scope: {{ patroni_scope }}
+name: {{ inventory_hostname }}
+
+restapi:
+  listen: {{ mesh_ip }}:{{ watchtower_ports.patroni }}
+  connect_address: {{ mesh_ip }}:{{ watchtower_ports.patroni }}
+  # Changes (switchover, restart) need these; reads like /health don't.
+  authentication:
+    username: patroni
+
+etcd3:
+  hosts:
+{% for ip in watchtower_node_ips %}
+    - {{ ip }}:{{ watchtower_ports.etcd.client }}
+{% endfor %}
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    # A replica more than 1 MB behind never becomes leader.
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+      parameters:
+        max_connections: 100
+        password_encryption: scram-sha-256
+        wal_level: replica
+        hot_standby: "on"
+        wal_log_hints: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+
+postgresql:
+  listen: {{ mesh_ip }},127.0.0.1:{{ watchtower_ports.postgres }}
+  connect_address: {{ mesh_ip }}:{{ watchtower_ports.postgres }}
+  data_dir: /var/lib/postgresql/data/pgdata
+  bin_dir: /usr/lib/postgresql/18/bin
+  pgpass: /tmp/pgpass
+  authentication:
+    superuser:
+      username: postgres
+    replication:
+      username: replicator
+    rewind:
+      username: postgres
+  # Every remote login uses SCRAM; only the nodes' mesh addresses get in.
+  pg_hba:
+    - local all postgres peer
+    - local all all scram-sha-256
+    - host all all 127.0.0.1/32 scram-sha-256
+{% for ip in watchtower_node_ips %}
+    - host replication replicator {{ ip }}/32 scram-sha-256
+    - host all all {{ ip }}/32 scram-sha-256
+{% endfor %}
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

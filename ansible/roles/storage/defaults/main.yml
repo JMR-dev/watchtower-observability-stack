@@ -1,0 +1,5 @@
+---
+storage_mapper: watchtower-data
+# The cloud stack's volume, by the stable name udev gives Hetzner volumes.
+storage_device: /dev/disk/by-id/scsi-0HC_Volume_{{ volume_id }}
+storage_keyfile: /etc/watchtower/luks.key

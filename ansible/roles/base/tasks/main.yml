@@ -1,7 +1,7 @@
 ---
-# Host baseline for a Kubespray node: security updates (rebooted by kured),
-# persistent journald (Fluent Bit ships it), SELinux enforcing, and the
-# kernel modules the edge pod needs.
+# Host baseline: current packages, podman, persistent journald (Fluent Bit
+# ships it), SELinux enforcing, the wireguard module, and nightly security
+# updates that never reboot on their own (roles/reboot does, gated).
 
 - name: Update all packages
   ansible.builtin.dnf:
@@ -12,12 +12,15 @@
 - name: Install base packages
   ansible.builtin.dnf:
     name:
+      - podman
+      - container-selinux
+      - cryptsetup
+      - xfsprogs
+      - wireguard-tools
       - dnf-automatic
       - dnf-utils
       - python3-libselinux
       - policycoreutils-python-utils
-      - container-selinux
-      - wireguard-tools
       - jq
       - bind-utils
       - tar
@@ -33,7 +36,8 @@
     state: directory
     mode: "0755"
 
-# Persistent, so Fluent Bit's systemd input finds /var/log/journal.
+# Persistent, so Fluent Bit's systemd input finds /var/log/journal. Every
+# container logs here too (LogDriver=journald).
 - name: Configure persistent journald with size cap
   ansible.builtin.copy:
     dest: /etc/systemd/journald.conf.d/persistent.conf
@@ -51,8 +55,15 @@
     policy: targeted
     state: enforcing
 
-# The edge pod's wg-easy creates wg0 in its own network namespace; loading
-# the module here means the pod needs neither SYS_MODULE nor /lib/modules.
+# Containers start under systemd (quadlets) and need to manage their cgroups.
+- name: Let containers manage cgroups
+  ansible.posix.seboolean:
+    name: container_manage_cgroup
+    state: true
+    persistent: true
+
+# wg1 (the mesh) on every host, wg0 (wg-easy) on the proxy. Loaded here so
+# no container needs SYS_MODULE.
 - name: Load the wireguard module at boot
   ansible.builtin.copy:
     dest: /etc/modules-load.d/wireguard.conf
@@ -60,9 +71,17 @@
     content: "wireguard\n"
   notify: Load wireguard
 
-# dnf-automatic installs security updates nightly and never reboots: a node
-# rebooting on its own would take its pods with it. kured reboots one node
-# at a time, after draining it, when the reboot-required timer below says so.
+- name: Ensure the config root exists
+  ansible.builtin.file:
+    path: "{{ watchtower_config }}"
+    state: directory
+    mode: "0750"
+    owner: root
+    group: root
+
+# dnf-automatic installs security updates nightly and never reboots: a host
+# rebooting on its own could take a second node down while one is already
+# out. roles/reboot reboots one host at a time, after checking the others.
 - name: Render dnf-automatic config (security updates, apply, no reboot)
   ansible.builtin.copy:
     dest: /etc/dnf/automatic.conf
@@ -82,32 +101,8 @@
       [emitters]
       emit_via = stdio,motd
 
-      [base]
-      # Kubespray manages the container runtime and Kubernetes binaries.
-      exclude = containerd* runc* cri-tools kubelet kubeadm kubectl
-
 - name: Enable dnf-automatic-install.timer
   ansible.builtin.systemd:
     name: dnf-automatic-install.timer
     enabled: true
     state: started
-
-- name: Deploy reboot-required check
-  ansible.builtin.copy:
-    src: "{{ item.src }}"
-    dest: "{{ item.dest }}"
-    mode: "{{ item.mode }}"
-    owner: root
-    group: root
-  loop:
-    - {src: reboot-required.sh, dest: /usr/local/sbin/reboot-required, mode: "0755"}
-    - {src: reboot-required.service, dest: /etc/systemd/system/reboot-required.service, mode: "0644"}
-    - {src: reboot-required.timer, dest: /etc/systemd/system/reboot-required.timer, mode: "0644"}
-  notify: Reload systemd
-
-- name: Enable the reboot-required timer
-  ansible.builtin.systemd:
-    name: reboot-required.timer
-    enabled: true
-    state: started
-    daemon_reload: true

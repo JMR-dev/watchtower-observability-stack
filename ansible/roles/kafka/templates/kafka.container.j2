@@ -1,0 +1,29 @@
+# Managed by Ansible (roles/kafka).
+[Unit]
+Description=Kafka broker and controller {{ node_index }} (KRaft)
+Wants=network-online.target wg-quick@wg1.service
+After=network-online.target wg-quick@wg1.service
+RequiresMountsFor={{ watchtower_data }}
+
+[Container]
+Image={{ watchtower_images.kafka }}
+ContainerName=kafka
+Network=host
+# The image's run script writes server.properties into the image at start,
+# so its root filesystem stays writable.
+NoNewPrivileges=true
+DropCapability=ALL
+LogDriver=journald
+Volume={{ watchtower_data }}/kafka:/var/lib/kafka/data:Z
+EnvironmentFile={{ watchtower_config }}/kafka/kafka.env
+PodmanArgs=--memory={{ watchtower_memory.kafka }}m
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+# Controlled shutdown moves partition leadership away first.
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

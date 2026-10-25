@@ -12,7 +12,7 @@ import (
 	"watchtower-infra/internal/pulumitest"
 )
 
-const token = "gcp:secretmanager/getSecretVersion:getSecretVersion"
+const token = "gcp:secretmanager/getSecretVersionAccess:getSecretVersionAccess"
 
 var opts = pulumitest.Options{Project: "p", Stack: "s"}
 

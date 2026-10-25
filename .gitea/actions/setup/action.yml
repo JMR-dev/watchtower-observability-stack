@@ -7,14 +7,7 @@ description: |
   a tool means changing its version AND hash together. Sources of the hashes:
     go          go.dev/dl/?mode=json&include=all
     pulumi      pulumi-<v>-checksums.txt on the GitHub release
-    helm        get.helm.sh/helm-<v>-linux-amd64.tar.gz.sha256sum
-    kubectl     dl.k8s.io/release/<v>/bin/linux/amd64/kubectl.sha256
-    kube-apiserver  dl.k8s.io/release/<v>/bin/linux/amd64/kube-apiserver.sha256
-                (the cluster's kube_version exactly; check-manifests.sh fails
-                when the two differ)
-    etcd        SHA256SUMS on the GitHub release (the version Kubespray
-                installs for this Kubernetes minor)
-    kubeconform CHECKSUMS on the GitHub release
+    uv          uv-<arch>-unknown-linux-gnu.tar.gz.sha256 on the GitHub release
     alloy       SHA256SUMS on the GitHub release
     actionlint  actionlint_<v>_checksums.txt on the GitHub release
     shellcheck  computed from the GitHub release tarball on 2026-10-23
@@ -23,11 +16,17 @@ description: |
                 a PGP signature, no checksum)
     gcloud      computed from the official tarball on 2026-10-24 (Google
                 publishes no checksum for the current release)
-  The Ansible tools come from pip at the versions ansible/requirements.txt
-  pins (Kubespray's own pins).
+  Python tools come from uv, into a venv on a uv-managed CPython 3.13, from
+  hash-locked requirement files (`--require-hashes`):
+    ansible       ansible/requirements.txt (ansible-core)
+    ansible-lint  ansible/requirements-lint.txt (ansible-core + ansible-lint)
+    semgrep       .gitea/requirements/semgrep.txt
+  uv and those three also install on arm64 runners (the Patroni image job);
+  every other tool is amd64 only.
 
-  Secrets: every line of `secrets` is NAME=id or @NAME=id, an id from
-  scripts/secret-names.txt. NAME=id exports the value as NAME (one line
+  Secrets: every line of `secrets` is NAME=id or @NAME=id, id a Secret
+  Manager secret (scripts/bootstrap.sh creates and grants every id
+  deploy.yml names here). NAME=id exports the value as NAME (one line
   only); @NAME=id writes it to a 0600 file and exports its path as NAME (for
   key files). Every line of every value is masked in the log first. Reading
   needs `gcp-key` and installs gcloud.
@@ -37,7 +36,7 @@ description: |
 
 inputs:
   tools:
-    description: Space-separated subset of "go pulumi helm kubectl kubeconform kube-apiserver etcd alloy shellcheck awscli ansible gcloud"
+    description: Space-separated subset of "go pulumi alloy shellcheck actionlint awscli gcloud ansible ansible-lint semgrep"
     required: false
     default: ""
   gcp-key:
@@ -65,16 +64,9 @@ runs:
         GO_SHA256: 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
         PULUMI_VERSION: "3.272.0"
         PULUMI_SHA256: 58d545f2b98761051922008ebd381ecef95484d7f7a5ff7faa15d7a780ea84f6
-        HELM_VERSION: "4.3.1"
-        HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
-        KUBECTL_VERSION: "1.36.5"
-        KUBECTL_SHA256: 33bc88a24c3b09cf55bfd59e6ca977881b61fc3f25ab65bc80c65b430248648e
-        KUBE_APISERVER_VERSION: "1.36.4"
-        KUBE_APISERVER_SHA256: 90939ee07af61ac3701c665647f9ce27f2f988f5c7fff406aa5794fd3e6328a6
-        ETCD_VERSION: "3.6.14"
-        ETCD_SHA256: ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
-        KUBECONFORM_VERSION: "0.8.0"
-        KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+        UV_VERSION: "0.13.5"
+        UV_SHA256_X86_64: f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
+        UV_SHA256_AARCH64: 4bb69cf95ed13f23713bb7bc09f241896ea0c75b7c557e615a20604b82f9c403
         ALLOY_VERSION: "1.21.2"
         ALLOY_SHA256: 1eadb46a0640127184250173acd9b4145e4d590680db37ffe66fa8afd07f04cf
         ACTIONLINT_VERSION: "1.7.12"
@@ -102,11 +94,24 @@ runs:
           echo "$2  $3" | sha256sum -c --quiet -
         }
 
-        apt_deps="jq curl openssh-client unzip xz-utils"
-        # nftables: CI checks the node firewall template with nft.
-        [[ " $TOOLS " == *" ansible "* ]] && apt_deps+=" python3-venv git nftables"
-        # openssl: check-manifests.sh makes the API server's signing key.
-        [[ " $TOOLS " == *" kube-apiserver "* ]] && apt_deps+=" openssl"
+        arch="$(uname -m)"
+        uv_install() {
+          [[ -x "${bin}/uv" ]] && return 0
+          local sum
+          case "$arch" in
+            x86_64) sum="$UV_SHA256_X86_64" ;;
+            aarch64) sum="$UV_SHA256_AARCH64" ;;
+            *) echo "uv: no pinned build for ${arch}" >&2; exit 1 ;;
+          esac
+          fetch "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${arch}-unknown-linux-gnu.tar.gz" "$sum" "${tools_dir}/uv.tgz"
+          tar -C "$tools_dir" -xzf "${tools_dir}/uv.tgz"
+          install -m 0755 "${tools_dir}/uv-${arch}-unknown-linux-gnu/uv" "${bin}/uv"
+          echo "UV_NO_CACHE=1" >>"$GITHUB_ENV"
+        }
+
+        apt_deps="jq curl openssh-client unzip xz-utils ca-certificates"
+        # nftables: CI checks the host firewall template with nft.
+        [[ " $TOOLS " == *" ansible-lint "* ]] && apt_deps+=" nftables util-linux"
         sudo=""
         [[ "$(id -u)" == 0 ]] || sudo=sudo
         export DEBIAN_FRONTEND=noninteractive
@@ -115,6 +120,9 @@ runs:
         $sudo apt-get install -y -qq --no-install-recommends $apt_deps >/dev/null
 
         for tool in $TOOLS; do
+          case "$tool" in ansible | ansible-lint | semgrep) ;; *)
+            [[ "$arch" == x86_64 ]] || { echo "${tool}: amd64 only (this runner is ${arch})" >&2; exit 1; } ;;
+          esac
           case "$tool" in
             go)
               fetch "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" "$GO_SHA256" "${tools_dir}/go.tgz"
@@ -129,30 +137,6 @@ runs:
               tar -C "$tools_dir" -xzf "${tools_dir}/pulumi.tgz"
               echo "${tools_dir}/pulumi" >>"$GITHUB_PATH"
               echo "PULUMI_SKIP_UPDATE_CHECK=true" >>"$GITHUB_ENV"
-              ;;
-            helm)
-              fetch "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" "$HELM_SHA256" "${tools_dir}/helm.tgz"
-              tar -C "$tools_dir" -xzf "${tools_dir}/helm.tgz"
-              install -m 0755 "${tools_dir}/linux-amd64/helm" "${bin}/helm"
-              ;;
-            kubectl)
-              fetch "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" "$KUBECTL_SHA256" "${bin}/kubectl"
-              chmod 0755 "${bin}/kubectl"
-              ;;
-            kube-apiserver)
-              fetch "https://dl.k8s.io/release/v${KUBE_APISERVER_VERSION}/bin/linux/amd64/kube-apiserver" \
-                "$KUBE_APISERVER_SHA256" "${bin}/kube-apiserver"
-              chmod 0755 "${bin}/kube-apiserver"
-              ;;
-            etcd)
-              fetch "https://github.com/etcd-io/etcd/releases/download/v${ETCD_VERSION}/etcd-v${ETCD_VERSION}-linux-amd64.tar.gz" \
-                "$ETCD_SHA256" "${tools_dir}/etcd.tgz"
-              tar -C "$bin" -xzf "${tools_dir}/etcd.tgz" --strip-components=1 "etcd-v${ETCD_VERSION}-linux-amd64/etcd"
-              ;;
-            kubeconform)
-              fetch "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
-                "$KUBECONFORM_SHA256" "${tools_dir}/kubeconform.tgz"
-              tar -C "$bin" -xzf "${tools_dir}/kubeconform.tgz" kubeconform
               ;;
             alloy)
               fetch "https://github.com/grafana/alloy/releases/download/v${ALLOY_VERSION}/alloy-linux-amd64.zip" \
@@ -189,10 +173,18 @@ runs:
                 echo "CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=1"
               } >>"$GITHUB_ENV"
               ;;
-            ansible)
-              python3 -m venv "${tools_dir}/ansible"
-              "${tools_dir}/ansible/bin/pip" install -q -r ansible/requirements.txt ansible-lint==26.10.1
-              echo "${tools_dir}/ansible/bin" >>"$GITHUB_PATH"
+            ansible | ansible-lint | semgrep)
+              case "$tool" in
+                ansible) lock=ansible/requirements.txt ;;
+                ansible-lint) lock=ansible/requirements-lint.txt ;;
+                semgrep) lock=.gitea/requirements/semgrep.txt ;;
+              esac
+              uv_install
+              if [[ ! -x "${tools_dir}/py/bin/python" ]]; then
+                UV_PYTHON_INSTALL_DIR="${tools_dir}/python" "${bin}/uv" venv -q --python 3.13 "${tools_dir}/py"
+                echo "${tools_dir}/py/bin" >>"$GITHUB_PATH"
+              fi
+              "${bin}/uv" pip install -q --python "${tools_dir}/py/bin/python" --require-hashes -r "$lock"
               ;;
             *)
               echo "unknown tool: $tool" >&2
@@ -239,10 +231,13 @@ runs:
           as_file="${BASH_REMATCH[1]}" name="${BASH_REMATCH[2]}" id="${BASH_REMATCH[3]}"
           file="${dir}/${id}"
           "$gcloud" secrets versions access latest --secret "$id" --project "$PROJECT" --out-file "$file"
-          # Masked before anything could print it.
+          # Masked before anything could print it. Semgrep's add-mask rule
+          # warns that a job which stops workflow commands defeats masking;
+          # here, anyone able to change a workflow that gets these secrets
+          # could print GCP_DEPLOYER_KEY outright, so it adds no exposure.
           while IFS= read -r l || [[ -n "$l" ]]; do
             l="${l%$'\r'}"
-            [[ -z "$l" ]] || echo "::add-mask::${l}"
+            [[ -z "$l" ]] || echo "::add-mask::${l}" # nosemgrep: yaml.github-actions.security.audit.unsafe-add-mask-workflow-command.unsafe-add-mask-workflow-command
           done <"$file"
           if [[ -n "$as_file" ]]; then
             echo "${name}=${file}" >>"$GITHUB_ENV"

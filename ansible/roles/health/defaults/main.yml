@@ -1,0 +1,14 @@
+---
+# Units the health check expects active besides the quadlets, which it
+# finds by itself.
+health_units_common:
+  - wg-quick@wg1
+  - watchtower-nftables
+  - fail2ban
+  - dnf-automatic-install.timer
+  - watchtower-reboot.timer
+health_units_node:
+  - watchtower-pg-backup.timer
+
+# A disk this full fails the check: / and the data volume.
+health_disk_max_percent: 90

@@ -1,0 +1,140 @@
+# Managed by Ansible (roles/tempo). Tempo {{ watchtower_images.tempo.split(':')[1].split('@')[0] }}, component {{ component }} on {{ inventory_hostname }}.
+# S3 credentials come from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (the
+# cluster key, as podman secrets).
+{% set p = watchtower_ports.tempo[component] %}
+{% set seeds = [] %}
+{% for ip in watchtower_node_ips %}
+{%   set _ = seeds.append(ip ~ ':' ~ watchtower_ports.tempo['distributor'].memberlist) %}
+{%   set _ = seeds.append(ip ~ ':' ~ watchtower_ports.tempo['live-store'].memberlist) %}
+{% endfor %}
+stream_over_http_enabled: true
+multitenancy_enabled: true
+
+server:
+  http_listen_address: {{ mesh_ip }}
+  http_listen_port: {{ p.http }}
+  grpc_listen_address: {{ mesh_ip }}
+  grpc_listen_port: {{ p.grpc }}
+  log_level: info
+
+# Every Tempo process on every node is one memberlist cluster (the partition
+# and live-store rings live there). The distributors and live-stores, which
+# run on every node, are the seeds.
+memberlist:
+  cluster_label: watchtower-tempo
+  abort_if_cluster_join_fails: false
+  bind_addr: [{{ mesh_ip }}]
+  bind_port: {{ p.memberlist }}
+  advertise_addr: {{ mesh_ip }}
+  advertise_port: {{ p.memberlist }}
+  join_members:
+{% for s in seeds %}
+    - {{ s }}
+{% endfor %}
+
+ingest:
+  kafka:
+    # One bootstrap address: every node's broker, local first (/etc/hosts).
+    address: kafka.internal:{{ watchtower_ports.kafka.broker }}
+    topic: {{ kafka_tempo_topic }}
+    auto_create_topic_enabled: false
+
+distributor:
+  ring:
+    kvstore:
+      store: memberlist
+    instance_addr: {{ mesh_ip }}
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: {{ mesh_ip }}:{{ watchtower_ports.otlp.grpc }}
+        http:
+          endpoint: {{ mesh_ip }}:{{ watchtower_ports.otlp.http }}
+
+# One live-store per node, each node its own zone: every zone owns partition
+# 0 (the instance ID's -0 suffix), so queries for recent traces succeed while
+# any one zone is up.
+live_store:
+  ring:
+    kvstore:
+      store: memberlist
+    instance_id: live-store-zone-{{ zone }}-0
+    instance_addr: {{ mesh_ip }}
+    instance_zone: zone-{{ zone }}
+  partition_ring:
+    kvstore:
+      store: memberlist
+  wal:
+    path: /var/tempo/live-store/traces
+  shutdown_marker_dir: /var/tempo/live-store/shutdown-marker
+
+# The single block builder consumes every partition (only owned ones carry
+# data). While it is down, Kafka's 24-hour retention keeps the backlog.
+block_builder:
+  instance_id: block-builder-0
+  assigned_partitions:
+    block-builder-0: [{% for i in range(kafka_tempo_partitions) %}{{ i }}{{ ', ' if not loop.last }}{% endfor %}]
+  wal:
+    path: /var/tempo/block-builder/traces
+
+backend_scheduler:
+  local_work_path: /var/tempo/backend-scheduler
+  provider:
+    compaction:
+      compaction:
+        block_retention: {{ watchtower_retention_days.tempo * 24 }}h
+
+backend_worker:
+  backend_scheduler_addr: {{ hostvars[tempo_backend_scheduler_host].mesh_ip }}:{{ watchtower_ports.tempo['backend-scheduler'].grpc }}
+  compaction:
+    block_retention: {{ watchtower_retention_days.tempo * 24 }}h
+  ring:
+    kvstore:
+      store: memberlist
+    instance_addr: {{ mesh_ip }}
+
+querier:
+  frontend_worker:
+    # Resolved again every dns_lookup_duration; /etc/hosts lists both
+    # frontends, so every querier serves both.
+    frontend_address: tempo-frontend.internal:{{ watchtower_ports.tempo['query-frontend'].grpc }}
+
+# The generators share Tempo's partitions as one Kafka consumer group, with
+# this node's name as their static member ID, so each span is turned into
+# metrics once.
+metrics_generator:
+  instance_id: {{ inventory_hostname }}
+  ring:
+    kvstore:
+      store: memberlist
+    instance_addr: {{ mesh_ip }}
+  registry:
+    external_labels:
+      source: tempo
+      cluster: watchtower
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://mimir.internal:{{ watchtower_ports.mimir.http }}/api/v1/push
+        send_exemplars: true
+
+storage:
+  trace:
+    backend: s3
+    s3:
+      bucket: {{ watchtower_buckets.tempo }}
+      endpoint: {{ watchtower_s3_endpoint }}
+      region: {{ watchtower_s3_region }}
+      forcepathstyle: true
+      insecure: false
+    wal:
+      path: /var/tempo/wal
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics]
+
+usage_report:
+  reporting_enabled: false

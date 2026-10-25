@@ -1,0 +1,138 @@
+# Managed by Ansible (roles/edge). Caddy on the proxy, for {$DOMAIN}.
+#
+# Every site binds the tunnel address {{ watchtower_tunnel_ip }} only: that is the
+# private endpoint's A record, so nothing outside the WireGuard tunnel reaches
+# these listeners (roles/firewall also admits them only from wg0).
+#
+# One certificate for the one name, issued over ACME DNS-01 against the
+# Cloud DNS zone {$DOMAIN}. The service account key can write only that zone.
+#
+# Each backend port is spread across the nodes over the mesh. Active health
+# checks drop a node that stops answering /ready; lb_try_duration retries a
+# request on the next node when a connection fails, so a node going down
+# costs no failed requests once it is marked unhealthy.
+{% set nodes = watchtower_node_ips %}
+{% set frontends = tempo_query_frontend_hosts | map('extract', hostvars, 'mesh_ip') | list %}
+{
+	admin off
+	order coraza_waf first
+
+	# Nothing in the tunnel speaks plain HTTP, so no :80 redirect server.
+	auto_https disable_redirects
+
+	storage file_system /data/caddy
+
+	# Let's Encrypt over DNS-01 only: no HTTP-01 or TLS-ALPN-01 attempts that
+	# could never reach this private endpoint.
+	cert_issuer acme {
+		dns googleclouddns {
+			gcp_project {$GCP_PROJECT}
+		}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# Shared load-balancing settings: health URI, then an optional health port
+# (defaults to the upstream's own).
+(balanced) {
+	lb_policy round_robin
+	lb_try_duration 5s
+	lb_try_interval 250ms
+	health_uri {args[0]}
+	health_interval 10s
+	health_timeout 3s
+	health_passes 2
+	health_fails 2
+	fail_duration 30s
+}
+
+# ── Grafana UI: browser-facing ──────────────────────────────────────────────
+# Full OWASP CRS in detection-only mode. Switch SecRuleEngine to On after
+# reviewing the Coraza audit log (in the log archive) and tuning false
+# positives. The three Grafanas share one database, so no stickiness.
+{$DOMAIN}:{{ watchtower_ports.edge.grafana }} {
+	bind {{ watchtower_tunnel_ip }}
+	coraza_waf {
+		load_owasp_crs
+
+		directives `
+			Include @coraza.conf-recommended
+			Include @crs-setup.conf.example
+			Include @owasp_crs/*.conf
+
+			SecRuleEngine DetectionOnly
+			SecRequestBodyAccess On
+			SecResponseBodyAccess Off
+			SecAuditEngine RelevantOnly
+			SecAuditLog /dev/stdout
+			SecAuditLogFormat JSON
+			SecAuditLogType Serial
+		`
+	}
+
+	reverse_proxy {% for ip in nodes %}{{ ip }}:{{ watchtower_ports.grafana.http }} {% endfor %}{
+		import balanced /api/health
+	}
+}
+
+# ── Loki: every node runs every component (monolithic). Machine-to-machine;
+# no CRS (structured, often compressed payloads).
+{$DOMAIN}:{{ watchtower_ports.edge.loki }} {
+	bind {{ watchtower_tunnel_ip }}
+	reverse_proxy {% for ip in nodes %}{{ ip }}:{{ watchtower_ports.loki.http }} {% endfor %}{
+		import balanced /ready
+	}
+}
+
+# ── Mimir: remote_write, queries, rules, Alertmanager ──────────────────────
+{$DOMAIN}:{{ watchtower_ports.edge.mimir }} {
+	bind {{ watchtower_tunnel_ip }}
+	reverse_proxy {% for ip in nodes %}{{ ip }}:{{ watchtower_ports.mimir.http }} {% endfor %}{
+		import balanced /ready
+	}
+}
+
+# ── Tempo query API: the query frontends ────────────────────────────────────
+{$DOMAIN}:{{ watchtower_ports.edge.tempo }} {
+	bind {{ watchtower_tunnel_ip }}
+	reverse_proxy {% for ip in frontends %}{{ ip }}:{{ watchtower_ports.tempo['query-frontend'].http }} {% endfor %}{
+		import balanced /ready
+	}
+}
+
+# ── Tempo OTLP HTTP ingest: the distributors, health-checked on their own
+# HTTP port.
+{$DOMAIN}:{{ watchtower_ports.edge.otlp_http }} {
+	bind {{ watchtower_tunnel_ip }}
+	reverse_proxy {% for ip in nodes %}{{ ip }}:{{ watchtower_ports.otlp.http }} {% endfor %}{
+		import balanced /ready
+		health_port {{ watchtower_ports.tempo.distributor.http }}
+	}
+}
+
+# ── Tempo OTLP gRPC ingest: gRPC over TLS from clients (HTTP/2), cleartext
+# HTTP/2 (h2c) to the distributors. Passive health only: an active check
+# would go over h2c too, which the distributors' HTTP port isn't known to
+# speak. A failed connection still moves to the next node.
+{$DOMAIN}:{{ watchtower_ports.edge.otlp_grpc }} {
+	bind {{ watchtower_tunnel_ip }}
+	reverse_proxy {% for ip in nodes %}{{ ip }}:{{ watchtower_ports.otlp.grpc }} {% endfor %}{
+		lb_policy round_robin
+		lb_try_duration 5s
+		fail_duration 30s
+		max_fails 1
+		transport http {
+			versions h2c
+		}
+	}
+}
+
+# ── wg-easy web UI (peer management); wg-easy itself listens on loopback.
+{$DOMAIN}:{{ watchtower_ports.edge.wg_easy }} {
+	bind {{ watchtower_tunnel_ip }}
+	reverse_proxy 127.0.0.1:{{ watchtower_ports.wg_easy_ui }}
+}

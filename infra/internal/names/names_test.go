@@ -2,6 +2,7 @@ package names
 
 import (
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -11,9 +12,12 @@ func TestNamesAreStable(t *testing.T) {
 	for got, want := range map[string]string{
 		BucketName("p", "loki"): "p-loki",
 		NodeName(2):             "watchtower-2",
+		PrivateIP(0):            "10.20.1.10",
 		PrivateIP(3):            "10.20.1.13",
+		MeshIP(0):               "10.30.0.10",
+		MeshIP(2):               "10.30.0.12",
 		VPNHost:                 "vpn.watchtower.jasonmross.dev",
-		APIHost:                 "api.watchtower.jasonmross.dev",
+		ProxyName:               "watchtower-proxy",
 	} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -21,8 +25,8 @@ func TestNamesAreStable(t *testing.T) {
 	}
 }
 
-// Every bucket's key must be a known component key, and only the log archive
-// may be write-only: Loki, Mimir and Tempo read back what they store.
+// Every bucket's key must be a known key, and only the log archive and the
+// backups may be write-only: Loki, Mimir and Tempo read back what they store.
 func TestBucketsUseKnownKeys(t *testing.T) {
 	known := map[string]bool{}
 	for _, k := range Keys {
@@ -32,7 +36,7 @@ func TestBucketsUseKnownKeys(t *testing.T) {
 		if !known[b.Key] {
 			t.Errorf("bucket %s uses unknown key %q", b.Suffix, b.Key)
 		}
-		if b.WriteOnly && b.Suffix != "logs-archive" {
+		if b.WriteOnly != (b.Suffix == BucketLogArchive || b.Suffix == BucketPostgresBackups) {
 			t.Errorf("bucket %s is write-only", b.Suffix)
 		}
 	}
@@ -41,10 +45,11 @@ func TestBucketsUseKnownKeys(t *testing.T) {
 // Lifecycle is a safety net behind application retention, never ahead of it.
 func TestLifecycleNeverUndercutsRetention(t *testing.T) {
 	retention := map[string]int{
-		"loki":         RetentionLokiDays,
-		"mimir-blocks": RetentionMimirDays,
-		"tempo":        RetentionTempoDays,
-		"logs-archive": RetentionLogArchiveDays,
+		"loki":             RetentionLokiDays,
+		"mimir-blocks":     RetentionMimirDays,
+		"tempo":            RetentionTempoDays,
+		"logs-archive":     RetentionLogArchiveDays,
+		"postgres-backups": RetentionPostgresBackupDays,
 	}
 	for _, b := range Buckets {
 		r, ok := retention[b.Suffix]
@@ -60,6 +65,9 @@ func TestLifecycleNeverUndercutsRetention(t *testing.T) {
 	}
 	if RetentionLogArchiveDays != 90 {
 		t.Errorf("log archive retention %d, want 90", RetentionLogArchiveDays)
+	}
+	if RetentionPostgresBackupDays != 90 {
+		t.Errorf("Postgres backup retention %d, want 90", RetentionPostgresBackupDays)
 	}
 }
 
@@ -80,50 +88,26 @@ func TestGDPRRecordsNeverExpire(t *testing.T) {
 	}
 }
 
-// scripts/secret-names.txt is what scripts/bootstrap.sh creates and grants;
-// a secret missing from it would fail the deploy that first reads it.
-func TestSecretListMatchesFile(t *testing.T) {
-	b, err := os.ReadFile("../../../scripts/secret-names.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	inFile := map[string]bool{}
-	for _, line := range strings.Split(string(b), "\n") {
-		id := strings.TrimSpace(line)
-		if id == "" || strings.HasPrefix(id, "#") {
-			continue
-		}
-		if inFile[id] {
-			t.Errorf("%s is listed twice", id)
-		}
-		inFile[id] = true
-	}
-	inGo := map[string]bool{}
+// Secret ids are unique and fit the setup action's `secrets:` lines.
+func TestSecretIDs(t *testing.T) {
+	seen := map[string]bool{}
+	valid := regexp.MustCompile(`^[a-z0-9-]{1,255}$`)
 	for _, id := range Secrets() {
-		if inGo[id] {
+		if seen[id] {
 			t.Errorf("Secrets() lists %s twice", id)
 		}
-		inGo[id] = true
-		if !inFile[id] {
-			t.Errorf("%s is missing from scripts/secret-names.txt", id)
-		}
-	}
-	for id := range inFile {
-		if !inGo[id] {
-			t.Errorf("scripts/secret-names.txt lists %s, which names.Secrets() does not", id)
-		}
-	}
-	// Secret Manager ids: letters, digits, dashes and underscores.
-	valid := regexp.MustCompile(`^[a-z0-9-]{1,255}$`)
-	for id := range inGo {
+		seen[id] = true
 		if !valid.MatchString(id) {
 			t.Errorf("secret id %q", id)
 		}
 	}
 }
 
-// Every secret the deploy workflow asks the setup action for must exist.
-func TestWorkflowReadsOnlyListedSecrets(t *testing.T) {
+// The deploy workflow reads every secret but the owner-only ones, and
+// nothing else. scripts/bootstrap.sh creates and grants exactly what it
+// reads (`secret.sh deploy-ids`), so a secret it missed would fail the
+// deploy that first needs it.
+func TestWorkflowReadsEverySecret(t *testing.T) {
 	b, err := os.ReadFile("../../../.gitea/workflows/deploy.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -132,15 +116,62 @@ func TestWorkflowReadsOnlyListedSecrets(t *testing.T) {
 	for _, id := range Secrets() {
 		known[id] = true
 	}
+	ownerOnly := map[string]bool{}
+	for _, id := range OwnerOnlySecrets {
+		if !known[id] {
+			t.Errorf("owner-only %s is not in Secrets()", id)
+		}
+		ownerOnly[id] = true
+	}
+	written := map[string]bool{}
+	for _, id := range DeployWrittenSecrets {
+		if !known[id] {
+			t.Errorf("deploy-written %s is not in Secrets()", id)
+		}
+		written[id] = true
+	}
 	// The setup action's `secrets:` lines: NAME=id or @NAME=id.
 	line := regexp.MustCompile(`(?m)^\s+@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)\s*$`)
 	matches := line.FindAllStringSubmatch(string(b), -1)
 	if len(matches) == 0 {
 		t.Fatal("deploy.yml reads no secrets through the setup action")
 	}
+	read := map[string]bool{}
 	for _, m := range matches {
+		read[m[1]] = true
 		if !known[m[1]] {
 			t.Errorf("deploy.yml reads %s, which is not a known secret", m[1])
 		}
+		// The deployer is never granted these: the image job gets the push
+		// key as its own Actions secret, and only the owner manages checks.
+		if ownerOnly[m[1]] {
+			t.Errorf("deploy.yml reads owner-only %s through the deployer", m[1])
+		}
+		// The deployer may add to these, never read them.
+		if written[m[1]] {
+			t.Errorf("deploy.yml reads %s, which the deploy only writes", m[1])
+		}
+	}
+	for _, id := range Secrets() {
+		if !read[id] && !ownerOnly[id] && !written[id] {
+			t.Errorf("deploy.yml never reads %s, so bootstrap.sh would not create or grant it", id)
+		}
+	}
+}
+
+// scripts/bootstrap.sh grants the deployer secretVersionAdder on every
+// secret the deploy writes; a missing grant fails the first deploy late.
+func TestBootstrapGrantsDeployWrittenSecrets(t *testing.T) {
+	b, err := os.ReadFile("../../../scripts/bootstrap.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^deploy_written=\(([a-z0-9 -]*)\)$`).FindStringSubmatch(string(b))
+	if m == nil {
+		t.Fatal("bootstrap.sh has no deploy_written=(...) list")
+	}
+	got := strings.Fields(m[1])
+	if !reflect.DeepEqual(got, DeployWrittenSecrets) {
+		t.Errorf("bootstrap.sh deploy_written = %v, want %v", got, DeployWrittenSecrets)
 	}
 }

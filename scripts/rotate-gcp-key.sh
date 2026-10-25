@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Create a fresh JSON key for one of the two service accounts, install it
+# Create a fresh JSON key for one of the stack's service accounts, install it
 # where it is used, then delete every older user-managed key. Also how each
 # key is created the first time.
 #
@@ -8,28 +8,38 @@
 #   scripts/rotate-gcp-key.sh caddy      # -> secret caddy-dns-key (Secret Manager
 #                                        #    and gopass); the next deploy hands
 #                                        #    it to Caddy
+#   scripts/rotate-gcp-key.sh pusher     # -> secret gar-push-key, then copied to
+#                                        #    the Gitea Actions secret GAR_PUSH_KEY
+#   scripts/rotate-gcp-key.sh puller     # -> secret gar-pull-key; the next deploy
+#                                        #    logs the hosts in with it
 #
 # Run every 90 days (runbook). Needs gcloud as the project owner, jq, curl,
-# an unlocked gopass, and for `deployer` a Gitea token with write access to
-# the repo (GITEA_TOKEN or prompted).
+# an unlocked gopass, and for `deployer` and `pusher` a Gitea token with
+# write access to the repo (GITEA_TOKEN or prompted).
 #
 # Why keys at all: Gitea Actions jobs get no Google identity (the runner
 # cluster keeps them away from Workload Identity on purpose; a dedicated
-# deploy runner would let the deployer key go), and the Hetzner nodes have
+# deploy runner would let the deployer key go), and the Hetzner hosts have
 # none. The deployer can write records in the one zone
 # watchtower.jasonmross.dev and read the stack's secrets; Caddy's key can
-# only write records in that zone.
+# only write records in that zone; the pusher can only write to, and the
+# puller only read from, the one Artifact Registry repo.
 #
 # The key and the token never appear on a command line (`ps` shows those):
 # they move through files in a 0700 temp dir that is shredded on exit.
 
 set -euo pipefail
 
-[[ $# -eq 1 ]] || { echo "usage: $0 deployer|caddy" >&2; exit 1; }
+usage() { echo "usage: $0 deployer|caddy|pusher|puller" >&2; exit 1; }
+[[ $# -eq 1 ]] || usage
+# SECRET is where the key goes in Secret Manager; the deployer's own key is
+# the one that can't live there (it is the key to it).
 case "$1" in
-  deployer) SA_ID=watchtower-deployer ;;
-  caddy) SA_ID=watchtower-caddy-dns01 ;;
-  *) echo "usage: $0 deployer|caddy" >&2; exit 1 ;;
+  deployer) SA_ID=watchtower-deployer SECRET= ;;
+  caddy) SA_ID=watchtower-caddy-dns01 SECRET=caddy-dns-key ;;
+  pusher) SA_ID=watchtower-image-pusher SECRET=gar-push-key ;;
+  puller) SA_ID=watchtower-image-puller SECRET=gar-pull-key ;;
+  *) usage ;;
 esac
 
 PROJECT="${GCP_PROJECT:-watchtower-observe}"
@@ -78,12 +88,20 @@ if [[ "$1" == deployer ]]; then
   echo "==> Keeping the local copy in gopass as watchtower/gcp-deployer-key"
   gopass insert -f watchtower/gcp-deployer-key <"${work}/key.json" >/dev/null
 else
-  echo "==> Storing it as the caddy-dns-key secret"
-  if ! "${repo_root}/scripts/secret.sh" put caddy-dns-key <"${work}/key.json"; then
+  echo "==> Storing it as the ${SECRET} secret"
+  if ! "${repo_root}/scripts/secret.sh" put "$SECRET" <"${work}/key.json"; then
     delete_new
     exit 1
   fi
-  echo "    the next deploy hands Caddy the new key"
+  if [[ "$1" == pusher ]]; then
+    echo "==> Copying it to the GAR_PUSH_KEY Actions secret"
+    if ! "${repo_root}/scripts/secret.sh" gitea "$SECRET" GAR_PUSH_KEY; then
+      delete_new
+      exit 1
+    fi
+  else
+    echo "    the next deploy installs the new key on the hosts"
+  fi
 fi
 
 echo "==> Deleting older user-managed keys"

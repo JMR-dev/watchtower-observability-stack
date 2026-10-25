@@ -1,0 +1,18 @@
+---
+# Where Tempo's single-copy components run. Moving one is this line and a
+# deploy (docs/runbook.md, "Moving a Tempo singleton"). The block builder and
+# the scheduler sit on different nodes, so one node failure stops only one of
+# them, and Kafka's 24-hour retention covers the gap.
+tempo_block_builder_host: watchtower-1
+tempo_backend_scheduler_host: watchtower-2
+# Tempo's docs: keep query frontends at two.
+tempo_query_frontend_hosts: [watchtower-1, watchtower-2]
+
+# Where this node's queriers and Grafana find a query frontend: its own
+# first, else the frontends in reverse placement order, so a node without
+# one tries the nearest-numbered first and a dead node 1 doesn't stall node
+# 3's every query on a timeout.
+tempo_frontend_ips: >-
+  {{ ([mesh_ip] if inventory_hostname in tempo_query_frontend_hosts else [])
+     + (tempo_query_frontend_hosts | reject('equalto', inventory_hostname) | reverse
+        | map('extract', hostvars, 'mesh_ip') | list) }}

@@ -30,6 +30,8 @@ type Resource struct {
 	Providers     map[string]string
 	Protect       bool
 	IgnoreChanges []string
+	// DeleteBeforeReplace is true when a replacement must delete first.
+	DeleteBeforeReplace bool
 }
 
 // Invoke is one function call (a data source lookup).
@@ -48,6 +50,10 @@ type Mocks struct {
 	Calls map[string]CallFunc
 	// Outputs adds output properties to every resource of a type token.
 	Outputs map[string]resource.PropertyMap
+	// NamedOutputs adds output properties to the resource with this logical
+	// name, after Outputs, so one resource can differ from the rest of its
+	// type.
+	NamedOutputs map[string]resource.PropertyMap
 	// ID returns a resource's ID; nil means "<name>_id".
 	ID func(typ, name string) string
 
@@ -72,11 +78,16 @@ func (m *Mocks) NewResource(a pulumi.MockResourceArgs) (string, resource.Propert
 		Providers:     a.RegisterRPC.GetProviders(),
 		Protect:       a.RegisterRPC.GetProtect(),
 		IgnoreChanges: a.RegisterRPC.GetIgnoreChanges(),
+
+		DeleteBeforeReplace: a.RegisterRPC.GetDeleteBeforeReplace(),
 	})
 	m.mu.Unlock()
 
 	outs := a.Inputs.Copy()
 	for k, v := range m.Outputs[a.TypeToken] {
+		outs[k] = v
+	}
+	for k, v := range m.NamedOutputs[a.Name] {
 		outs[k] = v
 	}
 	id := a.Name + "_id"

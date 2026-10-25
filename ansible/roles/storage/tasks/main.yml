@@ -1,0 +1,82 @@
+---
+# The host's data volume, LUKS2-encrypted, mounted at watchtower_data. Every
+# service keeps its state below it: WALs, Kafka's log, Postgres, Grafana's
+# plugins, the proxy's certificates and peers.
+#
+# The key is luks-passphrase from Secret Manager, written root-only for
+# unattended unlock at boot: the same trust as the Kubernetes design, where
+# hcloud-csi's key sat in etcd on the nodes. It protects the volume detached,
+# snapshotted or disposed of, not a running host.
+
+- name: Wait for the volume to appear
+  ansible.builtin.wait_for:
+    path: "{{ storage_device }}"
+    timeout: 120
+
+- name: Write the LUKS key file
+  ansible.builtin.copy:
+    dest: "{{ storage_keyfile }}"
+    content: "{{ watchtower_secret.luks_passphrase }}"
+    mode: "0400"
+    owner: root
+    group: root
+  no_log: true
+
+- name: Check whether the volume is already LUKS
+  ansible.builtin.command: cryptsetup isLuks {{ storage_device }}
+  register: storage_is_luks
+  changed_when: false
+  failed_when: storage_is_luks.rc not in [0, 1]
+
+# Only a volume that holds no LUKS header is ever formatted: a rebuilt
+# server finds its old volume already encrypted and keeps the data.
+- name: Format LUKS2
+  ansible.builtin.command: >
+    cryptsetup luksFormat --batch-mode --type luks2
+    --key-file {{ storage_keyfile }} {{ storage_device }}
+  when: storage_is_luks.rc == 1
+  changed_when: true
+
+- name: Add the crypttab entry
+  ansible.builtin.lineinfile:
+    path: /etc/crypttab
+    regexp: "^{{ storage_mapper }} "
+    line: "{{ storage_mapper }} {{ storage_device }} {{ storage_keyfile }} luks,discard,nofail"
+    create: true
+    mode: "0600"
+
+- name: Open the volume
+  ansible.builtin.command: >
+    cryptsetup open --key-file {{ storage_keyfile }}
+    {{ storage_device }} {{ storage_mapper }}
+  args:
+    creates: /dev/mapper/{{ storage_mapper }}
+
+- name: Make the filesystem (empty volumes only)
+  community.general.filesystem:
+    fstype: xfs
+    dev: /dev/mapper/{{ storage_mapper }}
+
+- name: Ensure the mount point exists
+  ansible.builtin.file:
+    path: "{{ watchtower_data }}"
+    state: directory
+    mode: "0755"
+
+# nofail: a host whose volume won't unlock still boots, reachable over SSH.
+# Every container unit has RequiresMountsFor=, so none starts writing to the
+# root disk instead.
+- name: Mount it
+  ansible.posix.mount:
+    path: "{{ watchtower_data }}"
+    src: /dev/mapper/{{ storage_mapper }}
+    fstype: xfs
+    opts: defaults,nofail,x-systemd.requires=systemd-cryptsetup@{{ storage_mapper | replace('-', '\\x2d') }}.service
+    state: mounted
+
+- name: Label it for containers
+  community.general.sefcontext:
+    target: "{{ watchtower_data }}(/.*)?"
+    setype: container_file_t
+    state: present
+  notify: Relabel the data volume

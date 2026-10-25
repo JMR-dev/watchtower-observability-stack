@@ -1,0 +1,60 @@
+# Managed by Ansible (roles/grafana). One Mimir, Loki and Tempo datasource
+# per tenant in the main org, each sending the tenant's X-Scope-OrgID. The
+# *.internal names resolve to all three nodes, this one first. `version` lets
+# the three Grafanas provision the shared database without fighting.
+apiVersion: 1
+datasources:
+{% for t in watchtower_tenants %}
+  - name: Mimir ({{ t.org_name }})
+    uid: mimir-{{ t.slug }}
+    type: prometheus
+    access: proxy
+    url: http://mimir.internal:{{ watchtower_ports.mimir.http }}/prometheus
+    orgId: 1
+    isDefault: {{ loop.first | lower }}
+    editable: false
+    version: 1
+    jsonData:
+      httpHeaderName1: X-Scope-OrgID
+      httpMethod: POST
+      manageAlerts: true
+      prometheusType: Mimir
+    secureJsonData:
+      httpHeaderValue1: {{ t.slug }}
+  - name: Loki ({{ t.org_name }})
+    uid: loki-{{ t.slug }}
+    type: loki
+    access: proxy
+    url: http://loki.internal:{{ watchtower_ports.loki.http }}
+    orgId: 1
+    editable: false
+    version: 1
+    jsonData:
+      httpHeaderName1: X-Scope-OrgID
+      derivedFields:
+        - datasourceUid: tempo-{{ t.slug }}
+          matcherRegex: 'trace_id=(\w+)'
+          name: TraceID
+          url: '$${__value.raw}'
+    secureJsonData:
+      httpHeaderValue1: {{ t.slug }}
+  - name: Tempo ({{ t.org_name }})
+    uid: tempo-{{ t.slug }}
+    type: tempo
+    access: proxy
+    url: http://tempo.internal:{{ watchtower_ports.tempo['query-frontend'].http }}
+    orgId: 1
+    editable: false
+    version: 1
+    jsonData:
+      httpHeaderName1: X-Scope-OrgID
+      tracesToLogsV2:
+        datasourceUid: loki-{{ t.slug }}
+        spanStartTimeShift: -1m
+        spanEndTimeShift: 1m
+        filterByTraceID: true
+      serviceMap:
+        datasourceUid: mimir-{{ t.slug }}
+    secureJsonData:
+      httpHeaderValue1: {{ t.slug }}
+{% endfor %}

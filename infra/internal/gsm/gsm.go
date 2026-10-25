@@ -35,8 +35,12 @@ func New(ctx *pulumi.Context, project string, provider pulumi.ProviderResource) 
 // Plain returns secret id's latest value in plaintext. A trailing newline,
 // the usual leftover of `echo ... |`, is dropped: no value here ends in one
 // on purpose.
+//
+// getSecretVersionAccess, not getSecretVersion: the latter also reads the
+// version's metadata (secretmanager.versions.get), which the deployer's
+// per-secret secretAccessor grant doesn't include.
 func (r *Reader) Plain(id string) string {
-	v, err := secretmanager.LookupSecretVersion(r.ctx, &secretmanager.LookupSecretVersionArgs{
+	v, err := secretmanager.GetSecretVersionAccess(r.ctx, &secretmanager.GetSecretVersionAccessArgs{
 		Project: &r.project,
 		Secret:  id,
 	}, r.opt)

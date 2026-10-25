@@ -1,7 +1,7 @@
 # Runbook
 
-Everything below runs from a workstation with `gopass`, `pulumi`, `kubectl`,
-`ansible` (from `ansible/requirements.txt`), `aws` and `gcloud`, after
+Everything below runs from a workstation with `gopass`, `pulumi`, `ansible`
+(`ansible/requirements.txt`, installed with uv), `aws` and `gcloud`, after
 `source scripts/env.sh`.
 
 ## First deploy
@@ -11,138 +11,159 @@ Secrets go to Secret Manager and gopass together, through
 gcloud logged in as the owner of `watchtower-observe` and an unlocked
 gopass.
 
-1. **Hetzner Console** (project of your choice):
-   - three API tokens, read/write: one for Pulumi, one for the
-     cloud-controller-manager, one for fipd;
-   - five S3 credentials: `admin`, `loki`, `mimir`, `tempo`, `logship`;
-   - note the project ID from the Console URL (`/projects/<id>/servers`).
+1. **Hetzner Console**, project `watchtower-observe-prod`:
+   - one API token, read/write (Hetzner tokens are project-wide anyway);
+   - two S3 credentials: `admin` and `cluster`.
 
-   **Gitea:** two tokens for the package registry, one `write:package`
-   (pushes) and one `read:package` (pulls).
+   **Healthchecks.io**, project `jasonmross.dev`:
+   - an API key (read-write), for `scripts/healthchecks.sh`;
+   - one check for the nightly backup of Grafana's database: schedule Cron
+     `30 2 * * *` in UTC, grace 1 hour, with the project's notifications
+     (ours is named `healthchecks-pg-backup-url`). Copy its ping URL.
 2. **Store every secret.** Paste each token or key at the hidden prompt;
    generate the rest:
    ```bash
    scripts/secret.sh put hcloud-token
-   scripts/secret.sh put hcloud-ccm-token
-   scripts/secret.sh put hcloud-fip-token
-   for k in admin loki mimir tempo logship; do
+   scripts/secret.sh put healthchecks-pg-backup-url
+   scripts/secret.sh put healthchecks-jasonmross-dev-api-key
+   scripts/healthchecks.sh   # a check per host; stores healthchecks-host-urls
+   for k in admin cluster; do
      scripts/secret.sh put "s3-$k-access-key"
      scripts/secret.sh put "s3-$k-secret-key"
    done
-   scripts/secret.sh put registry-push-token   # write:package
-   scripts/secret.sh put registry-pull-token   # read:package
    ssh-keygen -t ed25519 -N '' -C watchtower-root -f ./watchtower-root
    scripts/secret.sh put ssh-private-key <./watchtower-root && shred -u ./watchtower-root
    openssl rand -base64 48 | scripts/secret.sh put pulumi-passphrase
-   openssl rand -base64 24 | scripts/secret.sh put grafana-admin-password
-   openssl rand -base64 24 | scripts/secret.sh put wg-easy-password
    openssl rand -base64 48 | scripts/secret.sh put luks-passphrase
+   openssl rand -base64 48 | scripts/secret.sh put grafana-secret-key
+   for id in grafana-admin-password grafana-db-password postgres-superuser-password \
+       postgres-replication-password patroni-restapi-password wg-easy-password; do
+     openssl rand -base64 24 | tr -d '/+=' | scripts/secret.sh put "$id"
+   done
    ```
-3. **Stack config.** In `infra/cloud/Pulumi.prod.yaml` set
-   `hetznerProjectId`, `sshPublicKey` (`watchtower-root.pub`) and tighten
-   `adminCidrs`. Commit it.
+3. **Stack config.** In `infra/cloud/Pulumi.prod.yaml` set `sshPublicKey`
+   (`watchtower-root.pub`). Commit it. `ciCidrs` is the only public SSH
+   source: the deploy runners, to the proxy.
 4. **Bootstrap** (state bucket, DNS zone and delegation, service accounts,
-   the secrets' access grants), then the two GCP keys:
+   the image registry, the secrets' access grants), then the four GCP keys:
    ```bash
    source scripts/env.sh
    scripts/bootstrap.sh
    dig +short NS watchtower.jasonmross.dev   # four ns-cloud-* names
    scripts/rotate-gcp-key.sh deployer        # Actions secret GCP_DEPLOYER_KEY + gopass
    scripts/rotate-gcp-key.sh caddy           # secret caddy-dns-key
-   scripts/secret.sh gitea registry-push-token REGISTRY_TOKEN
+   scripts/rotate-gcp-key.sh pusher          # secret gar-push-key + Actions secret GAR_PUSH_KEY
+   scripts/rotate-gcp-key.sh puller          # secret gar-pull-key
    scripts/secret.sh check                   # nothing missing
    ```
    Delete anything the leftover listing shows that the new stack doesn't own.
-5. **Initialise the stacks** (`env.sh` again, now that the deployer key is
-   in gopass):
+5. **Initialise the stack** (`env.sh` again, now that the deployer key is in
+   gopass):
    ```bash
    source scripts/env.sh
-   cd infra && go build -o bin/cloud ./cloud && go build -o bin/apps ./apps
+   cd infra && go build -o bin/cloud ./cloud
    (cd cloud && pulumi stack init prod --secrets-provider passphrase)
-   (cd apps && pulumi stack init prod --secrets-provider passphrase)
    ```
-   Commit both `Pulumi.prod.yaml` files: `stack init` only adds the
-   `encryptionsalt`.
+   Commit `Pulumi.prod.yaml`: `stack init` only adds the `encryptionsalt`.
 6. **Gitea:** in Settings → Branches, protect main and require the `ci`
-   checks: `go (fipd)`, `go (infra)`, `manifests`, `ansible`,
-   `images (caddy)`, `images (fipd)`, `shell`, `alloy`.
-7. **Merge to main.** `deploy.yml` creates the nodes, runs Kubespray (30–60
-   minutes the first time), deploys the workloads and verifies them.
-8. **First peer:** the TLS UI on `https://watchtower.jasonmross.dev:51821` is
-   only reachable from a peer, so create the first one through a
-   port-forward:
+   checks: `go`, `ansible`, `configs`, `images (caddy)`, `images (patroni)`,
+   `semgrep`, `shell`, `alloy`.
+7. **Merge to main.** `deploy.yml` builds both images, creates the hosts,
+   installs everything (all three nodes at once the first time), and
+   verifies it end to end.
+8. **Your VPN peer.** The deploy created the wg-easy client `owner` and
+   added its config to the secret `wireguard-owner-peer`
+   (`ansible/roles/edge/tasks/owner-peer.yml`). Fetch it and import it:
    ```bash
-   kubectl -n watchtower-edge port-forward deploy/edge 51822:51822
-   # http://127.0.0.1:51822, user admin, the wg-easy password
+   scripts/secret.sh pull wireguard-owner-peer
+   gopass show -n watchtower/wireguard-owner-peer >watchtower.conf
+   nmcli connection import type wireguard file watchtower.conf && shred -u watchtower.conf
+   nmcli connection up watchtower
+   ssh root@10.8.0.1           # the proxy, over the tunnel
    ```
-   Create a client, import its config, connect, then use the TLS UI on
-   `:51821` from then on.
+   The tunnel is split: only 10.8.0.0/24 goes through it, and your own DNS
+   stays as it is. More peers come from the UI on
+   `https://watchtower.jasonmross.dev:51821` (user `admin`, the wg-easy
+   password).
 9. Open `https://watchtower.jasonmross.dev` (Grafana, user `admin`) and point
    a test Alloy (`config/alloy/config.alloy.example`) at the stack.
 
-## Cluster access
+## Host access
+
+SSH is only for WireGuard peers, and the deploy:
+
+| From | To | Path |
+|---|---|---|
+| A VPN peer (you) | the proxy | `10.8.0.1`, over the tunnel |
+| A VPN peer | a node | through the proxy, to the node's private address |
+| The deploy runners (`ciCidrs`) | the proxy | its public address |
+| The deploy runners | a node | through the proxy, to the node's private address |
+
+The nodes take nothing on their public addresses, and only the proxy's
+private address may reach their SSH.
 
 ```bash
-source scripts/env.sh
+source scripts/env.sh       # the key, as ANSIBLE_PRIVATE_KEY_FILE and in ssh-agent
 (cd infra/cloud && pulumi stack output inventory >../../ansible/inventory/hosts.yml \
   && pulumi stack output knownHosts >../../ansible/inventory/known_hosts)
-(cd ansible && ansible-playbook playbooks/kubeconfig.yml)   # -> ~/.kube/watchtower
-kubectl get nodes
+(cd ansible && ansible all -m ping -e watchtower_ssh_via=vpn)
+ssh root@10.8.0.1                       # the proxy
+ssh -J root@10.8.0.1 root@10.20.1.11    # watchtower-1 (10.20.1.1<n>)
+WATCHTOWER_SSH_VIA=vpn scripts/verify.sh <caddy-digest> <archive-bucket>
 ```
 
-The API answers only on admin and CI addresses (`adminCidrs`, `ciCidrs`).
+For plain `ssh`, add the pinned host keys to your own known_hosts once:
+`cat ansible/inventory/known_hosts >>~/.ssh/known_hosts`. They are listed
+under the tunnel and private addresses too.
+
+Every service is a quadlet: `/etc/containers/systemd/<name>.container`
+generates `<name>.service`.
+
+```bash
+systemctl status loki mimir kafka etcd patroni grafana 'tempo-*'
+journalctl -u loki -f                   # every container logs to the journal
+podman ps
+```
+
+Change a service through its role and a deploy, never by hand: the next
+deploy would put it back.
 
 ## WireGuard peers
 
 Peers are managed in the wg-easy UI at `https://watchtower.jasonmross.dev:51821`
 (from a peer). Each client config points at `vpn.watchtower.jasonmross.dev`
-(the Floating IP) and routes only 10.8.0.0/24. Revoke a peer by disabling or
+(the proxy) and routes only 10.8.0.0/24. Revoke a peer by disabling or
 deleting it in the UI; it takes effect at once.
 
-## The Floating IP
+## Reboots
 
-fipd moves the VPN address to the node running the edge pod. Check it:
-
-```bash
-kubectl -n watchtower-edge get pod -l app.kubernetes.io/name=edge -o wide
-kubectl -n watchtower-fip logs deploy/fipd --tail=20
-hcloud floating-ip list -l role=watchtower-vpn
-```
-
-**Edge pod stuck Terminating on a dead node** (the node will not come back
-soon): the replacement waits up to six minutes for its two volumes. To hurry it:
+dnf-automatic installs security updates nightly and never reboots. When one
+needs a reboot, `watchtower-reboot.timer` reboots the host in its window,
+Sunday UTC: the proxy at 07:00, nodes 1, 2, 3 at 08:00, 09:00, 10:00. A node
+first checks that the others' Loki and Mimir are ready, that Kafka is fully
+replicated and that Patroni has a leader and two streaming replicas; if not,
+it skips the week. If it leads Postgres, it hands leadership to a replica
+first.
 
 ```bash
-kubectl -n watchtower-edge delete pod <old-pod> --grace-period=0 --force
+journalctl -u watchtower-reboot --since -7d    # what it decided
+needs-restarting -r                            # pending?
+systemctl start watchtower-reboot.service      # run the gate now
 ```
 
-**Manual override** (fipd down): `hcloud floating-ip assign watchtower-vpn
-watchtower-N`, where N is the edge pod's node. fipd leaves a correct
-assignment alone.
+The proxy's reboot is a minute of no ingest and no UI.
 
-## Nodes
+## Host firewall
 
-### Reboots
-dnf-automatic installs security updates nightly and never reboots. When an
-update needs a reboot, the `reboot-required` timer writes
-`/var/run/reboot-required` and **kured** drains and reboots one node at a
-time, Sundays 01:00–05:00 America/Chicago. During a node's reboot:
-- Loki keeps accepting writes (three ingesters, RF 3, quorum 2);
-- the edge pod moves (about a minute of VPN downtime) unless it was elsewhere;
-- **Mimir is a singleton**: remote_write clients get a few minutes of 5xx and
-  retry from their WAL. Grafana is a singleton too.
-
-```bash
-kubectl -n kube-system logs ds/kured --tail=50
-ssh root@<node> cat /var/run/reboot-required   # present = pending
-```
-
-### Host firewall
-Each node runs a raw nftables ruleset in its own table, `inet watchtower`
+Each host runs a raw nftables ruleset in its own table, `inet watchtower`
 (`ansible/roles/firewall`), loaded by `watchtower-nftables.service`. It
-mirrors the Hetzner Cloud Firewall from the same `adminCidrs`, `ciCidrs` and
-`wireguardAllowCidrs`, and admits everything from the private network and
-the pods. Pod-to-pod traffic is Cilium's to filter. firewalld is masked.
+mirrors the Hetzner Cloud Firewalls from the same `ciCidrs` and
+`wireguardAllowCidrs`. SSH: on the proxy from the deploy runners and from
+WireGuard peers on the tunnel address; on a node only from the proxy's
+private address. On the mesh (wg1), nodes reach each other fully and the
+proxy only the ports Caddy proxies to. Kafka, etcd, Patroni and
+Postgres have no authentication of their own beyond Postgres's: the
+firewall is what keeps them to the nodes. firewalld is masked.
 
 ```bash
 nft list table inet watchtower
@@ -150,42 +171,156 @@ journalctl -k -g 'nft-drop' --since -1h      # what it dropped (sampled)
 systemctl reload watchtower-nftables         # after editing the file by hand
 ```
 
-**Never run `nft flush ruleset` on a node, and leave `nftables.service`
-masked** (its reload and stop do the same): it wipes every table, kube-proxy's,
-Cilium's and portmap's included. If a node's rules were flushed anyway, drain
-and reboot it rather than restarting agents one by one: portmap writes the
-edge pod's hostPort rule only when that pod starts.
+**Never run `nft flush ruleset`, and leave `nftables.service` masked** (its
+reload and stop do the same): it wipes every table, fail2ban's and wg-easy's
+included. If it happens, reboot the host.
 
-### Adding workers
-Set `watchtower:nodeCount` above 3 and merge. `deploy.yml` creates the
-servers and runs Kubespray's `scale.yml` (workers only; etcd stays at three).
+## Postgres (Patroni)
 
-### Replacing a control-plane node
-A replacement of `watchtower-1..3` is refused unless dispatched with
-`allow_replace=true`, because it touches etcd. The node keeps its primary IPs
-and host key. Follow Kubespray's
-[recover-control-plane](https://github.com/kubernetes-sigs/kubespray/blob/v2.32.0/docs/operations/recover-control-plane.md)
-procedure (`kubernetes_sigs.kubespray.recover_control_plane`), then
-dispatch `deploy.yml` with `kubespray=cluster`.
+```bash
+podman exec patroni patronictl -c /etc/patroni/patroni.yml list
+podman exec patroni patronictl -c /etc/patroni/patroni.yml switchover --leader <node> --force
+```
 
-### Kubernetes upgrades
-Bump `kube_version` (and Kubespray, in `ansible/requirements.*`) in a PR. A
-push that changes `kube_version` fails the deploy on purpose; dispatch
-`deploy.yml` with `kubespray=upgrade`, which drains and upgrades one node at
-a time.
+A dead primary fails over in about 30 seconds: etcd's leader key expires
+and a replica no more than 1 MB behind takes over. The Grafanas reconnect to
+whichever node accepts writes (`target_session_attrs=read-write`). A member
+that comes back behind is rewound or recloned by Patroni.
+
+## Grafana database backups
+
+Patroni's replicas survive a lost node, not a mistake: a deleted dashboard,
+a bad Grafana upgrade or a lost LUKS key reaches every copy at once. So
+every night at 02:30 UTC the Postgres leader dumps the `grafana` database
+(`pg_dump --format=custom`) to
+`s3://jmr-watchtower-postgres-backups/grafana/grafana-<UTC time>.dump`
+(`ansible/roles/pgbackup`). The bucket's lifecycle rule deletes each dump
+after 90 days. The servers' cluster key can only add dumps; reading,
+listing and deleting them takes the admin key.
+
+- **Alerts** come from the Healthchecks.io check behind
+  `healthchecks-pg-backup-url`:
+  - a failed run reports to it at once, with its log (`OnFailure=`);
+  - a night without a successful run alerts once the check's grace runs
+    out;
+  - a run also fails, and alerts, when no Patroni member reports a leader,
+    since then no node would back up.
+- **A backup now:** `systemctl start watchtower-pg-backup` on every node.
+  Replicas exit; the leader dumps. Every deploy's verify step does this.
+- **Logs:** `journalctl -u watchtower-pg-backup` on the node.
+
+### Restoring
+
+1. Fetch a dump with the admin key:
+   ```bash
+   source scripts/env.sh
+   s3() { aws --endpoint-url https://fsn1.your-objectstorage.com --region fsn1 "$@"; }
+   s3 s3 ls s3://jmr-watchtower-postgres-backups/grafana/ | tail
+   s3 s3 cp s3://jmr-watchtower-postgres-backups/grafana/grafana-<time>.dump ./grafana.dump
+   ```
+2. Stop all three Grafanas, so nothing writes during the restore:
+   `systemctl stop grafana` on every node.
+3. Restore on the leader (`patronictl list` names it; `<leader>` is its
+   private address, 10.20.1.1<n>). The replicas follow
+   by streaming replication:
+   ```bash
+   ssh -J root@10.8.0.1 root@<leader> podman exec -i patroni \
+     pg_restore --clean --if-exists --single-transaction --dbname=grafana <grafana.dump
+   ```
+4. `systemctl start grafana` on every node, then check the UI.
+
+To get back one dashboard rather than everything, restore into a scratch
+database on the leader instead, with Grafana left running:
+```bash
+ssh -J root@10.8.0.1 root@<leader> podman exec patroni createdb grafana_restore
+ssh -J root@10.8.0.1 root@<leader> podman exec -i patroni pg_restore --dbname=grafana_restore <grafana.dump
+```
+Copy the dashboard's JSON out of its `dashboard` table, import it in
+Grafana, then `podman exec patroni dropdb grafana_restore`.
+
+A dump is only usable with the `grafana-secret-key` in force when it was
+made: Grafana encrypts datasource secrets with it.
+
+## Host health
+
+High availability hides a lost node from users, so each host reports on
+itself instead (`ansible/roles/health`). Every 5 minutes
+`watchtower-health.timer` checks that:
+- every service on the host is active: each quadlet, plus WireGuard, the
+  firewall, fail2ban and the update, reboot and backup timers;
+- each service on a node answers ready: Loki, Mimir, every Tempo
+  component, Grafana, Patroni and etcd, and Kafka takes connections. On the
+  proxy, Caddy answers TLS for the domain on the tunnel address;
+- SELinux is enforcing, the data volume is mounted, and `/` and the
+  volume are under 90% full.
+
+It reports to the host's own Healthchecks.io check (`watchtower-proxy`,
+`watchtower-1`, ...; project `jasonmross.dev`), which emails:
+- **two unhealthy runs in a row** (5 to 10 minutes): `/fail`, with the
+  problems. A single bad run is only logged on the check, since a deploy
+  restarts services;
+- **no report for 15 minutes**: the host is down, cut off, or its timer
+  is dead.
+
+`scripts/healthchecks.sh` creates the checks (one per host from
+`nodeCount`; re-run it after changing that) and stores their ping URLs as
+`healthchecks-host-urls`. The deploy gives each host only its own URL.
+On a host, `watchtower-health check` prints what it sees now, without
+reporting. Every deploy's verify step runs it on each host.
+
+## Kafka
+
+```bash
+podman exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server=<mesh-ip>:9092 \
+  --describe --topic tempo-traces
+podman exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server=<mesh-ip>:9092 \
+  --describe --under-replicated-partitions     # empty when healthy
+```
+
+Three brokers, each also a KRaft controller; every partition three copies,
+two in sync to accept a write. A broker's data lives on its node's volume,
+so a rebuilt node rejoins with its log and catches up.
+
+## Moving a Tempo singleton
+
+The block builder (node 1) and the backend scheduler (node 2) run once
+each. If their node is down for long, move them: change
+`tempo_block_builder_host` or `tempo_backend_scheduler_host` in
+`ansible/inventory/group_vars/all/placement.yml` and merge. The deploy stops
+the component on the old node and starts it on the new one. Kafka keeps 24
+hours of traces for the block builder to catch up on.
+
+## Rebuilding a host
+
+Servers are replaced **delete-first**: the account's 26-vCPU cap has no room
+for the new server next to the old one. Each host's primary IPs, SSH host
+key and data volume survive, so a rebuilt node comes back with its address,
+its known_hosts entry, and its Loki WAL, Kafka log, etcd member and Postgres
+data.
+
+```bash
+source scripts/env.sh
+cd infra/cloud
+pulumi up --replace 'urn:pulumi:prod::watchtower-cloud::hcloud:index/server:Server::watchtower-2'
+```
+
+Then dispatch `deploy.yml`. Ansible reinstalls the host and gives it a new
+mesh key; every other host's wg1 picks it up in the same run. A rebuild
+from CI instead needs `allow_replace=true` (the preview guard refuses
+otherwise).
 
 ## Log archive
 
 ```bash
-aws --endpoint-url https://nbg1.your-objectstorage.com --region nbg1 \
+aws --endpoint-url https://fsn1.your-objectstorage.com --region fsn1 \
   s3 ls s3://jmr-watchtower-logs-archive/containers/$(date -u +%Y/%m/%d)/ --recursive
-aws --endpoint-url https://nbg1.your-objectstorage.com --region nbg1 \
+aws --endpoint-url https://fsn1.your-objectstorage.com --region fsn1 \
   s3 cp s3://jmr-watchtower-logs-archive/journal/2026/10/24/03/watchtower-1-0412-<uuid>.gz - | zcat | head
 ```
 
 Prefixes: `containers/`, `journal/`, `audit/` (all expire after 90 days) and
 `gdpr-audit/` (kept). Fluent Bit uploads about every five minutes. The
-archive key can only write; reading needs the admin key.
+cluster key can only write there; reading needs the admin key.
 
 ## GDPR right to erasure
 
@@ -202,51 +337,49 @@ their 90- and 30-day retention is the erasure window.
 
 Every secret but `GCP_DEPLOYER_KEY` is stored with `scripts/secret.sh put
 <id>`, which adds a new version in Secret Manager and replaces the gopass
-copy. The cluster gets it on the next deploy: push to main, or dispatch
-`deploy` with `kubespray=skip`.
+copy. The hosts get it on the next deploy (push to main, or dispatch
+`deploy.yml`); only the containers that use it restart.
 
 | Credential | How |
 |---|---|
 | `GCP_DEPLOYER_KEY` | `scripts/rotate-gcp-key.sh deployer` (every 90 days) |
 | Caddy DNS-01 key | `scripts/rotate-gcp-key.sh caddy`, then deploy |
-| Hetzner tokens | new token in the Console → `secret.sh put hcloud-token` (or `hcloud-ccm-token`, `hcloud-fip-token`) → deploy → delete the old one |
-| Component S3 keys | new key → `secret.sh put s3-<key>-access-key` and `-secret-key` → deploy (both stacks read them) → delete the old key |
+| Image push key | `scripts/rotate-gcp-key.sh pusher` (updates `GAR_PUSH_KEY` too) |
+| Image pull key | `scripts/rotate-gcp-key.sh puller`, then deploy |
+| Hetzner token | new token in the Console → `secret.sh put hcloud-token` → delete the old one (only Pulumi uses it) |
+| Cluster S3 key | new key → `secret.sh put s3-cluster-access-key` and `-secret-key` → deploy (the bucket policies and every service follow) → delete the old key |
 | Admin S3 key | new key → `secret.sh put s3-admin-access-key` and `-secret-key` → `source scripts/env.sh && scripts/bootstrap.sh` (state bucket policy) → deploy → delete the old key |
-| Registry push token | new token → `secret.sh put registry-push-token` → `secret.sh gitea registry-push-token REGISTRY_TOKEN` → delete the old one |
-| Pulumi passphrase | `pulumi stack change-secrets-provider passphrase` per stack with the new one, then `secret.sh put pulumi-passphrase` |
-| Node SSH key | new key → `watchtower:sshPublicKey` and `/root/.ssh/authorized_keys` on every node → `secret.sh put ssh-private-key` |
+| Grafana, Postgres, Patroni passwords | `secret.sh put <id>`, then deploy. Postgres passwords change in the database too: run `ALTER ROLE` as the superuser (`podman exec -it patroni psql`) before the deploy |
+| `grafana-secret-key` | don't, unless compromised: it encrypts datasource secrets in the database, which would have to be re-entered |
+| `luks-passphrase` | `cryptsetup luksAddKey` on every host with the new one, `secret.sh put luks-passphrase`, deploy, then `luksRemoveKey` the old |
+| Pulumi passphrase | `pulumi stack change-secrets-provider passphrase` with the new one, then `secret.sh put pulumi-passphrase` |
+| Hosts' SSH key | new key → `watchtower:sshPublicKey` and `/root/.ssh/authorized_keys` on every host → `secret.sh put ssh-private-key` |
+| Backup check's ping URL | a new check → `secret.sh put healthchecks-pg-backup-url` → deploy → delete the old check |
+| Healthchecks.io API key | a new key in the project's settings → `secret.sh put healthchecks-jasonmross-dev-api-key` → revoke the old one (only `scripts/healthchecks.sh` uses it) |
+| Hosts' ping URLs | delete a host's check, `scripts/healthchecks.sh` (it makes a new one), then deploy |
 
 Old versions stay in Secret Manager's history until destroyed:
 `gcloud secrets versions destroy <n> --secret <id> --project watchtower-observe`.
-
-## Released volumes
-
-The storage class keeps volumes when their claims go (`reclaimPolicy:
-Retain`), so no deploy can delete telemetry WALs or Grafana's database. A
-deleted claim leaves a `Released` PersistentVolume and a billed Hetzner
-Volume:
-
-```bash
-kubectl get pv | grep Released
-kubectl delete pv <name>         # then delete the volume in the Console
-```
 
 ## Common issues
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Deploy stops at "Destructive changes to guarded resources" | The preview would replace a node, IP, bucket, volume or namespace | Read the listed URNs; if intended, dispatch with `allow_replace=true` |
-| Deploy fails "kube_version changed" | Kubernetes upgrade pushed | Dispatch with `kubespray=upgrade` |
+| Deploy stops at "Destructive changes to guarded resources" | The preview would replace a server, IP, volume or bucket | Read the listed URNs; if intended, dispatch with `allow_replace=true` |
 | Ansible "Host key verification failed" | `known_hosts` stale or missing | Re-export `knownHosts` from the cloud stack |
-| Peers connect but get no handshake | Floating IP on the wrong node | See "The Floating IP" |
-| Caddy has no certificate | DNS-01 failing | `kubectl -n watchtower-edge logs deploy/edge -c caddy`; check the key and that the zone is delegated |
-| A node drops traffic it should accept | The address isn't in the lists the ruleset mirrors | `journalctl -k -g nft-drop` on the node; fix the cloud stack's CIDR config and merge; every deploy renders the ruleset again |
-| Pods blocked by SELinux | A workload needs host access it wasn't given | `ausearch -m avc -ts recent` on the node; do not switch SELinux to permissive — fix the pod's `seLinuxOptions` |
+| A service won't start | Its config or a secret | `journalctl -u <name> -n 100`; `systemctl cat <name>` shows the generated unit |
+| A node's services can't reach each other | wg1 down or a stale peer key | `wg show wg1` (a handshake per peer); a deploy re-renders every host's peers |
+| Caddy has no certificate | DNS-01 failing | `journalctl -u caddy`; check the key and that the zone is delegated |
+| A host drops traffic it should accept | The address isn't in the lists the ruleset mirrors | `journalctl -k -g nft-drop`; fix the cloud stack's CIDR config and merge |
+| A container is blocked by SELinux | It needs host access it wasn't given | `ausearch -m avc -ts recent`; do not switch SELinux to permissive — fix the quadlet's volume labels or, as a last resort, `SecurityLabelDisable` for that one container |
 | Loki "no org id" | Client without `X-Scope-OrgID` | Fix the Alloy config |
-| Ingester PVC pending | hcloud-csi or its token | `kubectl -n kube-system logs deploy/hcloud-csi-controller` |
+| Healthchecks.io: a host's check is down | The host reported problems twice in a row, or stopped reporting (down, cut off from the internet, its timer dead) | The alert lists the problems. If it went silent: is the server up (Hetzner Console), and `systemctl status watchtower-health.timer` on it. `watchtower-health check` shows what it sees now |
+| Healthchecks.io: the backup check is down | The nightly backup failed or never ran | The alert carries the run's log; else `journalctl -u watchtower-pg-backup -n 50` on the leader. Usual causes: a cluster S3 key replaced but not yet deployed, no Patroni leader, or the volume not mounted. `systemctl start watchtower-pg-backup` on every node retries |
+| Tempo queries miss recent traces | A live-store or the Kafka path | `systemctl status 'tempo-*'` on each node; Kafka's under-replicated partitions |
 
 ## Cost
 
-Roughly three times the old single CPX42: three CPX42 nodes, about 250 GB of
-volumes, three primary IPv4s, one Floating IPv4, and Hetzner Object Storage
-(base fee plus usage). No load balancers. Cloud DNS costs cents.
+About $100 a month (USD, no VAT): three cax31 ($74.97) and one cax11
+($6.99), four primary IPv4s ($2.40), 100 GB of volumes ($7.67), the Object
+Storage base fee (€6.49) and a dollar or two of GCP (DNS, Secret Manager,
+Artifact Registry). No load balancers, no Floating IP.

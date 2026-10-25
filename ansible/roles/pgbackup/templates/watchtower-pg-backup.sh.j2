@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Managed by Ansible (roles/pgbackup).
+#
+#   watchtower-pg-backup                  the nightly run (its timer)
+#   watchtower-pg-backup report-failure   the run's OnFailure= unit: sends the
+#                                         run's log to Healthchecks.io /fail,
+#                                         which alerts at once
+#
+# If this node leads Postgres, the run dumps Grafana's database to
+# s3://{{ watchtower_buckets['postgres-backups'] }}/{{ watchtower_postgres_backup_prefix }} and pings Healthchecks.io, which
+# also alerts when a night's ping never comes. The bucket's lifecycle rule
+# keeps each dump {{ watchtower_retention_days.postgres_backup }} days. On a replica the run does nothing, unless no
+# node reports a leader: then nothing would back up, so it fails.
+set -euo pipefail
+log() { echo "watchtower-pg-backup: $*"; }
+secret() { podman secret inspect --showsecret --format '{{ '{{' }}.SecretData{{ '}}' }}' "$1"; }
+
+# hc <suffix> <body file>: POST to the check's ping URL. The URL lets anyone
+# ping the check, so it reaches curl on stdin, never on a command line.
+hc() {
+  local url
+  url="$(secret healthchecks-pg-backup-url)"
+  printf 'url = "%s%s"\n' "$url" "$1" | curl -fsS -m 10 --retry 5 -K - --data-binary "@$2" -o /dev/null
+}
+
+work=""
+trap '[[ -z "$work" ]] || rm -rf "$work"' EXIT
+
+if [[ "${1:-}" == report-failure ]]; then
+  work="$(mktemp -d)"
+  {
+    echo "Grafana's database backup failed on {{ inventory_hostname }}."
+    journalctl -u watchtower-pg-backup.service -n 40 --no-pager -o short-iso
+  } >"${work}/body"
+  hc /fail "${work}/body"
+  exit 0
+fi
+
+status="$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://{{ mesh_ip }}:{{ watchtower_ports.patroni }}/primary || true)"
+if [[ "$status" != 200 ]]; then
+  for ip in {{ watchtower_node_ips | join(' ') }}; do
+    if curl -fsS -m 5 "http://${ip}:{{ watchtower_ports.patroni }}/cluster" 2>/dev/null |
+      jq -e 'any(.members[]; .role == "leader")' >/dev/null; then
+      log "not the Postgres leader; Patroni on ${ip} reports one, and the leader backs up"
+      exit 0
+    fi
+  done
+  log "no Patroni member reports a leader, so no node can back up"
+  exit 1
+fi
+
+mountpoint -q {{ watchtower_data }} || { log "{{ watchtower_data }} is not mounted"; exit 1; }
+work="$(mktemp -d -p {{ watchtower_data }}/pg-backup)"
+dump="${work}/grafana.dump"
+# UTC timestamps, so the keys sort by time.
+key="{{ watchtower_postgres_backup_prefix }}grafana-$(date -u +%Y%m%dT%H%M%SZ).dump"
+
+# Custom format: compressed, and pg_restore can restore all or part of it.
+podman exec patroni pg_dump --format=custom --dbname=grafana >"$dump"
+# A dump pg_restore can't read is no backup.
+podman exec -i patroni pg_restore --list <"$dump" >/dev/null
+
+# One PutObject, which is all the write-only key may do. Content-MD5 makes
+# the store refuse a body that changed on the way. The key reaches curl on
+# stdin, never on a command line.
+access="$(secret s3-cluster-access-key)"
+secret_key="$(secret s3-cluster-secret-key)"
+md5="$(openssl dgst -md5 -binary "$dump" | base64)"
+printf 'user = "%s:%s"\n' "$access" "$secret_key" |
+  curl -fsS -m 600 --retry 3 -K - --aws-sigv4 "aws:amz:{{ watchtower_s3_region }}:s3" \
+    -H "Content-MD5: ${md5}" -T "$dump" -o /dev/null \
+    "https://{{ watchtower_s3_endpoint }}/{{ watchtower_buckets['postgres-backups'] }}/${key}"
+summary="uploaded ${key} ($(stat -c %s "$dump") bytes)"
+log "$summary"
+
+# The backup is done either way; a failed ping only means Healthchecks.io
+# reports this night as missed.
+echo "$summary" >"${work}/body"
+hc "" "${work}/body" || log "could not ping Healthchecks.io"

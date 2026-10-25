@@ -18,7 +18,7 @@ set -euo pipefail
 [[ $# -ge 3 ]] || { echo "usage: $0 <tenant> '<selector>' <start> [end]" >&2; exit 1; }
 tenant="$1" selector="$2" start="$3" end="${4:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 LOKI="${LOKI_URL:-https://watchtower.jasonmross.dev:3100}"
-S3_ENDPOINT="https://nbg1.your-objectstorage.com"
+S3_ENDPOINT="https://fsn1.your-objectstorage.com"
 prefix="$(sed -n 's/^  watchtower:bucketPrefix: //p' "$(dirname "${BASH_SOURCE[0]}")/../infra/cloud/Pulumi.prod.yaml")"
 
 echo "==> Delete request: tenant=${tenant} selector=${selector} ${start} .. ${end}"
@@ -31,7 +31,7 @@ record="$(jq -n --arg t "$tenant" --arg s "$selector" --arg a "$start" --arg b "
   --arg by "$(git config user.email 2>/dev/null || whoami)" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '{submitted_at: $at, submitted_by: $by, tenant: $t, selector: $s, start: $a, end: $b, status: "submitted"}')"
 key="gdpr-audit/$(date -u +%Y/%m/%d)/$(date -u +%H%M%S)-${tenant}.json"
-aws --endpoint-url "$S3_ENDPOINT" --region nbg1 s3 cp - "s3://${prefix}-logs-archive/${key}" <<<"$record"
+aws --endpoint-url "$S3_ENDPOINT" --region fsn1 s3 cp - "s3://${prefix}-logs-archive/${key}" <<<"$record"
 
 echo "==> Recorded at s3://${prefix}-logs-archive/${key}"
 echo "Check progress: curl -H 'X-Scope-OrgID: ${tenant}' ${LOKI}/loki/api/v1/delete"

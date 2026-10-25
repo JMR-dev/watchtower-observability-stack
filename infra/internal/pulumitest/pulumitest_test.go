@@ -22,7 +22,7 @@ func careful(ctx *pulumi.Context) error {
 		return err
 	}
 	if err := ctx.RegisterResource("test:index:Other", "b", pulumi.Map{}, &b,
-		pulumi.Protect(true), pulumi.IgnoreChanges([]string{"x"})); err != nil {
+		pulumi.Protect(true), pulumi.IgnoreChanges([]string{"x"}), pulumi.DeleteBeforeReplace(true)); err != nil {
 		return err
 	}
 	var out map[string]interface{}
@@ -52,8 +52,9 @@ func TestRecordsResourcesAndInvokes(t *testing.T) {
 		Calls: map[string]CallFunc{lookupToken: func(args resource.PropertyMap) (resource.PropertyMap, error) {
 			return resource.PropertyMap{"answer": resource.NewStringProperty("42")}, nil
 		}},
-		Outputs: map[string]resource.PropertyMap{"test:index:Thing": {"extra": resource.NewStringProperty("y")}},
-		ID:      func(typ, name string) string { return "custom-" + name },
+		Outputs:      map[string]resource.PropertyMap{"test:index:Thing": {"extra": resource.NewStringProperty("y")}},
+		NamedOutputs: map[string]resource.PropertyMap{"b": {"only-b": resource.NewStringProperty("z")}},
+		ID:           func(typ, name string) string { return "custom-" + name },
 	}
 	if err := Run(t, opts, careful, m); err != nil {
 		t.Fatal(err)
@@ -68,7 +69,7 @@ func TestRecordsResourcesAndInvokes(t *testing.T) {
 	if Str(r.Inputs, "x") != "1" || Str(r.Inputs, "missing") != "" {
 		t.Errorf("inputs %v", r.Inputs)
 	}
-	if b := m.Named(t, "b"); !b.Protect || len(b.IgnoreChanges) != 1 || r.Protect {
+	if b := m.Named(t, "b"); !b.Protect || len(b.IgnoreChanges) != 1 || !b.DeleteBeforeReplace || r.Protect || r.DeleteBeforeReplace {
 		t.Errorf("options not recorded: a=%+v b=%+v", r, b)
 	}
 	if got := m.Invokes(); len(got) != 1 || got[0].Token != lookupToken {

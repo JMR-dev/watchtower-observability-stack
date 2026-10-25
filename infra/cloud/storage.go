@@ -19,8 +19,9 @@ import (
 // NotAction in a policy but ignores it, so "everything but PutObject" has to
 // be spelled out as a deny list.
 //
-// The list holds only because Fluent Bit uploads with use_put_object: a
-// multipart upload would also need CreateMultipartUpload, UploadPart and
+// The list holds only because both writers upload with a single PutObject
+// (Fluent Bit's use_put_object, the Postgres backup's curl -T): a multipart
+// upload would also need CreateMultipartUpload, UploadPart and
 // CompleteMultipartUpload.
 var writeOnlyDenied = []string{
 	"s3:GetObject",
@@ -91,7 +92,10 @@ func bucketPolicy(cfg *Config, bucket string, b names.Bucket) (string, error) {
 			Action:    writeOnlyDenied,
 			Resource:  resources,
 			Principal: &principals{AWS: []string{owner}},
-		}, statement{
+		})
+	}
+	if b.Suffix == names.BucketLogArchive {
+		doc.Statement = append(doc.Statement, statement{
 			// PutObject can overwrite; keep the shipper away from the
 			// erasure records.
 			Sid:       "OwnerLeavesGDPRRecords",
@@ -145,19 +149,20 @@ func newBuckets(ctx *pulumi.Context, cfg *Config, p *providers) (pulumi.StringMa
 	return out, nil
 }
 
-// lifecycleRules expires the whole bucket, or only the listed prefixes.
+// lifecycleRules expires the whole bucket, or only the listed prefixes. A
+// rule's status is the provider's to set (always Enabled); it refuses one
+// given here.
 func lifecycleRules(b names.Bucket) minio.IlmPolicyRuleArray {
 	expiration := pulumi.String(fmt.Sprintf("%dd", b.LifecycleDays))
 	if len(b.LifecyclePrefixes) == 0 {
 		return minio.IlmPolicyRuleArray{&minio.IlmPolicyRuleArgs{
-			Id: pulumi.String("expire"), Status: pulumi.String("Enabled"), Expiration: expiration,
+			Id: pulumi.String("expire"), Expiration: expiration,
 		}}
 	}
 	var rules minio.IlmPolicyRuleArray
 	for _, prefix := range b.LifecyclePrefixes {
 		rules = append(rules, &minio.IlmPolicyRuleArgs{
 			Id:         pulumi.String("expire-" + strings.TrimSuffix(prefix, "/")),
-			Status:     pulumi.String("Enabled"),
 			Filter:     pulumi.String(prefix),
 			Expiration: expiration,
 		})

@@ -1,5 +1,0 @@
----
-# `device reapply` applies the profile without taking eth0 down.
-- name: Reapply eth0
-  ansible.builtin.command: nmcli device reapply eth0
-  changed_when: true

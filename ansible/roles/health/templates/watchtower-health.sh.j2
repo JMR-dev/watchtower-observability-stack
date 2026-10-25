@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Managed by Ansible (roles/health). Checks {{ inventory_hostname }} and
+# reports to its Healthchecks.io check:
+#
+#   healthy                    ping
+#   unhealthy, first run       /log: no alert, since a deploy restarts things
+#   unhealthy, second run on   /fail, which alerts
+#
+# A host that stops pinging (down, cut off, this timer dead) alerts once the
+# check's grace runs out.
+#
+#   watchtower-health          check and report (watchtower-health.timer)
+#   watchtower-health check    check only: print the problems, exit 1 if any
+set -uo pipefail
+host={{ inventory_hostname }}
+
+problems=()
+problem() { problems+=("$*"); }
+ready() { # name url: answers 2xx
+  curl -fsS -o /dev/null -m 5 "$2" 2>/dev/null || problem "$1 is not ready ($2)"
+}
+
+# Every service this host runs: each quadlet's unit, and the rest by name.
+units=({{ (health_units_common + (health_units_node if 'nodes' in group_names else [])) | join(' ') }})
+for f in /etc/containers/systemd/*.container; do
+  [[ -e "$f" ]] && units+=("$(basename "$f" .container)")
+done
+for unit in "${units[@]}"; do
+  state="$(systemctl is-active "$unit" 2>/dev/null)" || problem "${unit} is ${state:-unknown}"
+done
+
+{% if 'nodes' in group_names %}
+ready loki http://{{ mesh_ip }}:{{ watchtower_ports.loki.http }}/ready
+ready mimir http://{{ mesh_ip }}:{{ watchtower_ports.mimir.http }}/ready
+{% for c in tempo_components %}
+ready tempo-{{ c }} http://{{ mesh_ip }}:{{ watchtower_ports.tempo[c].http }}/ready
+{% endfor %}
+ready grafana http://{{ mesh_ip }}:{{ watchtower_ports.grafana.http }}/api/health
+ready patroni http://{{ mesh_ip }}:{{ watchtower_ports.patroni }}/health
+ready etcd http://{{ mesh_ip }}:{{ watchtower_ports.etcd.client }}/health
+# Kafka has no HTTP endpoint; its broker port must take connections.
+timeout 5 bash -c '</dev/tcp/{{ mesh_ip }}/{{ watchtower_ports.kafka.broker }}' 2>/dev/null ||
+  problem "kafka does not accept connections on {{ mesh_ip }}:{{ watchtower_ports.kafka.broker }}"
+{% else %}
+# Caddy as a WireGuard peer reaches it: TLS for the domain on the tunnel
+# address. Any HTTP answer will do; a backend's health is its node's check.
+code="$(curl -sS -o /dev/null -w '%{http_code}' -m 10 \
+  --resolve {{ watchtower_domain }}:443:{{ watchtower_tunnel_ip }} https://{{ watchtower_domain }}/ 2>/dev/null)"
+[[ "$code" != 000 ]] || problem "caddy does not answer TLS for {{ watchtower_domain }} on {{ watchtower_tunnel_ip }}"
+{% endif %}
+
+[[ "$(getenforce)" == Enforcing ]] || problem "SELinux is $(getenforce), not Enforcing"
+mountpoint -q {{ watchtower_data }} || problem "{{ watchtower_data }} is not mounted"
+while read -r use target; do
+  ((${use%\%} < {{ health_disk_max_percent }})) || problem "${target} is ${use} full"
+done < <(df --output=pcent,target / {{ watchtower_data }} | tail -n +2)
+
+{% raw %}
+if [[ "${1:-}" == check ]]; then
+  [[ ${#problems[@]} -eq 0 ]] && exit 0
+  printf '%s\n' "${problems[@]}"
+  exit 1
+fi
+
+# hc <suffix> <body file>: POST to this host's ping URL. The URL lets anyone
+# ping the check, so it reaches curl on stdin, never on a command line.
+hc() {
+  local url
+  url="$(podman secret inspect --showsecret --format '{{.SecretData}}' healthchecks-host-url)" || return 1
+  printf 'url = "%s%s"\n' "$url" "$1" | curl -fsS -m 10 --retry 3 -K - --data-binary "@$2" -o /dev/null
+}
+
+strikes_file=/run/watchtower-health.strikes
+body="$(mktemp)"
+trap 'rm -f "$body"' EXIT
+if [[ ${#problems[@]} -eq 0 ]]; then
+  rm -f "$strikes_file"
+  echo "${host}: healthy (${#units[@]} services)" >"$body"
+  hc "" "$body"
+  exit
+fi
+
+strikes=$(($(cat "$strikes_file" 2>/dev/null || echo 0) + 1))
+echo "$strikes" >"$strikes_file"
+{
+  echo "${host}: ${#problems[@]} problem(s), ${strikes} run(s) in a row:"
+  printf -- '- %s\n' "${problems[@]}"
+} >"$body"
+printf 'watchtower-health: %s\n' "${problems[@]}"
+if ((strikes >= 2)); then
+  hc /fail "$body"
+else
+  hc /log "$body"
+fi
+{% endraw %}

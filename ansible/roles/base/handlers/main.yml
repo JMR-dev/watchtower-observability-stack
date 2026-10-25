@@ -4,10 +4,6 @@
     name: systemd-journald
     state: restarted
 
-- name: Reload systemd
-  ansible.builtin.systemd:
-    daemon_reload: true
-
 - name: Load wireguard
   community.general.modprobe:
     name: wireguard

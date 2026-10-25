@@ -1,0 +1,4 @@
+# ansible-lint for the CI ansible job, on top of requirements.txt. Compile with
+#   uv pip compile --generate-hashes --python-version 3.13 --universal requirements-lint.in -o requirements-lint.txt
+ansible-core==2.21.5
+ansible-lint==26.10.1

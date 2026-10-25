@@ -1,0 +1,49 @@
+---
+# A node counts as healthy when every service on it answers ready and the
+# clusters it is part of are whole again.
+- name: Loki, Mimir and every Tempo component answer ready
+  ansible.builtin.uri:
+    url: http://{{ mesh_ip }}:{{ item }}/ready
+  loop: >-
+    {{ [watchtower_ports.loki.http, watchtower_ports.mimir.http]
+       + (tempo_components | map('extract', watchtower_ports.tempo) | map(attribute='http') | list) }}
+  register: node_ready
+  until: node_ready.status == 200
+  retries: 60
+  delay: 5
+
+- name: Grafana answers
+  ansible.builtin.uri:
+    url: http://{{ mesh_ip }}:{{ watchtower_ports.grafana.http }}/api/health
+  register: node_grafana
+  until: node_grafana.status == 200
+  retries: 30
+  delay: 5
+
+- name: Kafka has no under-replicated partitions
+  ansible.builtin.command:
+    argv:
+      - podman
+      - exec
+      - kafka
+      - /opt/kafka/bin/kafka-topics.sh
+      - --bootstrap-server={{ mesh_ip }}:{{ watchtower_ports.kafka.broker }}
+      - --describe
+      - --under-replicated-partitions
+  register: node_kafka
+  until: node_kafka.rc == 0 and node_kafka.stdout | trim | length == 0
+  retries: 60
+  delay: 5
+  changed_when: false
+
+- name: Patroni has a leader and every replica streaming
+  ansible.builtin.uri:
+    url: http://{{ mesh_ip }}:{{ watchtower_ports.patroni }}/cluster
+    return_content: true
+  register: node_patroni
+  until: >-
+    node_patroni.status == 200
+    and (node_patroni.json.members | selectattr('role', 'equalto', 'leader') | list | length) == 1
+    and (node_patroni.json.members | selectattr('state', 'in', ['running', 'streaming']) | list | length) == groups['nodes'] | length
+  retries: 60
+  delay: 5

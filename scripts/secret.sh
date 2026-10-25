@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 # Store and check the stack's secrets. Each lives in two places: Secret
 # Manager in watchtower-observe, which the deploy reads, and gopass as
-# watchtower/<id>, the local copy. The ids are scripts/secret-names.txt;
-# anything else is refused.
+# watchtower/<id>, the local copy. Any Secret Manager id is accepted.
 #
 #   scripts/secret.sh put <id>        value from stdin (a pipe or a file), or
 #                                     typed at a hidden prompt
 #   scripts/secret.sh check           which secrets still lack a value or a
-#                                     gopass copy; exits 1 if any do
+#                                     gopass copy; exits 1 if any do. Checks
+#                                     every secret deploy.yml reads and every
+#                                     watchtower secret in Secret Manager
 #   scripts/secret.sh ensure <id>...  create empty secrets (bootstrap.sh does
-#                                     this for every listed id)
+#                                     this for every id deploy.yml reads)
+#   scripts/secret.sh deploy-ids      the ids deploy.yml reads, one a line
+#   scripts/secret.sh pull <id>       copy the latest value from Secret
+#                                     Manager into gopass: for the secrets
+#                                     the deploy writes (label writer=deploy),
+#                                     e.g. wireguard-owner-peer
 #   scripts/secret.sh gitea <id> <NAME>
 #                                     copy the latest value into the repo's
 #                                     Actions secret NAME (only
-#                                     registry-push-token -> REGISTRY_TOKEN
-#                                     needs this; GITEA_TOKEN or prompted)
+#                                     gar-push-key -> GAR_PUSH_KEY needs
+#                                     this; GITEA_TOKEN or prompted)
 #
 #   openssl rand -base64 48 | scripts/secret.sh put pulumi-passphrase
 #   scripts/secret.sh put ssh-private-key <./watchtower-root
@@ -46,13 +52,23 @@ LOCATION="${SECRET_LOCATION:-europe-west3}"
 GITEA_URL="${GITEA_URL:-https://gitea.jasonmross.dev}"
 REPO="${GITEA_REPO:-JMR-dev/watchtower-observability-stack}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-list="${repo_root}/scripts/secret-names.txt"
+workflow="${repo_root}/.gitea/workflows/deploy.yml"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
-usage() { die "usage: $0 put <id> | check | ensure <id>... | gitea <id> <NAME>"; }
+usage() { die "usage: $0 put <id> | check | ensure <id>... | gitea <id> <NAME> | deploy-ids | pull <id>"; }
 
-ids() { sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$list"; }
-known() { grep -qxF -- "$1" < <(ids) || die "${1} is not in scripts/secret-names.txt"; }
+# Secret Manager's id rule, less a leading dash: ids go on gcloud command
+# lines, where one would read as a flag.
+valid() {
+  [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,254}$ ]] ||
+    die "${1} is not a Secret Manager id (letters, digits, _ and -, up to 255)"
+}
+
+# The ids the deploy workflow reads: its setup steps' `secrets:` lines,
+# NAME=id or @NAME=id (.gitea/actions/setup).
+deploy_ids() {
+  sed -nE 's/^[[:space:]]+@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)[[:space:]]*$/\1/p' "$workflow" | sort -u
+}
 
 exists() { gcloud secrets describe "$1" --project "$PROJECT" >/dev/null 2>&1; }
 
@@ -127,23 +143,46 @@ gitea() {
   echo "copied ${id} to the Actions secret ${name} on ${REPO}"
 }
 
+pull() {
+  local id=$1
+  scratch
+  gcloud secrets versions access latest --secret "$id" --project "$PROJECT" --out-file "${work}/value"
+  gopass insert -f "watchtower/${id}" <"${work}/value" >/dev/null
+  echo "copied ${id} from Secret Manager to gopass (watchtower/${id})"
+}
+
 check() {
-  local id local_ids bad=0
+  local id local_ids written bad=0
   local_ids="$(gopass ls --flat watchtower 2>/dev/null || true)"
+  written="$(gcloud secrets list --project "$PROJECT" --filter labels.writer=deploy --format 'value(name)')"
   while read -r id; do
     if ! exists "$id"; then
       echo "missing  ${id}: no such secret (scripts/bootstrap.sh)"
       bad=1
-    elif [[ -z "$(gcloud secrets versions list "$id" --project "$PROJECT" \
+      continue
+    fi
+    if [[ -z "$(gcloud secrets versions list "$id" --project "$PROJECT" \
       --filter state=ENABLED --limit 1 --format 'value(name)')" ]]; then
+      # The deploy fills these; until the first one, empty is expected.
+      if grep -qxF "$id" <<<"$written"; then
+        echo "pending  ${id}: the deploy writes it"
+        continue
+      fi
       echo "empty    ${id}: no enabled version (scripts/secret.sh put ${id})"
       bad=1
     fi
     if ! grep -qxF "watchtower/${id}" <<<"$local_ids"; then
-      echo "no copy  ${id}: not in gopass as watchtower/${id}"
+      if grep -qxF "$id" <<<"$written"; then
+        echo "no copy  ${id}: not in gopass yet (scripts/secret.sh pull ${id})"
+      else
+        echo "no copy  ${id}: not in gopass as watchtower/${id}"
+      fi
       bad=1
     fi
-  done < <(ids)
+  done < <({
+    deploy_ids
+    gcloud secrets list --project "$PROJECT" --filter labels.app=watchtower --format 'value(name)'
+  } | sort -u)
   [[ "$bad" == 0 ]] && echo "every secret has a value in Secret Manager and a gopass copy"
   return "$bad"
 }
@@ -152,7 +191,7 @@ check() {
 case "$1" in
   put)
     [[ $# -eq 2 ]] || usage
-    known "$2"
+    valid "$2"
     put "$2"
     ;;
   check)
@@ -162,13 +201,22 @@ case "$1" in
   ensure)
     [[ $# -ge 2 ]] || usage
     shift
-    for id in "$@"; do known "$id"; done
+    for id in "$@"; do valid "$id"; done
     for id in "$@"; do ensure "$id"; done
     ;;
   gitea)
     [[ $# -eq 3 && "$3" =~ ^[A-Z][A-Z0-9_]*$ ]] || usage
-    known "$2"
+    valid "$2"
     gitea "$2" "$3"
+    ;;
+  deploy-ids)
+    [[ $# -eq 1 ]] || usage
+    deploy_ids
+    ;;
+  pull)
+    [[ $# -eq 2 ]] || usage
+    valid "$2"
+    pull "$2"
     ;;
   *) usage ;;
 esac

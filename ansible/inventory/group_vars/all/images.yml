@@ -1,0 +1,21 @@
+---
+# Every upstream image, pinned to the multi-arch index digest of the tag
+# (every host is arm64; CI's checks run some of them on amd64). Bump the tag and the digest
+# together:
+#   skopeo inspect --raw docker://<image>:<tag> | sha256sum
+# Our own two images (caddy_image, patroni_image) are set by the deploy
+# workflow to the digests it just built and pushed to Artifact Registry.
+watchtower_images:
+  loki: docker.io/grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
+  mimir: docker.io/grafana/mimir:3.2.3@sha256:0ed56db7d7713707eff00224ddd4c3096afa6cf1cbe43a6f9391c537f1416099
+  tempo: docker.io/grafana/tempo:3.1.1@sha256:64e2fbd56d9c2b3412a4b430a58ea59e91a670b1e75f920a0c702213ad145044
+  grafana: docker.io/grafana/grafana:13.2.4-distroless@sha256:ae3d3add290adbe6a88412229f5d76fd7bb82743050881698642d3d62f277e35
+  fluentbit: cr.fluentbit.io/fluent/fluent-bit:5.1.5@sha256:2740f387f6e68fab66d28e4fa6a853387b9cab6ffb4cb78958f69bba4eb0e7b4
+  wg_easy: ghcr.io/wg-easy/wg-easy:15.5.0@sha256:071f79a639e9361123a5e57733107320207b844ddbbd92dfa6962f541fe8aac8
+  kafka: docker.io/apache/kafka:4.4.0@sha256:833b867a9585a141da455dc2b57431c65cbccb27f11c91f694444cca9f777e0f
+  # 3.6, not 3.7: Patroni is confirmed on etcd 3.6, not yet on 3.7.
+  etcd: quay.io/coreos/etcd:v3.6.16@sha256:a9c7cc12156f4b26ca41f0b57ba5b76c45037ff6c1e47ea3d68cb7908d48a965
+
+# Artifact Registry, where caddy_image and patroni_image live. The hosts log
+# in with gar-pull-key (roles/registry).
+watchtower_registry: europe-west3-docker.pkg.dev

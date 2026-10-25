@@ -1,0 +1,41 @@
+# Managed by Ansible (roles/grafana).
+[Unit]
+Description=Grafana ({{ inventory_hostname }}, one of {{ groups['nodes'] | length }})
+Wants=network-online.target wg-quick@wg1.service
+After=network-online.target wg-quick@wg1.service patroni.service
+RequiresMountsFor={{ watchtower_data }}
+
+[Container]
+Image={{ watchtower_images.grafana }}
+ContainerName=grafana
+Network=host
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+LogDriver=journald
+Volume={{ watchtower_data }}/grafana:/var/lib/grafana:Z
+Volume={{ watchtower_config }}/grafana/grafana.ini:/etc/grafana/grafana.ini:ro,Z
+Volume={{ watchtower_config }}/grafana/provisioning:/etc/grafana/provisioning:ro,Z
+# Read through grafana.ini's $__file{} references.
+Secret=grafana-admin-password,type=mount,uid=472,mode=0400
+Secret=grafana-secret-key,type=mount,uid=472,mode=0400
+Secret=grafana-db-password,type=mount,uid=472,mode=0400
+# lib/pq tries [database] host's addresses in order until one takes writes:
+# Grafana follows a Patroni failover by itself.
+Environment=PGTARGETSESSIONATTRS=read-write
+{% for ip in watchtower_node_ips_local_first %}
+AddHost=loki.internal:{{ ip }}
+AddHost=mimir.internal:{{ ip }}
+{% endfor %}
+{% for ip in tempo_frontend_ips %}
+AddHost=tempo.internal:{{ ip }}
+{% endfor %}
+PodmanArgs=--memory={{ watchtower_memory.grafana }}m
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
