@@ -29,23 +29,25 @@
     - logship
     - reboot
 
-# The first deploy starts every node at once: etcd and Kafka need a quorum
-# before any member reports ready. After that, one node at a time, each
-# checked healthy before the next, so the cluster never loses more than one.
+# Until the cluster has passed its health gate once, every node goes at once:
+# etcd and Kafka need a quorum before any member reports ready, and a first
+# deploy that failed partway is finished the same way. After that, one node
+# at a time, each checked healthy before the next, so the cluster never loses
+# more than one. A node that passes the gate leaves a marker.
 - name: Decide how to roll the nodes
   hosts: nodes
   gather_facts: false
   tasks:
-    - name: Is etcd already installed here?
+    - name: Has this node passed the health gate before?
       ansible.builtin.stat:
-        path: /etc/containers/systemd/etcd.container
-      register: watchtower_etcd_unit
+        path: "{{ watchtower_config }}/healthy-once"
+      register: watchtower_healthy_once
 
     - name: Pick the batch size
       ansible.builtin.set_fact:
         watchtower_node_serial: >-
           {{ groups['nodes'] | length
-             if groups['nodes'] | map('extract', hostvars, 'watchtower_etcd_unit') | map(attribute='stat.exists') | select | list | length == 0
+             if groups['nodes'] | map('extract', hostvars, 'watchtower_healthy_once') | map(attribute='stat.exists') | select | list | length == 0
              else 1 }}
       run_once: true
       delegate_to: "{{ groups['nodes'][0] }}"
@@ -69,6 +71,13 @@
   post_tasks:
     - name: This node is healthy before the next one goes
       ansible.builtin.include_tasks: tasks/node-health.yml
+
+    - name: Remember that it was
+      ansible.builtin.copy:
+        content: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}\n"
+        dest: "{{ watchtower_config }}/healthy-once"
+        mode: "0644"
+        force: false
 
 - name: Proxy
   hosts: proxy
