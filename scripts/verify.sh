@@ -52,15 +52,18 @@ nodes="$(jq '.all.children.nodes.hosts | length' "$inv")"
 
 ssh_opts=(-i "${ANSIBLE_PRIVATE_KEY_FILE:?}" -o IdentitiesOnly=yes -o BatchMode=yes
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known")
-# The callers' arguments are the remote command, expanded here on purpose.
+# ssh joins its arguments into one line for the remote shell, so each is
+# quoted here: a header like 'Content-Type: application/json' or a JSON body
+# reaches the remote command as one argument, as it was given.
 # shellcheck disable=SC2029
 on() { # address command...: run as root on the proxy, or on a node (its private address) through the proxy
-  local addr=$1
+  local addr=$1 cmd
   shift
+  cmd="$(printf '%q ' "$@")"
   if [[ "$addr" == "$proxy_ip" ]]; then
-    ssh "${ssh_opts[@]}" "root@${addr}" "$@"
+    ssh "${ssh_opts[@]}" "root@${addr}" "$cmd"
   else
-    ssh "${ssh_opts[@]}" -o ProxyCommand="ssh $(printf '%q ' "${ssh_opts[@]}")-W %h:%p root@${proxy_ip}" "root@${addr}" "$@"
+    ssh "${ssh_opts[@]}" -o ProxyCommand="ssh $(printf '%q ' "${ssh_opts[@]}")-W %h:%p root@${proxy_ip}" "root@${addr}" "$cmd"
   fi
 }
 # edge <port> <curl args...>: a request to the domain through Caddy, from the
