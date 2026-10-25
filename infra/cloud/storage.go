@@ -23,10 +23,14 @@ import (
 // (Fluent Bit's use_put_object, the Postgres backup's curl -T): a multipart
 // upload would also need CreateMultipartUpload, UploadPart and
 // CompleteMultipartUpload.
+//
+// Reads are one wildcard, s3:GetObject*, which also covers the variants
+// listed nowhere here. Hetzner answers 503 to a policy naming an action it
+// doesn't know, such as s3:GetObjectAttributes; the wildcard it accepts and
+// enforces (checked on 2026-10-25: the cluster key could put, but not get,
+// head, list or delete).
 var writeOnlyDenied = []string{
-	"s3:GetObject",
-	"s3:GetObjectVersion",
-	"s3:GetObjectAttributes",
+	"s3:GetObject*",
 	"s3:DeleteObject",
 	"s3:DeleteObjectVersion",
 	"s3:ListBucket",

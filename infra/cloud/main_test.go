@@ -433,13 +433,17 @@ func TestWriteOnlyForTheCluster(t *testing.T) {
 		for _, a := range deny.Action.([]interface{}) {
 			denied[a.(string)] = true
 		}
-		for _, must := range []string{"s3:GetObject", "s3:DeleteObject", "s3:ListBucket", "s3:PutBucketPolicy", "s3:PutLifecycleConfiguration", "s3:DeleteBucket"} {
+		for _, must := range []string{"s3:GetObject*", "s3:DeleteObject", "s3:ListBucket", "s3:PutBucketPolicy", "s3:PutLifecycleConfiguration", "s3:DeleteBucket"} {
 			if !denied[must] {
 				t.Errorf("%s: write-only key may still %s", bucket, must)
 			}
 		}
 		if denied["s3:PutObject"] {
 			t.Errorf("%s: write-only key cannot write", bucket)
+		}
+		// Hetzner answers 503 to the whole policy over this one.
+		if denied["s3:GetObjectAttributes"] {
+			t.Errorf("%s: names s3:GetObjectAttributes, which Hetzner rejects", bucket)
 		}
 	}
 	gdpr := policyOf(t, m, "test-wt-logs-archive").Statement[2]
