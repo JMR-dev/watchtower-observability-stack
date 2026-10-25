@@ -1,10 +1,11 @@
 // Command watchtower-cloud provisions the Hetzner side of the stack: the
-// private network, three (or more) AlmaLinux nodes behind one firewall, the
-// VPN Floating IP, and the telemetry and log-archive buckets. It also writes
-// the three records in the Cloud DNS zone watchtower.jasonmross.dev.
+// private network, the proxy (x86, Caddy and the WireGuard endpoint) and three
+// (or more) ARM data nodes, each with its own data volume, the two firewalls,
+// and the telemetry and log-archive buckets. It also writes the two records in
+// the Cloud DNS zone watchtower.jasonmross.dev.
 //
-// What it hands on: the Ansible inventory Kubespray builds the cluster from.
-// Everything inside the cluster belongs to ../apps.
+// What it hands on: the Ansible inventory (../../ansible) that installs
+// everything on the hosts, as podman quadlets.
 //
 // Credentials come from the environment, never from stack config, so none of
 // them lands in state: HCLOUD_TOKEN (hcloud), MINIO_USER / MINIO_PASSWORD (the
@@ -62,12 +63,7 @@ func program(ctx *pulumi.Context) error {
 		return err
 	}
 
-	nodes, err := newNodes(ctx, cfg, p, net)
-	if err != nil {
-		return err
-	}
-
-	fip, err := newFloatingIP(ctx, cfg, p, nodes[0])
+	hs, err := newHosts(ctx, cfg, p, net)
 	if err != nil {
 		return err
 	}
@@ -77,20 +73,20 @@ func program(ctx *pulumi.Context) error {
 		return err
 	}
 
-	if err := newRecords(ctx, cfg, p, nodes, fip); err != nil {
+	if err := newRecords(ctx, cfg, p, hs.proxy); err != nil {
 		return err
 	}
 
-	ctx.Export("inventory", inventoryJSON(cfg, nodes, fip))
-	ctx.Export("knownHosts", knownHosts(nodes))
-	ctx.Export("floatingIpv4", fip.IpAddress)
+	ctx.Export("inventory", inventoryJSON(cfg, hs))
+	ctx.Export("knownHosts", knownHosts(hs.all()))
+	ctx.Export("proxyIpv4", hs.proxy.server.Ipv4Address)
 	ctx.Export("buckets", buckets)
 	ctx.Export("s3Endpoint", pulumi.String("https://"+names.S3Endpoint))
-	nodeIPs := pulumi.StringMap{}
-	for _, n := range nodes {
-		nodeIPs[n.name] = n.server.Ipv4Address
+	hostIPs := pulumi.StringMap{}
+	for _, h := range hs.all() {
+		hostIPs[h.name] = h.server.Ipv4Address
 	}
-	ctx.Export("nodeIpv4s", nodeIPs)
+	ctx.Export("hostIpv4s", hostIPs)
 	return nil
 }
 
@@ -116,7 +112,7 @@ func newProviders(ctx *pulumi.Context, cfg *Config) (*providers, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Generates the nodes' SSH host keys, locally.
+	// Generates the hosts' SSH host keys, locally.
 	t, err := tls.NewProvider(ctx, "tls", &tls.ProviderArgs{})
 	if err != nil {
 		return nil, err
@@ -125,7 +121,7 @@ func newProviders(ctx *pulumi.Context, cfg *Config) (*providers, error) {
 }
 
 // readSecrets fills in the access key IDs the bucket policies name: the admin
-// key's and each component's.
+// key's and the cluster key's.
 func readSecrets(ctx *pulumi.Context, cfg *Config, p *providers) error {
 	r := gsm.New(ctx, cfg.GCPProject, p.gcp)
 	cfg.S3AccessKeys = map[string]string{}

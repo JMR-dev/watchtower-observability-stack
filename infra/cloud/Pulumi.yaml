@@ -6,10 +6,10 @@ runtime:
     # infra/ (CI does the same).
     binary: ../bin/cloud
 description: |
-  Hetzner side of the watchtower stack: private network, nodes, firewall, VPN
-  Floating IP, telemetry and log-archive buckets, plus the records in the
-  Cloud DNS zone watchtower.jasonmross.dev. Kubernetes itself is Kubespray
-  (../../ansible); everything inside the cluster is ../apps.
+  Hetzner side of the watchtower stack: private network, the proxy and the
+  data nodes with their volumes, two firewalls, telemetry and log-archive
+  buckets, plus the records in the Cloud DNS zone watchtower.jasonmross.dev.
+  Everything on the hosts is Ansible (../../ansible), as podman quadlets.
 backend:
   # Hetzner Object Storage, a bucket of its own made by scripts/bootstrap.sh.
   # Credentials: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (the admin S3 key).

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"github.com/pulumi/pulumi-hcloud/sdk/go/hcloud"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"watchtower-infra/internal/names"
@@ -9,59 +8,84 @@ import (
 
 type obj = map[string]interface{}
 
-// inventoryJSON renders the Ansible inventory Kubespray builds the cluster
-// from (JSON is valid YAML, so it is saved as hosts.yml):
+// inventoryJSON renders the Ansible inventory (JSON is valid YAML, so it is
+// saved as hosts.yml). Two groups, `proxy` and `nodes`. Ansible connects over
+// `ansible_host`, the public IPv4; everything between the hosts goes over
+// `mesh_ip` on wg1.
 //
-//   - nodes 1-3 carry the control plane and etcd as well as workloads;
-//   - nodes 4 and up are workers only, added with Kubespray's scale.yml
-//     (growing etcd is a different procedure);
-//   - Kubespray binds etcd and the API server to `ip`, the private address,
-//     and Ansible connects over `ansible_host`, the public one;
-//   - the nodes' own nftables ruleset (roles/firewall) mirrors the Hetzner
-//     firewall from the same address lists.
-func inventoryJSON(cfg *Config, nodes []*node, fip *hcloud.FloatingIp) pulumi.StringOutput {
-	var addrs []interface{}
-	for _, n := range nodes {
-		addrs = append(addrs, n.server.Ipv4Address)
+// Every name the roles need from internal/names travels here as a group var,
+// so the playbooks never spell a bucket, an address or a retention period
+// themselves.
+func inventoryJSON(cfg *Config, hs *hosts) pulumi.StringOutput {
+	var vals []interface{}
+	for _, h := range hs.all() {
+		vals = append(vals, h.server.Ipv4Address, intID(h.volume.ID()))
 	}
-	addrs = append(addrs, fip.IpAddress)
 
-	return pulumi.All(addrs...).ApplyT(func(vals []interface{}) (string, error) {
-		hosts, controlPlane, workers := obj{}, obj{}, obj{}
-		for i, n := range nodes {
-			public := vals[i].(string)
-			hosts[n.name] = obj{
-				"ansible_host":           public,
-				"ip":                     n.privateIP,
-				"access_ip":              n.privateIP,
-				"watchtower_public_ipv4": public,
-			}
-			workers[n.name] = obj{}
-			if n.controlPlane() {
-				controlPlane[n.name] = obj{}
+	return pulumi.All(vals...).ApplyT(func(v []interface{}) (string, error) {
+		vars := func(i int, h *host) obj {
+			return obj{
+				"ansible_host": v[2*i].(string),
+				"private_ip":   h.privateIP,
+				"mesh_ip":      h.meshIP,
+				// roles/storage finds the volume as
+				// /dev/disk/by-id/scsi-0HC_Volume_<id>.
+				"volume_id": v[2*i+1].(int),
 			}
 		}
+		proxy := obj{hs.proxy.name: vars(0, hs.proxy)}
+		nodes := obj{}
+		for i, n := range hs.nodes {
+			hv := vars(i+1, n)
+			hv["node_index"] = n.index
+			hv["zone"] = n.zone()
+			nodes[n.name] = hv
+		}
+
+		buckets := obj{}
+		for _, b := range names.Buckets {
+			buckets[b.Suffix] = names.BucketName(cfg.BucketPrefix, b.Suffix)
+		}
+
 		inv := obj{"all": obj{
 			"vars": obj{
 				"ansible_user":               "root",
 				"ansible_python_interpreter": "/usr/bin/python3",
-				// Every node carries it on eth0, so whichever node Hetzner
-				// routes it to (fipd's choice) accepts the traffic.
-				"watchtower_floating_ipv4": vals[len(vals)-1].(string),
-				// The firewall rules: SSH and the API from admin and CI
-				// addresses, WireGuard from wireguardAllowCidrs, everything
-				// from the other nodes.
+
+				// roles/firewall mirrors the Hetzner firewalls from the same
+				// lists: SSH from admin and CI addresses, WireGuard (proxy
+				// only) from wireguardAllowCidrs.
 				"watchtower_admin_cidrs":     append(append([]string{}, cfg.AdminCIDRs...), cfg.CICIDRs...),
 				"watchtower_wireguard_cidrs": cfg.WireGuardCIDRs,
 				"watchtower_wireguard_port":  names.PortWireGuard,
-				"watchtower_private_cidr":    names.NetworkCIDR,
+				"watchtower_private_cidr":    names.SubnetCIDR,
+				"watchtower_mesh_cidr":       names.MeshCIDR,
+				"watchtower_mesh_port":       names.MeshPort,
+
+				"watchtower_domain":      names.Domain,
+				"watchtower_vpn_host":    names.VPNHost,
+				"watchtower_tunnel_ip":   names.TunnelIP,
+				"watchtower_tunnel_cidr": names.TunnelCIDR,
+				"watchtower_gcp_project": cfg.GCPProject,
+
+				"watchtower_s3_endpoint": names.S3Endpoint,
+				"watchtower_s3_region":   names.S3Region,
+				"watchtower_buckets":     buckets,
+				"watchtower_archive_prefixes": obj{
+					"containers": names.ArchivePrefixContainers,
+					"journal":    names.ArchivePrefixJournal,
+					"audit":      names.ArchivePrefixAudit,
+				},
+				"watchtower_retention_days": obj{
+					"loki":        names.RetentionLokiDays,
+					"mimir":       names.RetentionMimirDays,
+					"tempo":       names.RetentionTempoDays,
+					"log_archive": names.RetentionLogArchiveDays,
+				},
 			},
-			"hosts": hosts,
 			"children": obj{
-				"kube_control_plane": obj{"hosts": controlPlane},
-				"etcd":               obj{"hosts": controlPlane},
-				"kube_node":          obj{"hosts": workers},
-				"k8s_cluster":        obj{"children": obj{"kube_control_plane": obj{}, "kube_node": obj{}}},
+				"proxy": obj{"hosts": proxy},
+				"nodes": obj{"hosts": nodes},
 			},
 		}}
 		b, err := marshalJSON(inv)

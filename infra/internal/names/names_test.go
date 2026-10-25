@@ -11,9 +11,12 @@ func TestNamesAreStable(t *testing.T) {
 	for got, want := range map[string]string{
 		BucketName("p", "loki"): "p-loki",
 		NodeName(2):             "watchtower-2",
+		PrivateIP(0):            "10.20.1.10",
 		PrivateIP(3):            "10.20.1.13",
+		MeshIP(0):               "10.30.0.10",
+		MeshIP(2):               "10.30.0.12",
 		VPNHost:                 "vpn.watchtower.jasonmross.dev",
-		APIHost:                 "api.watchtower.jasonmross.dev",
+		ProxyName:               "watchtower-proxy",
 	} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -21,8 +24,8 @@ func TestNamesAreStable(t *testing.T) {
 	}
 }
 
-// Every bucket's key must be a known component key, and only the log archive
-// may be write-only: Loki, Mimir and Tempo read back what they store.
+// Every bucket's key must be a known key, and only the log archive may be
+// write-only: Loki, Mimir and Tempo read back what they store.
 func TestBucketsUseKnownKeys(t *testing.T) {
 	known := map[string]bool{}
 	for _, k := range Keys {
@@ -141,6 +144,11 @@ func TestWorkflowReadsOnlyListedSecrets(t *testing.T) {
 	for _, m := range matches {
 		if !known[m[1]] {
 			t.Errorf("deploy.yml reads %s, which is not a known secret", m[1])
+		}
+		// The deployer is never granted the push key: the image job gets it
+		// as its own Actions secret.
+		if m[1] == SecretGARPushKey {
+			t.Errorf("deploy.yml reads %s through the deployer", m[1])
 		}
 	}
 }

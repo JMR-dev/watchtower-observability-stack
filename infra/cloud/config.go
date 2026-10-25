@@ -15,15 +15,24 @@ import (
 type Config struct {
 	Location    string
 	NetworkZone string
-	ServerType  string
-	Image       string
-	NodeCount   int
+	// NodeServerType is the data nodes' type (ARM cax31), ProxyServerType
+	// the front box's (x86 cx23). The account's vCPU cap fits exactly 3
+	// nodes and one proxy.
+	NodeServerType  string
+	ProxyServerType string
+	// Image is resolved per architecture by Hetzner, so one name serves
+	// both server types.
+	Image     string
+	NodeCount int
+	// NodeVolumeGB and ProxyVolumeGB size each host's LUKS data volume.
+	NodeVolumeGB  int
+	ProxyVolumeGB int
 
 	SSHPublicKey string
-	// AdminCIDRs and CICIDRs reach SSH and the Kubernetes API.
+	// AdminCIDRs and CICIDRs reach SSH.
 	AdminCIDRs []string
 	CICIDRs    []string
-	// WireGuardCIDRs reach UDP 51820 on every node.
+	// WireGuardCIDRs reach UDP 51820 on the proxy.
 	WireGuardCIDRs []string
 
 	BucketPrefix     string
@@ -34,7 +43,7 @@ type Config struct {
 	S3AccessKeys map[string]string
 
 	// DeleteProtection turns on Hetzner delete (and rebuild) protection for
-	// the servers, primary IPs and Floating IP.
+	// the servers, primary IPs and volumes.
 	DeleteProtection bool
 
 	GCPProject string
@@ -51,9 +60,12 @@ func loadConfig(ctx *pulumi.Context) (*Config, error) {
 	cfg := &Config{
 		Location:         r.String("location", "nbg1"),
 		NetworkZone:      r.String("networkZone", "eu-central"),
-		ServerType:       r.String("serverType", "cpx42"),
+		NodeServerType:   r.String("nodeServerType", "cax31"),
+		ProxyServerType:  r.String("proxyServerType", "cx23"),
 		Image:            r.String("image", "alma-10"),
-		NodeCount:        r.Int("nodeCount", names.ControlPlaneNodes),
+		NodeCount:        r.Int("nodeCount", names.MinNodes),
+		NodeVolumeGB:     r.Int("nodeVolumeGb", 30),
+		ProxyVolumeGB:    r.Int("proxyVolumeGb", 10),
 		SSHPublicKey:     r.RequiredString("sshPublicKey"),
 		WireGuardCIDRs:   []string{"0.0.0.0/0", "::/0"},
 		BucketPrefix:     r.RequiredString("bucketPrefix"),
@@ -71,12 +83,18 @@ func loadConfig(ctx *pulumi.Context) (*Config, error) {
 
 // validate fails the preview, not the apply.
 func (c *Config) validate(r *stackcfg.Reader) {
-	if c.NodeCount < names.ControlPlaneNodes {
-		r.Fail("nodeCount %d: etcd and the control plane need %d nodes", c.NodeCount, names.ControlPlaneNodes)
+	if c.NodeCount < names.MinNodes {
+		r.Fail("nodeCount %d: Loki, Mimir, Kafka and etcd need at least %d nodes", c.NodeCount, names.MinNodes)
 	}
-	// A spread placement group holds at most 10 servers.
-	if c.NodeCount > 10 {
-		r.Fail("nodeCount %d: a spread placement group holds at most 10", c.NodeCount)
+	// A spread placement group holds at most 10 servers, the proxy included.
+	if c.NodeCount > 9 {
+		r.Fail("nodeCount %d: a spread placement group holds at most 9 nodes and the proxy", c.NodeCount)
+	}
+	// Hetzner volumes are 10 GB to 10 TB.
+	for key, gb := range map[string]int{"nodeVolumeGb": c.NodeVolumeGB, "proxyVolumeGb": c.ProxyVolumeGB} {
+		if gb < 10 || gb > 10240 {
+			r.Fail("%s %d: Hetzner volumes are 10 to 10240 GB", key, gb)
+		}
 	}
 	if !sshKeyRE.MatchString(c.SSHPublicKey) {
 		r.Fail("sshPublicKey must be an ed25519 public key")
@@ -94,8 +112,8 @@ func (c *Config) validate(r *stackcfg.Reader) {
 			}
 		}
 	}
-	// SSH and the API stay closed to the world unless someone writes the
-	// open range into adminCidrs on purpose; ciCidrs must be specific.
+	// SSH stays closed to the world unless someone writes the open range
+	// into adminCidrs on purpose; ciCidrs must be specific.
 	for _, cidr := range c.CICIDRs {
 		if strings.HasSuffix(cidr, "/0") {
 			r.Fail("ciCidrs must not contain %q", cidr)

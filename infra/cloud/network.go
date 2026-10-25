@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strconv"
+
 	"github.com/pulumi/pulumi-hcloud/sdk/go/hcloud"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
@@ -12,13 +14,14 @@ type network struct {
 	subnet    *hcloud.NetworkSubnet
 	placement *hcloud.PlacementGroup
 	sshKey    *hcloud.SshKey
-	firewall  *hcloud.Firewall
+	// firewalls is keyed by host role.
+	firewalls map[string]*hcloud.Firewall
 }
 
-// newNetwork creates what every node shares: the private network (etcd, the
-// API server and pod traffic, which Cilium encrypts with WireGuard), the
-// spread placement group (no two nodes on one physical host), the SSH key and
-// the firewall.
+// newNetwork creates what every host shares: the private network (it carries
+// wg1, the WireGuard mesh all traffic between the servers goes through), the
+// spread placement group (no two hosts on one physical machine), the SSH key
+// and the two firewalls.
 func newNetwork(ctx *pulumi.Context, cfg *Config, p *providers) (*network, error) {
 	opt := pulumi.Provider(p.hcloud)
 
@@ -59,38 +62,47 @@ func newNetwork(ctx *pulumi.Context, cfg *Config, p *providers) (*network, error
 		return nil, err
 	}
 
-	fw, err := newFirewall(ctx, cfg, p)
+	ops := append(append([]string{}, cfg.AdminCIDRs...), cfg.CICIDRs...)
+	ssh := rule("tcp", "22", "SSH (Ansible, operators)", ops)
+	nodes, err := newFirewall(ctx, p, "watchtower-nodes", names.RoleNode, ssh)
+	if err != nil {
+		return nil, err
+	}
+	// Only the proxy takes WireGuard: it is where the tunnel ends.
+	proxy, err := newFirewall(ctx, p, "watchtower-proxy", names.RoleProxy, ssh,
+		rule("udp", strconv.Itoa(names.PortWireGuard), "WireGuard", cfg.WireGuardCIDRs))
 	if err != nil {
 		return nil, err
 	}
 
-	return &network{network: nw, subnet: subnet, placement: pg, sshKey: key, firewall: fw}, nil
+	return &network{
+		network: nw, subnet: subnet, placement: pg, sshKey: key,
+		firewalls: map[string]*hcloud.Firewall{names.RoleNode: nodes, names.RoleProxy: proxy},
+	}, nil
 }
 
-// newFirewall is the only inbound policy on the public interfaces, Floating
-// IP included. Hetzner firewalls do not filter the private network, which
-// carries the cluster's own traffic. It applies by label, so a node is
-// covered from its first boot.
-func newFirewall(ctx *pulumi.Context, cfg *Config, p *providers) (*hcloud.Firewall, error) {
-	ops := append(append([]string{}, cfg.AdminCIDRs...), cfg.CICIDRs...)
-	return hcloud.NewFirewall(ctx, "watchtower-nodes", &hcloud.FirewallArgs{
-		Name:   pulumi.String("watchtower-nodes"),
+// newFirewall is the only inbound policy on one role's public interfaces.
+// Hetzner firewalls do not filter the private network; each host's nftables
+// ruleset does (roles/firewall). It applies by label, so a host is covered
+// from its first boot.
+func newFirewall(ctx *pulumi.Context, p *providers, name, role string, rules ...*hcloud.FirewallRuleArgs) (*hcloud.Firewall, error) {
+	all := hcloud.FirewallRuleArray{}
+	for _, r := range rules {
+		all = append(all, r)
+	}
+	all = append(all, &hcloud.FirewallRuleArgs{
+		Direction:   pulumi.String("in"),
+		Protocol:    pulumi.String("icmp"),
+		Description: pulumi.String("ICMP"),
+		SourceIps:   pulumi.ToStringArray([]string{"0.0.0.0/0", "::/0"}),
+	})
+	return hcloud.NewFirewall(ctx, name, &hcloud.FirewallArgs{
+		Name:   pulumi.String(name),
 		Labels: labels(nil),
 		ApplyTos: hcloud.FirewallApplyToArray{
-			&hcloud.FirewallApplyToArgs{LabelSelector: pulumi.String("role=" + names.NodeLabelRole)},
+			&hcloud.FirewallApplyToArgs{LabelSelector: pulumi.String("role=" + role)},
 		},
-		Rules: hcloud.FirewallRuleArray{
-			rule("tcp", "22", "SSH (Ansible, operators)", ops),
-			rule("tcp", "6443", "Kubernetes API (deploys, operators)", ops),
-			// Any node may host the edge pod, so every node accepts WireGuard.
-			rule("udp", "51820", "WireGuard", cfg.WireGuardCIDRs),
-			&hcloud.FirewallRuleArgs{
-				Direction:   pulumi.String("in"),
-				Protocol:    pulumi.String("icmp"),
-				Description: pulumi.String("ICMP"),
-				SourceIps:   pulumi.ToStringArray([]string{"0.0.0.0/0", "::/0"}),
-			},
-		},
+		Rules: all,
 	}, pulumi.Provider(p.hcloud))
 }
 

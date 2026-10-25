@@ -20,20 +20,22 @@ import (
 )
 
 const (
-	serverType   = "hcloud:index/server:Server"
-	firewallType = "hcloud:index/firewall:Firewall"
-	fipType      = "hcloud:index/floatingIp:FloatingIp"
-	hostKeyType  = "tls:index/privateKey:PrivateKey"
-	hostPrivate  = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\nBBBB\n-----END OPENSSH PRIVATE KEY-----\n"
-	hostPublic   = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostKey\n"
-	bucketType   = "minio:index/s3Bucket:S3Bucket"
-	policyType   = "minio:index/s3BucketPolicy:S3BucketPolicy"
-	ilmType      = "minio:index/ilmPolicy:IlmPolicy"
-	recordType   = "gcp:dns/recordSet:RecordSet"
-	zoneToken    = "gcp:dns/getManagedZone:getManagedZone"
-	secretToken  = "gcp:secretmanager/getSecretVersion:getSecretVersion"
-	fipAddress   = "198.51.100.7"
-	nodeAddress  = "203.0.113.10"
+	serverType     = "hcloud:index/server:Server"
+	firewallType   = "hcloud:index/firewall:Firewall"
+	fipType        = "hcloud:index/floatingIp:FloatingIp"
+	volumeType     = "hcloud:index/volume:Volume"
+	attachmentType = "hcloud:index/volumeAttachment:VolumeAttachment"
+	hostKeyType    = "tls:index/privateKey:PrivateKey"
+	hostPrivate    = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\nBBBB\n-----END OPENSSH PRIVATE KEY-----\n"
+	hostPublic     = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostKey\n"
+	bucketType     = "minio:index/s3Bucket:S3Bucket"
+	policyType     = "minio:index/s3BucketPolicy:S3BucketPolicy"
+	ilmType        = "minio:index/ilmPolicy:IlmPolicy"
+	recordType     = "gcp:dns/recordSet:RecordSet"
+	zoneToken      = "gcp:dns/getManagedZone:getManagedZone"
+	secretToken    = "gcp:secretmanager/getSecretVersion:getSecretVersion"
+	nodeAddress    = "203.0.113.10"
+	proxyAddress   = "198.51.100.7"
 )
 
 func baseConfig() map[string]string {
@@ -58,15 +60,15 @@ func with(extra map[string]string) map[string]string {
 	return cfg
 }
 
-// secretValue is what the mocked Secret Manager holds: s3-loki-access-key is
-// "LOKIKEY", and so on.
+// secretValue is what the mocked Secret Manager holds: s3-cluster-access-key
+// is "CLUSTERKEY", s3-admin-access-key "ADMINKEY".
 func secretValue(id string) string {
 	key := strings.TrimSuffix(strings.TrimPrefix(id, "s3-"), "-access-key")
 	return strings.ToUpper(key) + "KEY"
 }
 
-// newMocks hands out numeric IDs (Hetzner references resources by integer)
-// and answers the zone and secret lookups.
+// newMocks hands out numeric IDs (Hetzner references resources by integer),
+// gives the proxy its own address, and answers the zone and secret lookups.
 func newMocks(dnsName string) func() *pulumitest.Mocks {
 	return func() *pulumitest.Mocks {
 		var mu sync.Mutex
@@ -80,11 +82,13 @@ func newMocks(dnsName string) func() *pulumitest.Mocks {
 			},
 			Outputs: map[string]resource.PropertyMap{
 				serverType: {"ipv4Address": resource.NewStringProperty(nodeAddress)},
-				fipType:    {"ipAddress": resource.NewStringProperty(fipAddress)},
 				hostKeyType: {
 					"privateKeyOpenssh": resource.NewStringProperty(hostPrivate),
 					"publicKeyOpenssh":  resource.NewStringProperty(hostPublic),
 				},
+			},
+			NamedOutputs: map[string]resource.PropertyMap{
+				names.ProxyName: {"ipv4Address": resource.NewStringProperty(proxyAddress)},
 			},
 			Calls: map[string]pulumitest.CallFunc{
 				zoneToken: func(resource.PropertyMap) (resource.PropertyMap, error) {
@@ -191,54 +195,85 @@ func TestProvidersTakeNoCredentials(t *testing.T) {
 	}
 }
 
-func sources(r pulumitest.Resource, port string) []string {
+// ports maps each rule's port (or protocol, for portless rules) to its
+// sources.
+func ports(r pulumitest.Resource) map[string][]string {
+	out := map[string][]string{}
 	for _, v := range r.Inputs["rules"].ArrayValue() {
 		rule := v.ObjectValue()
-		if pulumitest.Str(rule, "port") != port {
-			continue
-		}
-		var out []string
+		key := pulumitest.Str(rule, "protocol") + "/" + pulumitest.Str(rule, "port")
 		for _, s := range rule["sourceIps"].ArrayValue() {
-			out = append(out, s.StringValue())
+			out[key] = append(out[key], s.StringValue())
 		}
-		return out
 	}
-	return nil
+	return out
 }
 
-func TestFirewall(t *testing.T) {
+// SSH from admin and CI addresses everywhere; WireGuard on the proxy only;
+// nothing else from the internet.
+func TestFirewalls(t *testing.T) {
 	m := mustRun(t, baseConfig())
-	fws := m.ByType(firewallType)
-	if len(fws) != 1 {
-		t.Fatalf("want one firewall, got %d", len(fws))
+	fws := map[string]pulumitest.Resource{}
+	for _, fw := range m.ByType(firewallType) {
+		fws[fw.Name] = fw
 	}
-	fw := fws[0]
+	if len(fws) != 2 {
+		t.Fatalf("want two firewalls, got %v", keysOf(fws))
+	}
 	ops := []string{"198.51.100.0/24", "34.26.149.196/32"}
-	for _, port := range []string{"22", "6443"} {
-		if got := sources(fw, port); !reflect.DeepEqual(got, ops) {
-			t.Errorf("port %s open to %v, want %v", port, got, ops)
+	world := []string{"0.0.0.0/0", "::/0"}
+	for name, want := range map[string]struct {
+		role  string
+		rules map[string][]string
+	}{
+		"watchtower-nodes": {names.RoleNode, map[string][]string{"tcp/22": ops, "icmp/": world}},
+		"watchtower-proxy": {names.RoleProxy, map[string][]string{"tcp/22": ops, "udp/51820": world, "icmp/": world}},
+	} {
+		fw := fws[name]
+		if got := ports(fw); !reflect.DeepEqual(got, want.rules) {
+			t.Errorf("%s rules %v, want %v", name, got, want.rules)
+		}
+		applies := fw.Inputs["applyTos"].ArrayValue()
+		if len(applies) != 1 || pulumitest.Str(applies[0].ObjectValue(), "labelSelector") != "role="+want.role {
+			t.Errorf("%s applies to %v", name, applies)
 		}
 	}
-	if got := sources(fw, "51820"); !reflect.DeepEqual(got, []string{"0.0.0.0/0", "::/0"}) {
-		t.Errorf("WireGuard open to %v", got)
+}
+
+func keysOf[V any](m map[string]V) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
 	}
-	applies := fw.Inputs["applyTos"].ArrayValue()
-	if len(applies) != 1 || pulumitest.Str(applies[0].ObjectValue(), "labelSelector") != "role="+names.NodeLabelRole {
-		t.Errorf("firewall applies to %v", applies)
-	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedServers(m *pulumitest.Mocks) []pulumitest.Resource {
+	servers := m.ByType(serverType)
+	// Registration is asynchronous, so the mocks see servers in any order.
+	sort.Slice(servers, func(a, b int) bool { return servers[a].Name < servers[b].Name })
+	return servers
 }
 
 func TestServers(t *testing.T) {
 	m := mustRun(t, with(map[string]string{"watchtower:nodeCount": "4", "watchtower:deleteProtection": "true"}))
-	servers := m.ByType(serverType)
-	if len(servers) != 4 {
-		t.Fatalf("want 4 servers, got %d", len(servers))
+	servers := sortedServers(m)
+	// watchtower-1..4 sort before watchtower-proxy.
+	want := []struct{ name, typ, role, ip string }{
+		{"watchtower-1", "cax31", names.RoleNode, names.PrivateIP(1)},
+		{"watchtower-2", "cax31", names.RoleNode, names.PrivateIP(2)},
+		{"watchtower-3", "cax31", names.RoleNode, names.PrivateIP(3)},
+		{"watchtower-4", "cax31", names.RoleNode, names.PrivateIP(4)},
+		{names.ProxyName, "cx23", names.RoleProxy, names.PrivateIP(0)},
 	}
-	// Registration is asynchronous, so the mocks see servers in any order.
-	sort.Slice(servers, func(a, b int) bool { return servers[a].Name < servers[b].Name })
+	if len(servers) != len(want) {
+		t.Fatalf("want %d servers, got %d", len(want), len(servers))
+	}
 	for i, s := range servers {
-		if s.Name != names.NodeName(i+1) {
-			t.Errorf("server %d named %s", i, s.Name)
+		w := want[i]
+		if s.Name != w.name || pulumitest.Str(s.Inputs, "serverType") != w.typ {
+			t.Errorf("server %d: %s %s, want %s %s", i, s.Name, pulumitest.Str(s.Inputs, "serverType"), w.name, w.typ)
 		}
 		if pulumitest.Str(s.Inputs, "image") != "alma-10" || pulumitest.Str(s.Inputs, "location") != "nbg1" {
 			t.Errorf("server %s: %v", s.Name, s.Inputs)
@@ -251,12 +286,11 @@ func TestServers(t *testing.T) {
 		if !reflect.DeepEqual(ignored, []string{"image", "sshKeys", "userData"}) {
 			t.Errorf("server %s ignores %v", s.Name, s.IgnoreChanges)
 		}
-		labels := s.Inputs["labels"].ObjectValue()
-		if pulumitest.Str(labels, "role") != names.NodeLabelRole {
-			t.Errorf("server %s labels %v", s.Name, labels)
+		if pulumitest.Str(s.Inputs["labels"].ObjectValue(), "role") != w.role {
+			t.Errorf("server %s labels %v", s.Name, s.Inputs["labels"])
 		}
 		ip := s.Inputs["networks"].ArrayValue()[0].ObjectValue()
-		if pulumitest.Str(ip, "ip") != names.PrivateIP(i+1) {
+		if pulumitest.Str(ip, "ip") != w.ip {
 			t.Errorf("server %s private IP %v", s.Name, ip)
 		}
 		if !s.Inputs["userData"].ContainsSecrets() {
@@ -275,24 +309,50 @@ func TestServers(t *testing.T) {
 	}
 }
 
-func TestFloatingIP(t *testing.T) {
+// The account's vCPU cap has no room for a replacement next to the old
+// server, and a primary IP belongs to one server at a time.
+func TestServersReplaceDeleteFirst(t *testing.T) {
 	m := mustRun(t, baseConfig())
-	fips := m.ByType(fipType)
-	if len(fips) != 1 {
-		t.Fatalf("want one floating IP, got %d", len(fips))
+	for _, s := range m.ByType(serverType) {
+		if !s.DeleteBeforeReplace {
+			t.Errorf("server %s would be replaced create-first", s.Name)
+		}
 	}
-	f := fips[0]
-	if !f.Protect {
-		t.Error("floating IP is not protected")
+}
+
+func TestVolumes(t *testing.T) {
+	m := mustRun(t, with(map[string]string{"watchtower:nodeVolumeGb": "40", "watchtower:proxyVolumeGb": "12"}))
+	volumes := m.ByType(volumeType)
+	if len(volumes) != 4 {
+		t.Fatalf("want 4 volumes, got %d", len(volumes))
 	}
-	if !reflect.DeepEqual(f.IgnoreChanges, []string{"serverId"}) {
-		t.Errorf("floating IP ignores %v; Pulumi would fight fipd", f.IgnoreChanges)
+	for _, v := range volumes {
+		want := 40.0
+		if v.Name == names.ProxyName+"-data" {
+			want = 12
+		}
+		if v.Inputs["size"].NumberValue() != want || pulumitest.Str(v.Inputs, "location") != "nbg1" {
+			t.Errorf("volume %s: %v", v.Name, v.Inputs)
+		}
+		// Unformatted (LUKS goes on it) and never mounted by Hetzner.
+		if v.Inputs["automount"].BoolValue() || pulumitest.Str(v.Inputs, "format") != "" {
+			t.Errorf("volume %s is formatted or automounted", v.Name)
+		}
+		if !v.Protect {
+			t.Errorf("volume %s is not protected", v.Name)
+		}
 	}
-	if pulumitest.Str(f.Inputs["labels"].ObjectValue(), "role") != names.FloatingIPLabel {
-		t.Errorf("floating IP labels %v; fipd finds it by label", f.Inputs["labels"])
+	if got := len(m.ByType(attachmentType)); got != 4 {
+		t.Errorf("want 4 volume attachments, got %d", got)
 	}
-	if pulumitest.Str(f.Inputs, "type") != "ipv4" {
-		t.Errorf("floating IP type %v", f.Inputs["type"])
+}
+
+// The Kubernetes design's Floating IP is gone: the proxy's primary IPv4 is
+// the VPN address.
+func TestNoFloatingIP(t *testing.T) {
+	m := mustRun(t, baseConfig())
+	if got := m.ByType(fipType); len(got) != 0 {
+		t.Errorf("floating IPs %v", got)
 	}
 }
 
@@ -328,18 +388,18 @@ func TestBuckets(t *testing.T) {
 	}
 }
 
-// Every bucket keeps out every key but the admin key and its own, and the
-// admin key is never locked out (Pulumi itself uses it).
+// Every bucket keeps out every key but the admin key and the cluster key,
+// and the admin key is never locked out (Pulumi itself uses it).
 func TestBucketPolicies(t *testing.T) {
 	m := mustRun(t, baseConfig())
 	admin := principal(1234, "ADMINKEY")
+	cluster := principal(1234, "CLUSTERKEY")
 	for _, b := range names.Buckets {
 		name := names.BucketName("test-wt", b.Suffix)
 		doc := policyOf(t, m, name)
 		first := doc.Statement[0]
-		owner := principal(1234, strings.ToUpper(b.Key)+"KEY")
 		if first.Effect != "Deny" || first.Action != "s3:*" || first.NotPrincipal == nil ||
-			!reflect.DeepEqual(first.NotPrincipal.AWS, []string{admin, owner}) {
+			!reflect.DeepEqual(first.NotPrincipal.AWS, []string{admin, cluster}) {
 			t.Errorf("%s: first statement %+v", name, first)
 		}
 		want := []string{"arn:aws:s3:::" + name, "arn:aws:s3:::" + name + "/*"}
@@ -352,14 +412,14 @@ func TestBucketPolicies(t *testing.T) {
 	}
 }
 
-// The log-archive key can write and nothing else: a node compromise cannot
-// read back, list or erase the archive. Policy actions arrive from JSON as
-// []interface{}.
-func TestLogArchiveKeyIsWriteOnly(t *testing.T) {
+// The cluster key can write to the log archive and nothing else: a host
+// compromise cannot read back, list or erase it. Policy actions arrive from
+// JSON as []interface{}.
+func TestLogArchiveIsWriteOnlyForTheCluster(t *testing.T) {
 	m := mustRun(t, baseConfig())
 	doc := policyOf(t, m, "test-wt-logs-archive")
 	deny := doc.Statement[1]
-	if deny.Effect != "Deny" || deny.Principal == nil || deny.Principal.AWS[0] != principal(1234, "LOGSHIPKEY") {
+	if deny.Effect != "Deny" || deny.Principal == nil || deny.Principal.AWS[0] != principal(1234, "CLUSTERKEY") {
 		t.Fatalf("write-only statement %+v", deny)
 	}
 	denied := map[string]bool{}
@@ -376,7 +436,7 @@ func TestLogArchiveKeyIsWriteOnly(t *testing.T) {
 	}
 	gdpr := doc.Statement[2]
 	if gdpr.Action != "s3:PutObject" || gdpr.Resource[0] != "arn:aws:s3:::test-wt-logs-archive/gdpr-audit/*" ||
-		gdpr.Principal.AWS[0] != principal(1234, "LOGSHIPKEY") {
+		gdpr.Principal.AWS[0] != principal(1234, "CLUSTERKEY") {
 		t.Errorf("gdpr-audit statement %+v", gdpr)
 	}
 }
@@ -405,7 +465,7 @@ func TestLifecycle(t *testing.T) {
 }
 
 func TestDNSRecords(t *testing.T) {
-	m := mustRun(t, with(map[string]string{"watchtower:nodeCount": "4"}))
+	m := mustRun(t, baseConfig())
 	got := map[string][]string{}
 	for _, r := range m.ByType(recordType) {
 		if pulumitest.Str(r.Inputs, "type") != "A" || r.Inputs["ttl"].NumberValue() != 300 ||
@@ -420,10 +480,9 @@ func TestDNSRecords(t *testing.T) {
 	}
 	want := map[string][]string{
 		// The private endpoint resolves only to the in-tunnel address.
-		names.Domain + ".":  {names.TunnelIP},
-		names.VPNHost + ".": {fipAddress},
-		// Control-plane nodes only: the fourth node is a worker.
-		names.APIHost + ".": {nodeAddress, nodeAddress, nodeAddress},
+		names.Domain + ".": {names.TunnelIP},
+		// Peers connect to the proxy, never to a data node.
+		names.VPNHost + ".": {proxyAddress},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("records %v, want %v", got, want)
@@ -446,13 +505,13 @@ func TestBucketPolicyEncodeFailure(t *testing.T) {
 	}
 }
 
-// inventory runs the node, Floating IP and inventory code under mocks and
-// returns the rendered inventory.
-func inventory(t *testing.T, cfg map[string]string) map[string]interface{} {
+// withHosts runs config, providers, network and hosts under mocks and hands
+// the hosts to fn, whose output it waits for.
+func withHosts(t *testing.T, cfg map[string]string, fn func(*Config, *hosts) pulumi.StringOutput) string {
 	t.Helper()
 	var wg sync.WaitGroup
 	wg.Add(1)
-	var rendered string
+	var got string
 	_, err := runWith(t, cfg, func(ctx *pulumi.Context) error {
 		c, err := loadConfig(ctx)
 		if err != nil {
@@ -466,16 +525,12 @@ func inventory(t *testing.T, cfg map[string]string) map[string]interface{} {
 		if err != nil {
 			return err
 		}
-		nodes, err := newNodes(ctx, c, p, net)
+		hs, err := newHosts(ctx, c, p, net)
 		if err != nil {
 			return err
 		}
-		fip, err := newFloatingIP(ctx, c, p, nodes[0])
-		if err != nil {
-			return err
-		}
-		inventoryJSON(c, nodes, fip).ApplyT(func(s string) string {
-			rendered = s
+		fn(c, hs).ApplyT(func(s string) string {
+			got = s
 			wg.Done()
 			return s
 		})
@@ -485,6 +540,12 @@ func inventory(t *testing.T, cfg map[string]string) map[string]interface{} {
 		t.Fatal(err)
 	}
 	wg.Wait()
+	return got
+}
+
+func inventory(t *testing.T, cfg map[string]string) map[string]interface{} {
+	t.Helper()
+	rendered := withHosts(t, cfg, inventoryJSON)
 	var inv map[string]interface{}
 	if err := json.Unmarshal([]byte(rendered), &inv); err != nil {
 		t.Fatal(err)
@@ -492,45 +553,41 @@ func inventory(t *testing.T, cfg map[string]string) map[string]interface{} {
 	return inv
 }
 
-func hostsOf(inv map[string]interface{}, group string) []string {
+func group(inv map[string]interface{}, name string) map[string]interface{} {
 	all := inv["all"].(map[string]interface{})
-	g := all["children"].(map[string]interface{})[group].(map[string]interface{})
-	var out []string
-	for h := range g["hosts"].(map[string]interface{}) {
-		out = append(out, h)
-	}
-	sort.Strings(out)
-	return out
+	g := all["children"].(map[string]interface{})[name].(map[string]interface{})
+	return g["hosts"].(map[string]interface{})
 }
 
-// Kubespray: nodes 1-3 run etcd and the control plane, later nodes are
-// workers only, and every node runs workloads.
 func TestInventoryGroups(t *testing.T) {
 	inv := inventory(t, with(map[string]string{"watchtower:nodeCount": "4"}))
-	cp := []string{"watchtower-1", "watchtower-2", "watchtower-3"}
-	for group, want := range map[string][]string{
-		"kube_control_plane": cp,
-		"etcd":               cp,
-		"kube_node":          {"watchtower-1", "watchtower-2", "watchtower-3", "watchtower-4"},
-	} {
-		if got := hostsOf(inv, group); !reflect.DeepEqual(got, want) {
-			t.Errorf("%s = %v, want %v", group, got, want)
-		}
+	if got := keysOf(group(inv, "proxy")); !reflect.DeepEqual(got, []string{names.ProxyName}) {
+		t.Errorf("proxy = %v", got)
 	}
-	all := inv["all"].(map[string]interface{})
-	if all["vars"].(map[string]interface{})["watchtower_floating_ipv4"] != fipAddress {
-		t.Errorf("vars %v", all["vars"])
+	nodes := group(inv, "nodes")
+	if got := keysOf(nodes); !reflect.DeepEqual(got, []string{"watchtower-1", "watchtower-2", "watchtower-3", "watchtower-4"}) {
+		t.Errorf("nodes = %v", got)
 	}
-	h := all["hosts"].(map[string]interface{})["watchtower-2"].(map[string]interface{})
-	if h["ip"] != names.PrivateIP(2) || h["access_ip"] != names.PrivateIP(2) || h["ansible_host"] != nodeAddress {
-		t.Errorf("host vars %v", h)
+	n := nodes["watchtower-2"].(map[string]interface{})
+	if n["ansible_host"] != nodeAddress || n["private_ip"] != names.PrivateIP(2) || n["mesh_ip"] != names.MeshIP(2) ||
+		n["node_index"] != 2.0 || n["zone"] != "b" {
+		t.Errorf("node vars %v", n)
+	}
+	// Mock IDs are numbers; the volume's must arrive as one.
+	if _, ok := n["volume_id"].(float64); !ok {
+		t.Errorf("volume_id %v", n["volume_id"])
+	}
+	p := group(inv, "proxy")[names.ProxyName].(map[string]interface{})
+	if p["ansible_host"] != proxyAddress || p["mesh_ip"] != names.MeshIP(0) || p["private_ip"] != names.PrivateIP(0) {
+		t.Errorf("proxy vars %v", p)
+	}
+	if _, ok := p["zone"]; ok {
+		t.Errorf("the proxy has a Tempo zone: %v", p)
 	}
 }
 
-// The node firewall (roles/firewall) gets the Hetzner firewall's address
-// lists: admin and CI together for SSH and the API, WireGuard's own, and the
-// private network the other nodes talk over.
-func TestInventoryFirewallVars(t *testing.T) {
+// Ansible gets every shared name from here, never spelling one itself.
+func TestInventoryVars(t *testing.T) {
 	inv := inventory(t, with(map[string]string{
 		"watchtower:adminCidrs":          `["198.51.100.0/24","2001:db8::/32"]`,
 		"watchtower:ciCidrs":             `["203.0.113.9/32"]`,
@@ -541,10 +598,31 @@ func TestInventoryFirewallVars(t *testing.T) {
 		"watchtower_admin_cidrs":     []interface{}{"198.51.100.0/24", "2001:db8::/32", "203.0.113.9/32"},
 		"watchtower_wireguard_cidrs": []interface{}{"192.0.2.0/24"},
 		"watchtower_wireguard_port":  float64(names.PortWireGuard),
-		"watchtower_private_cidr":    names.NetworkCIDR,
+		"watchtower_private_cidr":    names.SubnetCIDR,
+		"watchtower_mesh_cidr":       names.MeshCIDR,
+		"watchtower_mesh_port":       float64(names.MeshPort),
+		"watchtower_domain":          names.Domain,
+		"watchtower_vpn_host":        names.VPNHost,
+		"watchtower_tunnel_ip":       names.TunnelIP,
+		"watchtower_tunnel_cidr":     names.TunnelCIDR,
+		"watchtower_gcp_project":     names.GCPProject,
+		"watchtower_s3_endpoint":     names.S3Endpoint,
+		"watchtower_s3_region":       names.S3Region,
+		"watchtower_archive_prefixes": map[string]interface{}{
+			"containers": "containers/", "journal": "journal/", "audit": "audit/",
+		},
+		"watchtower_retention_days": map[string]interface{}{
+			"loki": 30.0, "mimir": 90.0, "tempo": 30.0, "log_archive": 90.0,
+		},
 	} {
 		if !reflect.DeepEqual(vars[key], want) {
 			t.Errorf("%s = %v, want %v", key, vars[key], want)
+		}
+	}
+	buckets := vars["watchtower_buckets"].(map[string]interface{})
+	for _, b := range names.Buckets {
+		if buckets[b.Suffix] != "test-wt-"+b.Suffix {
+			t.Errorf("bucket %s = %v", b.Suffix, buckets[b.Suffix])
 		}
 	}
 }
@@ -556,13 +634,24 @@ func TestInventoryEncodeFailure(t *testing.T) {
 		c, _ := loadConfig(ctx)
 		p, _ := newProviders(ctx, c)
 		net, _ := newNetwork(ctx, c, p)
-		nodes, _ := newNodes(ctx, c, p, net)
-		fip, _ := newFloatingIP(ctx, c, p, nodes[0])
-		ctx.Export("inventory", inventoryJSON(c, nodes, fip))
+		hs, _ := newHosts(ctx, c, p, net)
+		ctx.Export("inventory", inventoryJSON(c, hs))
 		return nil
 	})
 	if err == nil || !strings.Contains(err.Error(), "encode failed") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func TestKnownHosts(t *testing.T) {
+	got := withHosts(t, baseConfig(), func(_ *Config, hs *hosts) pulumi.StringOutput { return knownHosts(hs.all()) })
+	key := " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostKey\n"
+	want := proxyAddress + "," + names.ProxyName + key
+	for i := 1; i <= 3; i++ {
+		want += nodeAddress + "," + names.NodeName(i) + key
+	}
+	if got != want {
+		t.Errorf("knownHosts =\n%s\nwant\n%s", got, want)
 	}
 }
 
@@ -571,8 +660,10 @@ func TestConfigValidation(t *testing.T) {
 		cfg  map[string]string
 		want string
 	}{
-		"too few nodes":       {with(map[string]string{"watchtower:nodeCount": "2"}), "need 3 nodes"},
-		"too many nodes":      {with(map[string]string{"watchtower:nodeCount": "11"}), "at most 10"},
+		"too few nodes":       {with(map[string]string{"watchtower:nodeCount": "2"}), "at least 3 nodes"},
+		"too many nodes":      {with(map[string]string{"watchtower:nodeCount": "10"}), "at most 9 nodes"},
+		"small node volume":   {with(map[string]string{"watchtower:nodeVolumeGb": "9"}), "nodeVolumeGb 9"},
+		"huge proxy volume":   {with(map[string]string{"watchtower:proxyVolumeGb": "10241"}), "proxyVolumeGb 10241"},
 		"rsa key":             {with(map[string]string{"watchtower:sshPublicKey": "ssh-rsa AAAA"}), "ed25519"},
 		"no admin cidrs":      {with(map[string]string{"watchtower:adminCidrs": "[]"}), "adminCidrs must not be empty"},
 		"missing admin cidrs": {with(map[string]string{"watchtower:adminCidrs": ""}), "watchtower:adminCidrs"},
@@ -608,7 +699,7 @@ func TestSecretsComeFromSecretManager(t *testing.T) {
 		}
 	}
 	sort.Strings(got)
-	want := []string{"s3-admin-access-key", "s3-logship-access-key", "s3-loki-access-key", "s3-mimir-access-key", "s3-tempo-access-key"}
+	want := []string{"s3-admin-access-key", "s3-cluster-access-key"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("secrets read %v, want %v", got, want)
 	}
@@ -618,13 +709,13 @@ func TestEmptySecretFails(t *testing.T) {
 	m := goodZone()
 	m.Calls[secretToken] = func(args resource.PropertyMap) (resource.PropertyMap, error) {
 		v := secretValue(pulumitest.Str(args, "secret"))
-		if pulumitest.Str(args, "secret") == "s3-tempo-access-key" {
+		if pulumitest.Str(args, "secret") == "s3-cluster-access-key" {
 			v = ""
 		}
 		return resource.PropertyMap{"secretData": resource.NewStringProperty(v)}, nil
 	}
 	err := pulumitest.Run(t, opts(baseConfig()), program, m)
-	if err == nil || !strings.Contains(err.Error(), "secret s3-tempo-access-key in watchtower-observe is empty") {
+	if err == nil || !strings.Contains(err.Error(), "secret s3-cluster-access-key in watchtower-observe is empty") {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -636,53 +727,21 @@ func TestStackFileKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), "secure:") {
+	s := string(b)
+	if strings.Contains(s, "secure:") {
 		t.Error("Pulumi.prod.yaml holds a secret; store it in Secret Manager (scripts/secret.sh put)")
 	}
-	for _, key := range []string{"bucketPrefix", "hetznerProjectId", "sshPublicKey", "adminCidrs", "ciCidrs", "deleteProtection: \"true\""} {
-		if !strings.Contains(string(b), "watchtower:"+key) {
+	for _, key := range []string{
+		"bucketPrefix", "hetznerProjectId: \"16527471\"", "sshPublicKey", "adminCidrs", "ciCidrs",
+		"nodeServerType: cax31", "proxyServerType: cx23", "nodeCount: \"3\"", "deleteProtection: \"true\"",
+	} {
+		if !strings.Contains(s, "watchtower:"+key) {
 			t.Errorf("Pulumi.prod.yaml lacks watchtower:%s", key)
 		}
 	}
-}
-
-func TestKnownHosts(t *testing.T) {
-	var wg sync.WaitGroup
-	wg.Add(1)
-	var got string
-	_, err := runWith(t, with(map[string]string{"watchtower:nodeCount": "3"}), func(ctx *pulumi.Context) error {
-		c, err := loadConfig(ctx)
-		if err != nil {
-			return err
+	for _, gone := range []string{"watchtower:serverType"} {
+		if strings.Contains(s, gone) {
+			t.Errorf("Pulumi.prod.yaml still sets %s, which nothing reads", gone)
 		}
-		p, err := newProviders(ctx, c)
-		if err != nil {
-			return err
-		}
-		net, err := newNetwork(ctx, c, p)
-		if err != nil {
-			return err
-		}
-		nodes, err := newNodes(ctx, c, p, net)
-		if err != nil {
-			return err
-		}
-		knownHosts(nodes).ApplyT(func(s string) string {
-			got = s
-			wg.Done()
-			return s
-		})
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	wg.Wait()
-	want := ""
-	for i := 1; i <= 3; i++ {
-		want += nodeAddress + "," + names.NodeName(i) + " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostKey\n"
-	}
-	if got != want {
-		t.Errorf("knownHosts =\n%s\nwant\n%s", got, want)
 	}
 }

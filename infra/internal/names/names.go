@@ -1,7 +1,7 @@
-// Package names holds every name, port and retention period that the cloud and
-// apps stacks must agree on. The two stacks never read each other's state (CI
-// runs them as separate programs), so anything one creates and the other
-// consumes is spelled here exactly once.
+// Package names holds every name, address and retention period the cloud
+// stack, the Ansible roles and the scripts must agree on. The cloud stack
+// hands the ones Ansible needs on through the inventory it exports, so each is
+// spelled here exactly once.
 package names
 
 import "fmt"
@@ -10,51 +10,92 @@ const (
 	// Domain is the private ingest endpoint. Its A record is TunnelIP, so it
 	// only resolves to something reachable from inside the WireGuard tunnel.
 	Domain = "watchtower.jasonmross.dev"
-	// VPNHost is where WireGuard peers connect: the Floating IP.
+	// VPNHost is where WireGuard peers connect: the proxy's primary IPv4.
 	VPNHost = "vpn." + Domain
-	// APIHost fronts the Kubernetes API (round-robin over the control-plane
-	// nodes, firewalled to admin and CI addresses).
-	APIHost = "api." + Domain
 
-	// TunnelIP is wg0's address inside the edge pod; Caddy listens on it.
+	// TunnelIP is wg0's address on the proxy; Caddy listens on it.
 	TunnelIP = "10.8.0.1"
 	// TunnelCIDR is the WireGuard peer range. Peers route only this range
-	// through the tunnel (split tunnel), so the edge pod forwards nothing.
+	// through the tunnel (split tunnel), so the proxy forwards nothing.
 	TunnelCIDR = "10.8.0.0/24"
 
-	// S3Endpoint and S3Region are Hetzner Object Storage in the cluster's
+	// S3Endpoint and S3Region are Hetzner Object Storage in the servers'
 	// location. Everything (telemetry, log archive, Pulumi state) lives here.
 	S3Endpoint = "nbg1.your-objectstorage.com"
 	S3Region   = "nbg1"
 
-	// NodeLabelRole is the Hetzner server label every node carries. The
-	// firewall applies to it, so a new node is covered from its first boot.
-	NodeLabelRole = "watchtower"
-	// FloatingIPLabel is the Hetzner label fipd finds the VPN Floating IP by.
-	FloatingIPLabel = "watchtower-vpn"
-
-	// GCPProject holds the DNS zone, the service accounts and every secret.
+	// GCPProject holds the DNS zone, the service accounts, the image
+	// registry and every secret.
 	GCPProject = "watchtower-observe"
 )
 
-// Secret Manager secrets in GCPProject. Each is also in gopass as
-// watchtower/<id>, and scripts/secret-names.txt lists them all for
-// scripts/bootstrap.sh (a test keeps the two lists equal). Nothing secret is
-// stack config: the deploy workflow reads the first group, the programs read
-// the rest themselves while they run.
+// Host roles. Each is a Hetzner server label (`role=...`) and the Hetzner
+// firewall for that role applies to it, so a new server is covered from its
+// first boot.
 const (
-	SecretPulumiPassphrase  = "pulumi-passphrase"
-	SecretHcloudToken       = "hcloud-token"
-	SecretHcloudCCMToken    = "hcloud-ccm-token"
-	SecretSSHPrivateKey     = "ssh-private-key"
-	SecretRegistryPushToken = "registry-push-token"
+	RoleNode  = "watchtower-node"
+	RoleProxy = "watchtower-proxy"
+)
 
-	SecretGrafanaAdminPassword = "grafana-admin-password"
-	SecretWGEasyPassword       = "wg-easy-password"
-	SecretCaddyDNSKey          = "caddy-dns-key"
-	SecretLUKSPassphrase       = "luks-passphrase"
-	SecretRegistryPullToken    = "registry-pull-token"
-	SecretHcloudFIPToken       = "hcloud-fip-token"
+// ProxyName is the front box: Caddy and the WireGuard endpoint.
+const ProxyName = "watchtower-proxy"
+
+// NodeName is data node i (1-based).
+func NodeName(i int) string {
+	return fmt.Sprintf("watchtower-%d", i)
+}
+
+// MinNodes is the smallest cluster that survives losing a node: Loki and
+// Mimir replicate three ways, and Kafka and etcd need a quorum of two.
+const MinNodes = 3
+
+// PrivateIP is a host's fixed address on the private network: the proxy is
+// host 0, node i is host i.
+func PrivateIP(host int) string {
+	return fmt.Sprintf("10.20.1.%d", 10+host)
+}
+
+// MeshIP is a host's address on wg1, the WireGuard mesh that carries all
+// traffic between the servers. Same numbering as PrivateIP.
+func MeshIP(host int) string {
+	return fmt.Sprintf("10.30.0.%d", 10+host)
+}
+
+// Network ranges and ports.
+const (
+	NetworkCIDR = "10.20.0.0/16"
+	SubnetCIDR  = "10.20.1.0/24"
+	MeshCIDR    = "10.30.0.0/24"
+	// MeshPort is wg1's UDP port, reached over the private network only.
+	MeshPort = 51830
+	// PortWireGuard is the client VPN's UDP port on the proxy.
+	PortWireGuard = 51820
+)
+
+// Secret Manager secrets in GCPProject. Each is also in gopass as
+// watchtower/<id>, and scripts/secret-names.txt lists them all (a test keeps
+// the two lists equal). Nothing secret is stack config.
+const (
+	// Read by the deploy workflow's cloud job.
+	SecretPulumiPassphrase = "pulumi-passphrase"
+	SecretHcloudToken      = "hcloud-token"
+
+	// Read by the deploy workflow's hosts job and installed on the servers.
+	SecretSSHPrivateKey               = "ssh-private-key"
+	SecretLUKSPassphrase              = "luks-passphrase"
+	SecretGARPullKey                  = "gar-pull-key"
+	SecretGrafanaAdminPassword        = "grafana-admin-password"
+	SecretGrafanaSecretKey            = "grafana-secret-key"
+	SecretGrafanaDBPassword           = "grafana-db-password"
+	SecretPostgresSuperuserPassword   = "postgres-superuser-password"
+	SecretPostgresReplicationPassword = "postgres-replication-password"
+	SecretPatroniRESTAPIPassword      = "patroni-restapi-password"
+	SecretWGEasyPassword              = "wg-easy-password"
+	SecretCaddyDNSKey                 = "caddy-dns-key"
+
+	// SecretGARPushKey is copied to the GAR_PUSH_KEY Actions secret by the
+	// owner (scripts/secret.sh gitea). The deployer is never granted it.
+	SecretGARPushKey = "gar-push-key"
 )
 
 // S3AccessKeySecret and S3SecretKeySecret name the two secrets holding one
@@ -65,38 +106,18 @@ func S3SecretKeySecret(key string) string { return "s3-" + key + "-secret-key" }
 // Secrets lists every secret.
 func Secrets() []string {
 	out := []string{
-		SecretPulumiPassphrase, SecretHcloudToken, SecretHcloudCCMToken, SecretSSHPrivateKey, SecretRegistryPushToken,
-		SecretGrafanaAdminPassword, SecretWGEasyPassword, SecretCaddyDNSKey, SecretLUKSPassphrase,
-		SecretRegistryPullToken, SecretHcloudFIPToken,
+		SecretPulumiPassphrase, SecretHcloudToken,
+		SecretSSHPrivateKey, SecretLUKSPassphrase, SecretGARPullKey,
+		SecretGrafanaAdminPassword, SecretGrafanaSecretKey, SecretGrafanaDBPassword,
+		SecretPostgresSuperuserPassword, SecretPostgresReplicationPassword, SecretPatroniRESTAPIPassword,
+		SecretWGEasyPassword, SecretCaddyDNSKey,
+		SecretGARPushKey,
 	}
 	for _, k := range append([]string{KeyAdmin}, Keys...) {
 		out = append(out, S3AccessKeySecret(k), S3SecretKeySecret(k))
 	}
 	return out
 }
-
-// Kubernetes namespaces.
-const (
-	NamespaceApps    = "watchtower"
-	NamespaceEdge    = "watchtower-edge"
-	NamespaceFIP     = "watchtower-fip"
-	NamespaceLogging = "logging"
-)
-
-// EdgeAppLabel selects the edge pod. fipd follows the node it runs on.
-const EdgeAppLabel = "edge"
-
-// Ports Caddy serves on TunnelIP, and the backends behind them.
-const (
-	PortGrafana   = 443
-	PortLoki      = 3100
-	PortMimir     = 8080
-	PortTempo     = 3200
-	PortOTLPGRPC  = 4317
-	PortOTLPHTTP  = 4318
-	PortWGUI      = 51821
-	PortWireGuard = 51820
-)
 
 // Retention, in days. Application retention is the erasure mechanism; bucket
 // lifecycle (LifecycleDays) is only a safety net behind it.
@@ -111,7 +132,7 @@ const (
 type Bucket struct {
 	// Suffix is appended to the stack's bucketPrefix.
 	Suffix string
-	// Key names the component S3 key (besides the admin key) that may use it.
+	// Key names the S3 key (besides the admin key) that may use it.
 	Key string
 	// LifecycleDays expires objects after this many days; 0 means never.
 	LifecycleDays int
@@ -133,30 +154,27 @@ const (
 )
 
 // KeyAdmin is the S3 key Pulumi, the deploy workflow and operators use; every
-// bucket admits it.
+// bucket admits it, and it alone may use the Pulumi state bucket.
 const KeyAdmin = "admin"
 
-// Component S3 keys. Each is a separate Hetzner S3 credential.
-const (
-	KeyLoki    = "loki"
-	KeyMimir   = "mimir"
-	KeyTempo   = "tempo"
-	KeyLogship = "logship"
-)
+// KeyCluster is the S3 key everything on the servers shares: Loki, Mimir,
+// Tempo and Fluent Bit. Bucket policies keep it out of the Pulumi state
+// bucket and let it only write to the log archive.
+const KeyCluster = "cluster"
 
-// Keys lists the component keys in a fixed order.
-var Keys = []string{KeyLoki, KeyMimir, KeyTempo, KeyLogship}
+// Keys lists the non-admin keys.
+var Keys = []string{KeyCluster}
 
 // Buckets lists every bucket the cloud stack creates. The Pulumi state bucket
 // is not here: scripts/bootstrap.sh creates it, because Pulumi needs it first.
 var Buckets = []Bucket{
-	{Suffix: "loki", Key: KeyLoki, LifecycleDays: 2 * RetentionLokiDays},
-	{Suffix: "mimir-blocks", Key: KeyMimir, LifecycleDays: 2 * RetentionMimirDays},
-	{Suffix: "mimir-ruler", Key: KeyMimir},
-	{Suffix: "mimir-alertmanager", Key: KeyMimir},
-	{Suffix: "tempo", Key: KeyTempo, LifecycleDays: 2 * RetentionTempoDays},
+	{Suffix: "loki", Key: KeyCluster, LifecycleDays: 2 * RetentionLokiDays},
+	{Suffix: "mimir-blocks", Key: KeyCluster, LifecycleDays: 2 * RetentionMimirDays},
+	{Suffix: "mimir-ruler", Key: KeyCluster},
+	{Suffix: "mimir-alertmanager", Key: KeyCluster},
+	{Suffix: "tempo", Key: KeyCluster, LifecycleDays: 2 * RetentionTempoDays},
 	{
-		Suffix: "logs-archive", Key: KeyLogship, LifecycleDays: RetentionLogArchiveDays, WriteOnly: true,
+		Suffix: "logs-archive", Key: KeyCluster, LifecycleDays: RetentionLogArchiveDays, WriteOnly: true,
 		LifecyclePrefixes: []string{ArchivePrefixContainers, ArchivePrefixJournal, ArchivePrefixAudit},
 	},
 }
@@ -165,23 +183,3 @@ var Buckets = []Bucket{
 func BucketName(prefix, suffix string) string {
 	return prefix + "-" + suffix
 }
-
-// NodeName is the Hetzner server and Kubernetes node name of node i (1-based).
-func NodeName(i int) string {
-	return fmt.Sprintf("watchtower-%d", i)
-}
-
-// ControlPlaneNodes is how many nodes carry the control plane and etcd. Nodes
-// beyond it are workers, added with Kubespray's scale.yml.
-const ControlPlaneNodes = 3
-
-// PrivateIP is node i's fixed address on the private network.
-func PrivateIP(i int) string {
-	return fmt.Sprintf("10.20.1.%d", 10+i)
-}
-
-// Private network ranges.
-const (
-	NetworkCIDR = "10.20.0.0/16"
-	SubnetCIDR  = "10.20.1.0/24"
-)
