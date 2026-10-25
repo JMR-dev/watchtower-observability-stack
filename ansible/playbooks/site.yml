@@ -64,6 +64,8 @@
     - grafana
     # After grafana, which creates the database it dumps.
     - pgbackup
+    # Last: a node starts reporting once everything on it is installed.
+    - health
   post_tasks:
     - name: This node is healthy before the next one goes
       ansible.builtin.include_tasks: tasks/node-health.yml
@@ -72,3 +74,4 @@
   hosts: proxy
   roles:
     - edge
+    - health

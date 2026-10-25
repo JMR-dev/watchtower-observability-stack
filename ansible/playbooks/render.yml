@@ -20,6 +20,9 @@
       - {src: logship/templates/fluent-bit.container.j2, dest: quadlets/fluent-bit.container}
       - {src: reboot/templates/watchtower-reboot.sh.j2, dest: watchtower-reboot.sh}
       - {src: reboot/templates/watchtower-reboot.timer.j2, dest: watchtower-reboot.timer}
+      - {src: health/templates/watchtower-health.sh.j2, dest: watchtower-health.sh}
+      - {src: health/templates/watchtower-health.service.j2, dest: watchtower-health.service}
+      - {src: health/templates/watchtower-health.timer.j2, dest: watchtower-health.timer}
     per_node:
       - {src: loki/templates/loki.yaml.j2, dest: loki/loki.yaml}
       - {src: loki/templates/loki.container.j2, dest: quadlets/loki.container}
@@ -50,7 +53,8 @@
 
     - name: Role defaults the templates use
       ansible.builtin.include_vars:
-        file: "{{ playbook_dir }}/../roles/tempo/defaults/main.yml"
+        file: "{{ playbook_dir }}/../roles/{{ item }}/defaults/main.yml"
+      loop: [tempo, health]
 
     - name: Output directories
       ansible.builtin.file:

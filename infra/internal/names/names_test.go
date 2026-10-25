@@ -101,7 +101,7 @@ func TestSecretIDs(t *testing.T) {
 	}
 }
 
-// The deploy workflow reads every secret but the owner-only push key, and
+// The deploy workflow reads every secret but the owner-only ones, and
 // nothing else. scripts/bootstrap.sh creates and grants exactly what it
 // reads (`secret.sh deploy-ids`), so a secret it missed would fail the
 // deploy that first needs it.
@@ -113,6 +113,13 @@ func TestWorkflowReadsEverySecret(t *testing.T) {
 	known := map[string]bool{}
 	for _, id := range Secrets() {
 		known[id] = true
+	}
+	ownerOnly := map[string]bool{}
+	for _, id := range OwnerOnlySecrets {
+		if !known[id] {
+			t.Errorf("owner-only %s is not in Secrets()", id)
+		}
+		ownerOnly[id] = true
 	}
 	// The setup action's `secrets:` lines: NAME=id or @NAME=id.
 	line := regexp.MustCompile(`(?m)^\s+@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)\s*$`)
@@ -126,14 +133,14 @@ func TestWorkflowReadsEverySecret(t *testing.T) {
 		if !known[m[1]] {
 			t.Errorf("deploy.yml reads %s, which is not a known secret", m[1])
 		}
-		// The deployer is never granted the push key: the image job gets it
-		// as its own Actions secret.
-		if m[1] == SecretGARPushKey {
-			t.Errorf("deploy.yml reads %s through the deployer", m[1])
+		// The deployer is never granted these: the image job gets the push
+		// key as its own Actions secret, and only the owner manages checks.
+		if ownerOnly[m[1]] {
+			t.Errorf("deploy.yml reads owner-only %s through the deployer", m[1])
 		}
 	}
 	for _, id := range Secrets() {
-		if !read[id] && id != SecretGARPushKey {
+		if !read[id] && !ownerOnly[id] {
 			t.Errorf("deploy.yml never reads %s, so bootstrap.sh would not create or grant it", id)
 		}
 	}

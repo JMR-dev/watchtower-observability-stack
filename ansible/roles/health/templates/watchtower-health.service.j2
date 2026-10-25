@@ -1,0 +1,10 @@
+# Managed by Ansible (roles/health).
+[Unit]
+Description=Check {{ inventory_hostname }} and report to Healthchecks.io
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/watchtower-health
+TimeoutStartSec=4min

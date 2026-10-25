@@ -15,15 +15,18 @@ gopass.
    - one API token, read/write (Hetzner tokens are project-wide anyway);
    - two S3 credentials: `admin` and `cluster`.
 
-   **Healthchecks.io:** one check for the nightly backup of Grafana's
-   database: `watchtower-prod-pg-backup`, tags `watchtower prod`, schedule
-   Cron `30 2 * * *` in UTC, grace 1 hour, with the project's
-   notifications. Copy its ping URL.
+   **Healthchecks.io**, project `jasonmross.dev`:
+   - an API key (read-write), for `scripts/healthchecks.sh`;
+   - one check for the nightly backup of Grafana's database: schedule Cron
+     `30 2 * * *` in UTC, grace 1 hour, with the project's notifications
+     (ours is named `healthchecks-pg-backup-url`). Copy its ping URL.
 2. **Store every secret.** Paste each token or key at the hidden prompt;
    generate the rest:
    ```bash
    scripts/secret.sh put hcloud-token
    scripts/secret.sh put healthchecks-pg-backup-url
+   scripts/secret.sh put healthchecks-jasonmross-dev-api-key
+   scripts/healthchecks.sh   # a check per host; stores healthchecks-host-urls
    for k in admin cluster; do
      scripts/secret.sh put "s3-$k-access-key"
      scripts/secret.sh put "s3-$k-secret-key"
@@ -170,7 +173,8 @@ every night at 02:30 UTC the Postgres leader dumps the `grafana` database
 after 90 days. The servers' cluster key can only add dumps; reading,
 listing and deleting them takes the admin key.
 
-- **Alerts** come from the Healthchecks.io check `watchtower-prod-pg-backup`:
+- **Alerts** come from the Healthchecks.io check behind
+  `healthchecks-pg-backup-url`:
   - a failed run reports to it at once, with its log (`OnFailure=`);
   - a night without a successful run alerts once the check's grace runs
     out;
@@ -210,6 +214,33 @@ Grafana, then `podman exec patroni dropdb grafana_restore`.
 
 A dump is only usable with the `grafana-secret-key` in force when it was
 made: Grafana encrypts datasource secrets with it.
+
+## Host health
+
+High availability hides a lost node from users, so each host reports on
+itself instead (`ansible/roles/health`). Every 5 minutes
+`watchtower-health.timer` checks that:
+- every service on the host is active: each quadlet, plus WireGuard, the
+  firewall, fail2ban and the update, reboot and backup timers;
+- each service on a node answers ready: Loki, Mimir, every Tempo
+  component, Grafana, Patroni and etcd, and Kafka takes connections. On the
+  proxy, Caddy answers TLS for the domain on the tunnel address;
+- SELinux is enforcing, the data volume is mounted, and `/` and the
+  volume are under 90% full.
+
+It reports to the host's own Healthchecks.io check (`watchtower-proxy`,
+`watchtower-1`, ...; project `jasonmross.dev`), which emails:
+- **two unhealthy runs in a row** (5 to 10 minutes): `/fail`, with the
+  problems. A single bad run is only logged on the check, since a deploy
+  restarts services;
+- **no report for 15 minutes**: the host is down, cut off, or its timer
+  is dead.
+
+`scripts/healthchecks.sh` creates the checks (one per host from
+`nodeCount`; re-run it after changing that) and stores their ping URLs as
+`healthchecks-host-urls`. The deploy gives each host only its own URL.
+On a host, `watchtower-health check` prints what it sees now, without
+reporting. Every deploy's verify step runs it on each host.
 
 ## Kafka
 
@@ -297,7 +328,9 @@ copy. The hosts get it on the next deploy (push to main, or dispatch
 | `luks-passphrase` | `cryptsetup luksAddKey` on every host with the new one, `secret.sh put luks-passphrase`, deploy, then `luksRemoveKey` the old |
 | Pulumi passphrase | `pulumi stack change-secrets-provider passphrase` with the new one, then `secret.sh put pulumi-passphrase` |
 | Hosts' SSH key | new key → `watchtower:sshPublicKey` and `/root/.ssh/authorized_keys` on every host → `secret.sh put ssh-private-key` |
-| Healthchecks.io ping URL | regenerate it on the check → `secret.sh put healthchecks-pg-backup-url` → deploy |
+| Backup check's ping URL | a new check → `secret.sh put healthchecks-pg-backup-url` → deploy → delete the old check |
+| Healthchecks.io API key | a new key in the project's settings → `secret.sh put healthchecks-jasonmross-dev-api-key` → revoke the old one (only `scripts/healthchecks.sh` uses it) |
+| Hosts' ping URLs | delete a host's check, `scripts/healthchecks.sh` (it makes a new one), then deploy |
 
 Old versions stay in Secret Manager's history until destroyed:
 `gcloud secrets versions destroy <n> --secret <id> --project watchtower-observe`.
@@ -314,7 +347,8 @@ Old versions stay in Secret Manager's history until destroyed:
 | A host drops traffic it should accept | The address isn't in the lists the ruleset mirrors | `journalctl -k -g nft-drop`; fix the cloud stack's CIDR config and merge |
 | A container is blocked by SELinux | It needs host access it wasn't given | `ausearch -m avc -ts recent`; do not switch SELinux to permissive — fix the quadlet's volume labels or, as a last resort, `SecurityLabelDisable` for that one container |
 | Loki "no org id" | Client without `X-Scope-OrgID` | Fix the Alloy config |
-| Healthchecks.io: `watchtower-prod-pg-backup` is down | The nightly backup failed or never ran | The alert carries the run's log; else `journalctl -u watchtower-pg-backup -n 50` on the leader. Usual causes: a cluster S3 key replaced but not yet deployed, no Patroni leader, or the volume not mounted. `systemctl start watchtower-pg-backup` on every node retries |
+| Healthchecks.io: a host's check is down | The host reported problems twice in a row, or stopped reporting (down, cut off from the internet, its timer dead) | The alert lists the problems. If it went silent: is the server up (Hetzner Console), and `systemctl status watchtower-health.timer` on it. `watchtower-health check` shows what it sees now |
+| Healthchecks.io: the backup check is down | The nightly backup failed or never ran | The alert carries the run's log; else `journalctl -u watchtower-pg-backup -n 50` on the leader. Usual causes: a cluster S3 key replaced but not yet deployed, no Patroni leader, or the volume not mounted. `systemctl start watchtower-pg-backup` on every node retries |
 | Tempo queries miss recent traces | A live-store or the Kafka path | `systemctl status 'tempo-*'` on each node; Kafka's under-replicated partitions |
 
 ## Cost

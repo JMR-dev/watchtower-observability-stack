@@ -73,7 +73,7 @@ const (
 )
 
 // Secret Manager secrets in GCPProject. Each is also in gopass as
-// watchtower/<id>. The deploy workflow reads every one but SecretGARPushKey
+// watchtower/<id>. The deploy workflow reads every one but OwnerOnlySecrets
 // (a test keeps it so), and scripts/bootstrap.sh creates and grants what it
 // reads. Nothing secret is stack config.
 const (
@@ -96,11 +96,23 @@ const (
 	// The Healthchecks.io ping URL of the nightly Postgres backup
 	// (ansible/roles/pgbackup): pinged on success, /fail on failure.
 	SecretHealthchecksPGBackupURL = "healthchecks-pg-backup-url"
+	// Every host's own Healthchecks.io ping URL, one JSON object of host
+	// name to URL (scripts/healthchecks.sh); each host gets only its own
+	// (ansible/roles/health).
+	SecretHealthchecksHostURLs = "healthchecks-host-urls"
 
 	// SecretGARPushKey is copied to the GAR_PUSH_KEY Actions secret by the
 	// owner (scripts/secret.sh gitea). The deployer is never granted it.
 	SecretGARPushKey = "gar-push-key"
+	// SecretHealthchecksAPIKey manages the checks in the Healthchecks.io
+	// project (scripts/healthchecks.sh). Owner only: the deploy gets ping
+	// URLs, never a key that could pause or delete checks.
+	SecretHealthchecksAPIKey = "healthchecks-jasonmross-dev-api-key"
 )
+
+// OwnerOnlySecrets are never read by the deploy, so never granted to the
+// deployer (scripts/bootstrap.sh grants what deploy.yml reads).
+var OwnerOnlySecrets = []string{SecretGARPushKey, SecretHealthchecksAPIKey}
 
 // S3AccessKeySecret and S3SecretKeySecret name the two secrets holding one
 // Hetzner S3 credential: KeyAdmin or a Keys entry.
@@ -114,8 +126,8 @@ func Secrets() []string {
 		SecretSSHPrivateKey, SecretLUKSPassphrase, SecretGARPullKey,
 		SecretGrafanaAdminPassword, SecretGrafanaSecretKey, SecretGrafanaDBPassword,
 		SecretPostgresSuperuserPassword, SecretPostgresReplicationPassword, SecretPatroniRESTAPIPassword,
-		SecretWGEasyPassword, SecretCaddyDNSKey, SecretHealthchecksPGBackupURL,
-		SecretGARPushKey,
+		SecretWGEasyPassword, SecretCaddyDNSKey, SecretHealthchecksPGBackupURL, SecretHealthchecksHostURLs,
+		SecretGARPushKey, SecretHealthchecksAPIKey,
 	}
 	for _, k := range append([]string{KeyAdmin}, Keys...) {
 		out = append(out, S3AccessKeySecret(k), S3SecretKeySecret(k))

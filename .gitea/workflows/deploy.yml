@@ -178,6 +178,7 @@ jobs:
             PATRONI_RESTAPI_PASSWORD=patroni-restapi-password
             WG_EASY_PASSWORD=wg-easy-password
             HEALTHCHECKS_PG_BACKUP_URL=healthchecks-pg-backup-url
+            HEALTHCHECKS_HOST_URLS=healthchecks-host-urls
             @CADDY_DNS_KEY_FILE=caddy-dns-key
             @GAR_PULL_KEY_FILE=gar-pull-key
       - name: Inventory and pinned host keys from the cloud stack

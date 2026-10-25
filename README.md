@@ -13,6 +13,7 @@ private endpoint **watchtower.jasonmross.dev**.
 - **Object storage:** Hetzner Object Storage, nbg1; two S3 keys (admin, and one for the servers, fenced by bucket policies)
 - **Log archive:** every container's log, every host's journal and audit log, kept 90 days in a bucket of their own
 - **Backups:** Grafana's database dumped nightly to Object Storage and kept 90 days, with a Healthchecks.io alert the moment a run fails
+- **Host health:** every host checks its services, disks and SELinux every 5 minutes and reports to its own Healthchecks.io check, so a lost node is noticed even though users aren't affected
 - **Access:** WireGuard (wg-easy) on the proxy; Caddy (with the Coraza WAF) answers only on the tunnel address
 - **Images:** our two (Caddy, Patroni) in a private Artifact Registry repo, built natively per architecture, scanned by Trivy
 - **DNS:** the Cloud DNS zone `watchtower.jasonmross.dev`, delegated from `jasonmross.dev`
@@ -27,7 +28,7 @@ private endpoint **watchtower.jasonmross.dev**.
 | `ansible/` | Everything on the hosts: one role per service, `playbooks/site.yml`, `playbooks/render.yml` |
 | `build/caddy/` | The proxy image: Caddy + Coraza WAF + Cloud DNS DNS-01 |
 | `build/patroni/` | Patroni + PostgreSQL 18 for the nodes, built with uv |
-| `scripts/` | Bootstrap, secrets, key rotation, image builds and checks, deploy verification, tenant onboarding, GDPR erasure |
+| `scripts/` | Bootstrap, secrets, Healthchecks.io checks, key rotation, image builds and checks, deploy verification, tenant onboarding, GDPR erasure |
 | `config/alloy/` | Client-side Alloy config with PII scrubbing |
 | `docs/` | Architecture, runbook, secrets, multi-tenancy, GDPR |
 

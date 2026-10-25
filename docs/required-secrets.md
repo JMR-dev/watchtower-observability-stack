@@ -44,8 +44,8 @@ scripts/secret.sh check
 - **The hosts** get theirs from Ansible, as podman secrets (root-only, out
   of unit files and container listings): the cluster S3 key, the LUKS key,
   the pull key, Grafana's, Postgres's and Patroni's passwords, wg-easy's
-  first-start password, Caddy's DNS-01 key and the backup's Healthchecks.io
-  ping URL. A new value reaches them on
+  first-start password, Caddy's DNS-01 key and the Healthchecks.io ping
+  URLs (the backup's, and the host's own). A new value reaches them on
   the next deploy, and only the containers that use it restart.
 
 Why a long-lived key: the Gitea runner cluster keeps Actions jobs away from
@@ -86,13 +86,15 @@ every 90 days.
 | `patroni-restapi-password` | Patroni's REST API (switchover, restart) |
 | `wg-easy-password` | wg-easy's first-start admin password |
 | `caddy-dns-key` | JSON key of `watchtower-caddy-dns01@` (DNS-01); `scripts/rotate-gcp-key.sh caddy` |
-| `healthchecks-pg-backup-url` | Ping URL of the Healthchecks.io check `watchtower-prod-pg-backup` (docs/runbook.md, "First deploy"). The nightly backup pings it, or its `/fail` when a run fails. Anyone holding it can ping the check |
+| `healthchecks-pg-backup-url` | Ping URL of the Healthchecks.io check of the nightly backup (docs/runbook.md, "First deploy"). The nightly backup pings it, or its `/fail` when a run fails. Anyone holding it can ping the check |
+| `healthchecks-host-urls` | One JSON object, host name to the ping URL of its Healthchecks.io check, written by `scripts/healthchecks.sh`. Each host gets only its own URL |
 
 ### Owner only
 
 | Id | What |
 |---|---|
 | `gar-push-key` | The `GAR_PUSH_KEY` Actions secret's source. Never granted to the deployer, so a leaked deployer key can't push images |
+| `healthchecks-jasonmross-dev-api-key` | Read-write API key of the Healthchecks.io project `jasonmross.dev`, for `scripts/healthchecks.sh`. Never granted to the deployer: the deploy holds ping URLs, which can't pause, change or delete a check |
 
 ## Stack config
 

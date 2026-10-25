@@ -83,15 +83,18 @@ and nothing else.
 8. **Every night** the Postgres leader dumps Grafana's database to
    `-postgres-backups`, kept 90 days, and reports to Healthchecks.io: a
    failed run alerts at once, a missed night when its grace runs out.
+9. **Every 5 minutes** each host checks its own services, disks and
+   SELinux, and reports to its own Healthchecks.io check, which emails when
+   it is unhealthy twice in a row or goes 15 minutes without reporting.
 
 ## What each failure costs
 
 | Failure | Effect |
 |---|---|
-| Any one data node | Nothing visible. Loki, Mimir, Kafka and etcd keep their quorums, Patroni fails over in about 30 s and Grafana follows by itself, Caddy skips the node |
+| Any one data node | Nothing visible to users: Loki, Mimir, Kafka and etcd keep their quorums, Patroni fails over in about 30 s and Grafana follows by itself, Caddy skips the node. Its Healthchecks.io check emails within 15 minutes; the stack has no spare until it is back |
 | watchtower-1 | Tempo's block builder pauses until moved (`group_vars/all/placement.yml`); Kafka keeps 24 h of traces |
 | watchtower-2 | Tempo's compaction and retention (scheduler) pause until moved |
-| The proxy | Ingest and the UI are down until it is rebuilt (10–15 minutes); Alloy buffers and retries |
+| The proxy | Ingest and the UI are down until it is rebuilt (10–15 minutes); Alloy buffers and retries. Its Healthchecks.io check emails within 15 minutes |
 | A mistake in Grafana's database (a deleted dashboard, a bad upgrade) | Every replica has it too; restore last night's dump (runbook, "Grafana database backups") |
 
 ## Why it is built this way

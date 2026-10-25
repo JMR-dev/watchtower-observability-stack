@@ -42,7 +42,7 @@ Typical bases:
 | WALs, Kafka's log (24 h of traces), Postgres (Grafana's database), wg-easy's database | Hetzner Volumes, nbg1 (LUKS) |
 | Log archive (container logs, journals, audit logs) | Hetzner Object Storage, nbg1 |
 | Backups of Grafana's database | Hetzner Object Storage, nbg1 |
-| Backup alerts | Healthchecks.io (no personal data: a node's name and the backup run's own log) |
+| Backup and host-health alerts | Healthchecks.io (no personal data: host and service names, disk use, the backup run's own log) |
 | Pulumi state | Hetzner Object Storage, nbg1 |
 | DNS records | Google Cloud DNS (global; no personal data) |
 | Credentials (API tokens, keys, passwords) | Google Secret Manager, payloads replicated to europe-west3 only (no personal data) |
