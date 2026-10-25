@@ -20,10 +20,17 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python \
 COPY --from=uv /uv /usr/local/bin/uv
 COPY requirements.txt /tmp/requirements.txt
 
-# uv leaves the image once Python and the packages are in.
+# uv leaves the image once Python and the packages are in. So do the
+# interpreter's own pip, whose vendored libraries (urllib3, msgpack,
+# pkg_resources) Trivy flags and nothing here runs, and the base image's
+# gosu: Patroni starts as postgres directly, never through the entrypoint.
 RUN uv venv --python 3.13 /opt/patroni \
  && uv pip install --python /opt/patroni/bin/python --require-hashes --no-deps -r /tmp/requirements.txt \
- && rm -f /usr/local/bin/uv /tmp/requirements.txt \
+ && rm -f /usr/local/bin/uv /tmp/requirements.txt /usr/local/bin/gosu \
+ && rm -rf /opt/python/cpython-*/lib/python3.*/site-packages/pip \
+           /opt/python/cpython-*/lib/python3.*/site-packages/pip-*.dist-info \
+           /opt/python/cpython-*/lib/python3.*/ensurepip \
+           /opt/python/cpython-*/bin/pip* \
  && /opt/patroni/bin/patroni --version \
  && /opt/patroni/bin/python -c 'import psycopg, etcd'
 
