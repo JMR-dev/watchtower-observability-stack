@@ -18,7 +18,7 @@ config:
   watchtower:bucketPrefix: jmr-watchtower
   # The S3 owner ID is p16527471; bucket policies name p<id>:<access key>.
   watchtower:hetznerProjectId: "16527471"
-  watchtower:sshPublicKey: "REPLACE_WITH_ssh-ed25519_PUBLIC_KEY"
+  watchtower:sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPX/IQoTXtMZyyx0ltlnDX13AYOABb6frfb+pdG6eUL6"
   # SSH. Tighten to your own egress addresses.
   watchtower:adminCidrs:
     - 0.0.0.0/0
@@ -33,3 +33,4 @@ config:
   # Holds the DNS zone, the image registry and the secrets.
   watchtower:gcpProject: watchtower-observe
   watchtower:dnsZone: watchtower
+encryptionsalt: v1:IURg/P90chM=:v1:KOUOy+cy4hDhux6J:ck7o2LiYSp9jmmkQMqH/M1ZPJY/oAw==
