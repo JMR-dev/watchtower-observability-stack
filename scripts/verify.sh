@@ -148,9 +148,15 @@ echo "    rings ACTIVE on ${nodes} nodes, Kafka fully replicated, Patroni health
 # ---------------------------------------------------------------------------
 log "6/8 log archive"
 prefix="containers/$(date -u +%Y/%m/%d)/"
-archived() { aws --endpoint-url "$s3" --region "$region" s3 ls "s3://${archive}/${prefix}" --recursive | grep -q .; }
+# One request for at most one key: no pipe for grep -q to close early,
+# which made aws exit 120 under pipefail even when the logs were there.
+archive_keys() {
+  aws --endpoint-url "$s3" --region "$region" s3api list-objects-v2 --bucket "$archive" \
+    --prefix "$prefix" --max-keys 1 --no-paginate --query KeyCount --output text
+}
+archived() { [[ "$(archive_keys)" -gt 0 ]]; }
 # Fluent Bit uploads every 5 minutes (upload_timeout); wait up to 8.
-retry 16 30 archived || fail "nothing under s3://${archive}/${prefix} yet"
+retry 16 30 archived || fail "nothing under s3://${archive}/${prefix} yet: $(archive_keys 2>&1)"
 echo "    container logs are being archived"
 
 # ---------------------------------------------------------------------------
