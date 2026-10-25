@@ -117,7 +117,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The state backend (the URL is in Pulumi.yaml) and the MinIO provider
-      # both use the admin S3 key, each under its own names.
+      # both use the admin S3 key, each under its own names. The cluster key's
+      # ID is read only so the log masks it: the program reads it for the
+      # bucket policies itself, and a provider error can print a policy.
       - uses: ./.gitea/actions/setup
         with:
           tools: go pulumi
@@ -129,6 +131,7 @@ jobs:
             MINIO_USER=s3-admin-access-key
             MINIO_PASSWORD=s3-admin-secret-key
             HCLOUD_TOKEN=hcloud-token
+            S3_CLUSTER_ACCESS_KEY=s3-cluster-access-key
       - name: Build the Pulumi program
         working-directory: infra
         env:
