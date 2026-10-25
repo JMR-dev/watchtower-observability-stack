@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # Exports the credentials owner-run commands need (pulumi, ansible,
-# scripts/bootstrap.sh) from gopass, without printing any of them.
+# scripts/bootstrap.sh, scripts/verify.sh) from gopass, without printing any
+# of them.
 #
 #   source scripts/env.sh
 #
@@ -21,9 +22,8 @@ if ! gopass ls watchtower >/dev/null 2>&1; then
   return 1 2>/dev/null || exit 1
 fi
 
-export HCLOUD_TOKEN HCLOUD_CCM_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY PULUMI_CONFIG_PASSPHRASE
+export HCLOUD_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY PULUMI_CONFIG_PASSPHRASE
 HCLOUD_TOKEN="$(_wt_get hcloud-token)"
-HCLOUD_CCM_TOKEN="$(_wt_get hcloud-ccm-token)"
 AWS_ACCESS_KEY_ID="$(_wt_get s3-admin-access-key)"
 AWS_SECRET_ACCESS_KEY="$(_wt_get s3-admin-secret-key)"
 PULUMI_CONFIG_PASSPHRASE="$(_wt_get pulumi-passphrase)"
@@ -40,9 +40,8 @@ else
 fi
 
 if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
-  _wt_file ssh-private-key | ssh-add - >/dev/null 2>&1 || echo "could not add the node SSH key to ssh-agent" >&2
+  _wt_file ssh-private-key | ssh-add - >/dev/null 2>&1 || echo "could not add the hosts' SSH key to ssh-agent" >&2
 fi
 
-export KUBECONFIG="${KUBECONFIG_OUT:-$HOME/.kube/watchtower}"
 unset -f _wt_get _wt_file
 unset _wt_dir

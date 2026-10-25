@@ -13,8 +13,8 @@
 #   scripts/secret.sh gitea <id> <NAME>
 #                                     copy the latest value into the repo's
 #                                     Actions secret NAME (only
-#                                     registry-push-token -> REGISTRY_TOKEN
-#                                     needs this; GITEA_TOKEN or prompted)
+#                                     gar-push-key -> GAR_PUSH_KEY needs
+#                                     this; GITEA_TOKEN or prompted)
 #
 #   openssl rand -base64 48 | scripts/secret.sh put pulumi-passphrase
 #   scripts/secret.sh put ssh-private-key <./watchtower-root

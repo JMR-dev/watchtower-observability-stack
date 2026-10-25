@@ -8,8 +8,12 @@
 #
 # The admin password comes from GRAFANA_ADMIN_PASSWORD or gopass
 # (watchtower/grafana-admin-password). Also add the tenant to
-# watchtower:tenants in infra/apps/Pulumi.prod.yaml so the main org gets its
-# datasources too.
+# watchtower_tenants in ansible/inventory/group_vars/all/tenants.yml so the
+# main org gets its datasources too.
+#
+# The three Grafanas share one database, so one call reaches all of them. The
+# datasource URLs are the *.internal names every Grafana container maps to all
+# three nodes (local node first), so a query still works with a node down.
 
 set -euo pipefail
 
@@ -45,9 +49,9 @@ datasource() { # name type url
   }'
 }
 for ds in \
-  "Mimir|prometheus|http://mimir.watchtower.svc.cluster.local:8080/prometheus" \
-  "Loki|loki|http://loki-query-frontend.watchtower.svc.cluster.local:3100" \
-  "Tempo|tempo|http://tempo.watchtower.svc.cluster.local:3200"; do
+  "Mimir|prometheus|http://mimir.internal:8080/prometheus" \
+  "Loki|loki|http://loki.internal:3100" \
+  "Tempo|tempo|http://tempo.internal:3200"; do
   IFS='|' read -r n t u <<<"$ds"
   curl -fsS --netrc-file "$work/netrc" -X POST -H 'Content-Type: application/json' \
     -H "X-Grafana-Org-Id: ${org_id}" --data "$(datasource "$n" "$t" "$u")" \

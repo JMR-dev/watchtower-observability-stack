@@ -5,13 +5,13 @@
 #   source scripts/env.sh && scripts/bootstrap.sh
 #
 # What it does, and why it isn't Pulumi:
-#   1. Lists anything left in the Hetzner project from the old OpenTofu
-#      deployment (servers, volumes, IPs, firewalls, keys, buckets), read-only,
-#      so you can delete or keep each before the first `pulumi up`.
+#   1. Lists anything left in the Hetzner project (servers, volumes, IPs,
+#      firewalls, keys, buckets), read-only, so you can delete or keep each
+#      before the first `pulumi up`.
 #   2. Creates the Pulumi state bucket <prefix>-pulumi-state: Pulumi needs it
 #      before it can run. Versioned, old versions expire after 30 days, and a
-#      bucket policy admits only the admin S3 key, so no in-cluster key can
-#      read or rewrite state.
+#      bucket policy admits only the admin S3 key, so the cluster key the
+#      servers hold can never read or rewrite state.
 #   3. Creates the Cloud DNS zone watchtower.jasonmross.dev in
 #      watchtower-observe and delegates it from jasonmross-dev (project
 #      dns-jasonmross-dev), the way every jasonmross.dev subdomain is set up.
@@ -19,12 +19,19 @@
 #      DNS down.
 #   4. Creates two service accounts with grants scoped to that one zone:
 #      watchtower-deployer (the deploy: Pulumi writes the records) and
-#      watchtower-caddy-dns01 (Caddy answers DNS-01). Keys are made by
-#      scripts/rotate-gcp-key.sh.
-#   5. Creates every secret in scripts/secret-names.txt in Secret Manager,
+#      watchtower-caddy-dns01 (Caddy answers DNS-01).
+#   5. Creates the Artifact Registry repo `watchtower` (europe-west3, docker,
+#      immutable tags, keeps the 10 newest versions of each image) for the
+#      caddy and patroni images, plus two service accounts scoped to that one
+#      repo: watchtower-image-pusher (CI writes) and watchtower-image-puller
+#      (the hosts read).
+#   6. Creates every secret in scripts/secret-names.txt in Secret Manager,
 #      empty, with its payload replicated to europe-west3 only, and lets
-#      watchtower-deployer read each one: a grant per secret, never
-#      secretAccessor on the project. Values go in with scripts/secret.sh.
+#      watchtower-deployer read each one but gar-push-key: a grant per
+#      secret, never secretAccessor on the project. Values go in with
+#      scripts/secret.sh.
+#
+# Keys are made by scripts/rotate-gcp-key.sh.
 #
 # Needs: gcloud (as the owner of both GCP projects), hcloud, aws, jq, and the
 # environment scripts/env.sh exports (HCLOUD_TOKEN, AWS_ACCESS_KEY_ID /
@@ -46,6 +53,8 @@ ZONE="${ZONE:-watchtower}"
 DOMAIN="watchtower.jasonmross.dev"
 S3_ENDPOINT="https://nbg1.your-objectstorage.com"
 S3_REGION="nbg1"
+GAR_LOCATION="${GAR_LOCATION:-europe-west3}"
+GAR_REPO="${GAR_REPO:-watchtower}"
 
 PREFIX="$(sed -n 's/^  watchtower:bucketPrefix: //p' "$stack_file")"
 PROJECT_ID="$(sed -n 's/^  watchtower:hetznerProjectId: "\{0,1\}\([0-9]*\)"\{0,1\}$/\1/p' "$stack_file")"
@@ -65,7 +74,7 @@ done
 s3() { aws --endpoint-url "$S3_ENDPOINT" --region "$S3_REGION" "$@"; }
 
 # ---------------------------------------------------------------------------
-log "1/5 Hetzner leftovers (read-only)"
+log "1/6 Hetzner leftovers (read-only)"
 # ---------------------------------------------------------------------------
 for kind in server volume primary-ip floating-ip firewall ssh-key network placement-group; do
   printf -- '--- %s\n' "$kind"
@@ -86,7 +95,7 @@ for suffix in loki mimir-blocks mimir-ruler mimir-alertmanager tempo logs-archiv
 done
 
 # ---------------------------------------------------------------------------
-log "2/5 Pulumi state bucket s3://${STATE_BUCKET}"
+log "2/6 Pulumi state bucket s3://${STATE_BUCKET}"
 # ---------------------------------------------------------------------------
 if ! s3 s3api head-bucket --bucket "$STATE_BUCKET" >/dev/null 2>&1; then
   s3 s3api create-bucket --bucket "$STATE_BUCKET" >/dev/null
@@ -106,9 +115,10 @@ policy="$(jq -n --arg b "$STATE_BUCKET" --arg p "arn:aws:iam:::user/p${PROJECT_I
 s3 s3api put-bucket-policy --bucket "$STATE_BUCKET" --policy "$policy"
 
 # ---------------------------------------------------------------------------
-log "3/5 Cloud DNS zone ${ZONE} (${DOMAIN}.), delegated from ${PARENT_ZONE}"
+log "3/6 Cloud DNS zone ${ZONE} (${DOMAIN}.), delegated from ${PARENT_ZONE}"
 # ---------------------------------------------------------------------------
-gcloud services enable dns.googleapis.com iam.googleapis.com secretmanager.googleapis.com --project "$GCP_PROJECT"
+gcloud services enable dns.googleapis.com iam.googleapis.com secretmanager.googleapis.com \
+  artifactregistry.googleapis.com --project "$GCP_PROJECT"
 
 shard() { tr ';,' '\n' | sed -n 's/^ns-cloud-\([a-e]\)[0-9].*/\1/p' | sort -u; }
 parent_ns="$(gcloud dns managed-zones describe "$PARENT_ZONE" --project "$PARENT_PROJECT" --format='value(nameServers)')"
@@ -153,7 +163,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-log "4/5 Service accounts, scoped to zone ${ZONE}"
+log "4/6 Service accounts, scoped to zone ${ZONE}"
 # ---------------------------------------------------------------------------
 # IAM is eventually consistent and policy writes are read-modify-write;
 # retry the errors that come from that, fail on anything else.
@@ -169,20 +179,26 @@ retry_iam() {
   printf '%s\n' "$out" >&2; return 1
 }
 
+sa_email() { printf '%s@%s.iam.gserviceaccount.com' "$1" "$GCP_PROJECT"; }
+
 ensure_sa() {
   local id=$1 description=$2
-  local email="${id}@${GCP_PROJECT}.iam.gserviceaccount.com"
-  if ! gcloud iam service-accounts describe "$email" --project "$GCP_PROJECT" >/dev/null 2>&1; then
+  if ! gcloud iam service-accounts describe "$(sa_email "$id")" --project "$GCP_PROJECT" >/dev/null 2>&1; then
     gcloud iam service-accounts create "$id" --project "$GCP_PROJECT" \
       --display-name "$id" --description "$description"
   fi
-  retry_iam gcloud dns managed-zones add-iam-policy-binding "$ZONE" --project "$GCP_PROJECT" \
-    --member "serviceAccount:${email}" --role roles/dns.admin
 }
 
-DEPLOYER="watchtower-deployer@${GCP_PROJECT}.iam.gserviceaccount.com"
+zone_admin() {
+  retry_iam gcloud dns managed-zones add-iam-policy-binding "$ZONE" --project "$GCP_PROJECT" \
+    --member "serviceAccount:$(sa_email "$1")" --role roles/dns.admin
+}
+
+DEPLOYER="$(sa_email watchtower-deployer)"
 ensure_sa watchtower-deployer "The deploy workflow: reads the stack's secrets and writes the records in ${DOMAIN}; key in the GCP_DEPLOYER_KEY Gitea secret"
-ensure_sa watchtower-caddy-dns01 "Caddy in the edge pod answers ACME DNS-01 for ${DOMAIN}; key in the caddy-dns-key secret"
+zone_admin watchtower-deployer
+ensure_sa watchtower-caddy-dns01 "Caddy on the proxy answers ACME DNS-01 for ${DOMAIN}; key in the caddy-dns-key secret"
+zone_admin watchtower-caddy-dns01
 # googleclouddns finds its zone by LISTING the project's zones, a
 # project-level permission no zone binding confers (gitea pkg/dns/dns.go).
 # dns.reader is read-only; every write stays scoped to the zone.
@@ -191,13 +207,51 @@ retry_iam gcloud projects add-iam-policy-binding "$GCP_PROJECT" \
   --role roles/dns.reader --condition None
 
 # ---------------------------------------------------------------------------
-log "5/5 Secret Manager: every secret, readable by watchtower-deployer"
+log "5/6 Artifact Registry ${GAR_LOCATION}-docker.pkg.dev/${GCP_PROJECT}/${GAR_REPO}"
+# ---------------------------------------------------------------------------
+if ! gcloud artifacts repositories describe "$GAR_REPO" --location "$GAR_LOCATION" --project "$GCP_PROJECT" >/dev/null 2>&1; then
+  # Tags are commit SHAs and the deploy reuses an existing one, so a tag must
+  # never move.
+  gcloud artifacts repositories create "$GAR_REPO" --project "$GCP_PROJECT" \
+    --location "$GAR_LOCATION" --repository-format docker --immutable-tags \
+    --labels app=watchtower \
+    --description "watchtower's own images (caddy, patroni). Created by scripts/bootstrap.sh."
+fi
+# Storage is billed: keep each image's 10 newest versions, delete the rest
+# once they are a week old.
+cleanup="$(mktemp)"
+trap 'rm -f "$cleanup"' EXIT
+cat >"$cleanup" <<'JSON'
+[
+  {"name": "keep-newest", "action": {"type": "Keep"}, "mostRecentVersions": {"keepCount": 10}},
+  {"name": "delete-old", "action": {"type": "Delete"}, "condition": {"tagState": "any", "olderThan": "7d"}}
+]
+JSON
+gcloud artifacts repositories set-cleanup-policies "$GAR_REPO" --project "$GCP_PROJECT" \
+  --location "$GAR_LOCATION" --policy "$cleanup" --no-dry-run >/dev/null
+
+repo_role() {
+  retry_iam gcloud artifacts repositories add-iam-policy-binding "$GAR_REPO" --project "$GCP_PROJECT" \
+    --location "$GAR_LOCATION" --member "serviceAccount:$(sa_email "$1")" --role "$2"
+}
+ensure_sa watchtower-image-pusher "CI pushes the caddy and patroni images to ${GAR_REPO}; key in gar-push-key, copied to the GAR_PUSH_KEY Gitea secret"
+repo_role watchtower-image-pusher roles/artifactregistry.writer
+ensure_sa watchtower-image-puller "The hosts pull watchtower's images from ${GAR_REPO}; key in gar-pull-key"
+repo_role watchtower-image-puller roles/artifactregistry.reader
+
+# ---------------------------------------------------------------------------
+log "6/6 Secret Manager: every secret, readable by watchtower-deployer"
 # ---------------------------------------------------------------------------
 mapfile -t secret_ids < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "${repo_root}/scripts/secret-names.txt")
 "${repo_root}/scripts/secret.sh" ensure "${secret_ids[@]}"
+granted=0
 for id in "${secret_ids[@]}"; do
+  # The image job gets the push key as its own Actions secret; a leaked
+  # deployer key must not be able to push images too.
+  [[ "$id" == gar-push-key ]] && continue
   retry_iam gcloud secrets add-iam-policy-binding "$id" --project "$GCP_PROJECT" \
     --member "serviceAccount:${DEPLOYER}" --role roles/secretmanager.secretAccessor
+  granted=$((granted + 1))
 done
 
 cat <<EOF
@@ -205,11 +259,14 @@ cat <<EOF
 Done.
   State bucket : s3://${STATE_BUCKET} (admin key only)
   DNS          : zone ${ZONE} (${DOMAIN}.), delegated from ${PARENT_ZONE} in ${PARENT_PROJECT}
-  Secrets      : ${#secret_ids[@]} in ${GCP_PROJECT}, each readable by ${DEPLOYER}
+  Registry     : ${GAR_LOCATION}-docker.pkg.dev/${GCP_PROJECT}/${GAR_REPO}
+  Secrets      : ${#secret_ids[@]} in ${GCP_PROJECT}, ${granted} readable by ${DEPLOYER}
 
 Next (docs/runbook.md, "First deploy"):
   1. dig +short NS ${DOMAIN}
   2. scripts/rotate-gcp-key.sh deployer    # Gitea secret GCP_DEPLOYER_KEY
      scripts/rotate-gcp-key.sh caddy       # secret caddy-dns-key
+     scripts/rotate-gcp-key.sh pusher      # secret gar-push-key + Gitea GAR_PUSH_KEY
+     scripts/rotate-gcp-key.sh puller      # secret gar-pull-key
   3. scripts/secret.sh check               # every secret has a value
 EOF
