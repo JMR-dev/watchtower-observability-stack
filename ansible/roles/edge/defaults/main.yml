@@ -1,5 +1,9 @@
 ---
 # wg-easy's API, on the loopback port it listens on.
 edge_wg_easy_api: http://127.0.0.1:{{ watchtower_ports.wg_easy_ui }}/api
-# The client the deploy creates for the owner (tasks/owner-peer.yml).
-edge_owner_peer_name: owner
+# The wg-easy clients the deploy creates (tasks/peer.yml), each published to
+# its own Secret Manager secret: the owner's first VPN peer, and the deploy's
+# own way to the proxy over the VPN.
+edge_peers:
+  - {name: owner, secret: wireguard-owner-peer}
+  - {name: deploy, secret: wireguard-deploy-peer}

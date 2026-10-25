@@ -41,6 +41,15 @@ const (
 // ProxyName is the front box: Caddy and the WireGuard endpoint.
 const ProxyName = "watchtower-proxy"
 
+// The break-glass bastion, made by scripts/bootstrap.sh, not Pulumi: a GCE
+// VM reached only through IAP, whose Cloud NAT address (breakGlassCidrs) the
+// proxy admits for SSH. The way in when the VPN is down, and the deploy's
+// when the proxy is rebuilt.
+const (
+	BastionName = "watchtower-bastion"
+	BastionZone = "us-east1-b"
+)
+
 // NodeName is data node i (1-based).
 func NodeName(i int) string {
 	return fmt.Sprintf("watchtower-%d", i)
@@ -119,11 +128,20 @@ const (
 	// the owner fetches it with `scripts/secret.sh pull`. The deployer may
 	// add versions but never read one.
 	SecretWireGuardOwnerPeer = "wireguard-owner-peer"
+	// SecretWireGuardDeployPeer is the deploy's own WireGuard peer config,
+	// which the deploy creates in wg-easy like the owner's, and reads back:
+	// its way to the proxy over the VPN.
+	SecretWireGuardDeployPeer = "wireguard-deploy-peer"
 )
 
-// DeployWrittenSecrets are written by the deploy, never read by it:
+// DeployWrittenSecrets are written by the deploy, and read by it only if
+// also in DeployReadBackSecrets:
 // scripts/bootstrap.sh grants the deployer secretVersionAdder on each.
-var DeployWrittenSecrets = []string{SecretWireGuardOwnerPeer}
+var DeployWrittenSecrets = []string{SecretWireGuardOwnerPeer, SecretWireGuardDeployPeer}
+
+// DeployReadBackSecrets are deploy-written secrets the deploy also reads:
+// scripts/bootstrap.sh grants the deployer secretAccessor on each, too.
+var DeployReadBackSecrets = []string{SecretWireGuardDeployPeer}
 
 // OwnerOnlySecrets are never read by the deploy, so never granted to the
 // deployer (scripts/bootstrap.sh grants what deploy.yml reads).
@@ -144,7 +162,7 @@ func Secrets() []string {
 		SecretWGEasyPassword, SecretCaddyDNSKey, SecretHealthchecksPGBackupURL, SecretHealthchecksHostURLs,
 		SecretHealthchecksDeployURL,
 		SecretGARPushKey, SecretHealthchecksAPIKey,
-		SecretWireGuardOwnerPeer,
+		SecretWireGuardOwnerPeer, SecretWireGuardDeployPeer,
 	}
 	for _, k := range append([]string{KeyAdmin}, Keys...) {
 		out = append(out, S3AccessKeySecret(k), S3SecretKeySecret(k))

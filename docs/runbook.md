@@ -73,7 +73,7 @@ gopass.
    verifies it end to end.
 8. **Your VPN peer.** The deploy created the wg-easy client `owner` and
    added its config to the secret `wireguard-owner-peer`
-   (`ansible/roles/edge/tasks/owner-peer.yml`). Fetch it and import it:
+   (`ansible/roles/edge/tasks/peer.yml`). Fetch it and import it:
    ```bash
    scripts/secret.sh pull wireguard-owner-peer
    gopass show -n watchtower/wireguard-owner-peer >watchtower.conf
@@ -90,31 +90,62 @@ gopass.
 
 ## Host access
 
-SSH is only for WireGuard peers, and the deploy:
+SSH is only for WireGuard peers, the deploy, and break glass:
 
 | From | To | Path |
 |---|---|---|
 | A VPN peer (you) | the proxy | `10.8.0.1`, over the tunnel |
-| A VPN peer | a node | through the proxy, to the node's private address |
 | The deploy runners (`ciCidrs`) | the proxy | its public address |
-| The deploy runners | a node | through the proxy, to the node's private address |
+| The break-glass bastion (`breakGlassCidrs`) | the proxy | its public address, the bastion reached through IAP |
+| Any of those | a node | through the proxy, to the node's private address |
 
 The nodes take nothing on their public addresses, and only the proxy's
 private address may reach their SSH.
+
+`scripts/ssh-config.sh public|vpn|bastion` writes
+`ansible/inventory/ssh_config`, which picks the way to the proxy and jumps
+from it to the nodes, with the pinned host keys. Ansible (`ansible.cfg`),
+`scripts/verify.sh` and you all go through it, by inventory name:
 
 ```bash
 source scripts/env.sh       # the key, as ANSIBLE_PRIVATE_KEY_FILE and in ssh-agent
 (cd infra/cloud && pulumi stack output inventory >../../ansible/inventory/hosts.yml \
   && pulumi stack output knownHosts >../../ansible/inventory/known_hosts)
-(cd ansible && ansible all -m ping -e watchtower_ssh_via=vpn)
-ssh root@10.8.0.1                       # the proxy
-ssh -J root@10.8.0.1 root@10.20.1.11    # watchtower-1 (10.20.1.1<n>)
-WATCHTOWER_SSH_VIA=vpn scripts/verify.sh <archive-bucket>
+scripts/ssh-config.sh vpn                          # from a WireGuard peer
+(cd ansible && ansible all -m ping)
+ssh -F ansible/inventory/ssh_config watchtower-proxy
+ssh -F ansible/inventory/ssh_config watchtower-2
+scripts/verify.sh <archive-bucket>
 ```
 
-For plain `ssh`, add the pinned host keys to your own known_hosts once:
-`cat ansible/inventory/known_hosts >>~/.ssh/known_hosts`. They are listed
-under the tunnel and private addresses too.
+### Break glass: the bastion
+
+When the VPN is down, use the bastion:
+
+```bash
+scripts/ssh-config.sh bastion        # IAP + OS Login as your gcloud account, a key valid for 4 hours
+ssh -F ansible/inventory/ssh_config watchtower-proxy
+```
+
+- **What it is:** `watchtower-bastion`, an e2-micro in us-east1-b, the free
+  tier.
+  - It has no external address and no service account.
+  - Its SSH is open only to IAP (35.235.240.0/20), with OS Login.
+  - Its traffic leaves through Cloud NAT from the one address in
+    `breakGlassCidrs`, the only public SSH source the proxy admits besides
+    the deploy runners.
+  - It installs security updates daily and reboots at 04:00 UTC when one
+    needs it.
+- **Who may use it:** you (project owner), and `watchtower-deployer`, which
+  has OS Login on that VM and an IAP tunnel to its port 22, nothing more.
+  The deploy uses it when the proxy is rebuilt.
+- **Rebuilding it:**
+  - `scripts/bootstrap.sh` (step 7) makes the bastion, and writes its NAT
+    address and SSH host key into `infra/cloud/Pulumi.prod.yaml`
+    (`breakGlassCidrs`, `bastionHostKey`).
+  - To replace it: `gcloud compute instances delete watchtower-bastion
+    --zone us-east1-b`, rerun bootstrap, commit `Pulumi.prod.yaml`, and
+    deploy. The NAT address is reserved and stays; the host key changes.
 
 Every service is a quadlet: `/etc/containers/systemd/<name>.container`
 generates `<name>.service`.

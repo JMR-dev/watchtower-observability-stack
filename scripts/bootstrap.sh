@@ -31,10 +31,28 @@
 #      secret, never secretAccessor on the project. Owner-only secrets such
 #      as gar-push-key are never read by the deploy, so never granted.
 #      Values go in with scripts/secret.sh. The secrets the deploy writes
-#      (deploy_written; wireguard-owner-peer, the owner's first VPN peer) it
-#      may add versions to and never read: secretVersionAdder alone.
+#      (deploy_written: wireguard-owner-peer, the owner's first VPN peer, and
+#      wireguard-deploy-peer, its own) it may add versions to:
+#      secretVersionAdder. Of those it reads back only its own peer
+#      (deploy_read_back), never the owner's.
+#   7. Creates the break-glass bastion watchtower-bastion: an e2-micro in
+#      us-east1 (the free tier) on a network of its own, with no external
+#      address and no service account, reachable only through IAP TCP
+#      forwarding (SSH from 35.235.240.0/20, nothing else) and OS Login.
+#      Its traffic leaves through Cloud NAT on one reserved address, which
+#      the proxy's firewalls admit for SSH (breakGlassCidrs): the way in when
+#      the VPN is down, and the deploy's when the proxy is rebuilt
+#      (ssh_via=bastion). watchtower-deployer may log in to that one VM and
+#      tunnel to its port 22, nothing more. Not Pulumi: the deploy must not
+#      hold compute admin, and break glass must not depend on the deploy.
+#      Writes the NAT address and the bastion's SSH host key into
+#      infra/cloud/Pulumi.prod.yaml (breakGlassCidrs, bastionHostKey), never
+#      to the terminal; commit the change and deploy.
 #
 # Keys are made by scripts/rotate-gcp-key.sh.
+#
+# Costs: the bastion is free-tier; Cloud NAT and its address about $4-5 a
+# month.
 #
 # Needs: gcloud (as the owner of both GCP projects), hcloud, aws, jq, and the
 # environment scripts/env.sh exports (HCLOUD_TOKEN, AWS_ACCESS_KEY_ID /
@@ -58,6 +76,14 @@ S3_ENDPOINT="https://fsn1.your-objectstorage.com"
 S3_REGION="fsn1"
 GAR_LOCATION="${GAR_LOCATION:-europe-west3}"
 GAR_REPO="${GAR_REPO:-watchtower}"
+# The bastion. The free tier's e2-micro exists only in us-west1, us-central1
+# and us-east1. Its address is fixed: the deployer's IAP grant names it.
+BASTION="watchtower-bastion"
+BASTION_REGION="us-east1"
+BASTION_ZONE="us-east1-b"
+BASTION_RANGE="10.90.0.0/28"
+BASTION_IP="10.90.0.2"
+IAP_RANGE="35.235.240.0/20"
 
 PREFIX="$(sed -n 's/^  watchtower:bucketPrefix: //p' "$stack_file")"
 PROJECT_ID="$(sed -n 's/^  watchtower:hetznerProjectId: "\{0,1\}\([0-9]*\)"\{0,1\}$/\1/p' "$stack_file")"
@@ -77,7 +103,7 @@ done
 s3() { aws --endpoint-url "$S3_ENDPOINT" --region "$S3_REGION" "$@"; }
 
 # ---------------------------------------------------------------------------
-log "1/6 Hetzner leftovers (read-only)"
+log "1/7 Hetzner leftovers (read-only)"
 # ---------------------------------------------------------------------------
 for kind in server volume primary-ip floating-ip firewall ssh-key network placement-group; do
   printf -- '--- %s\n' "$kind"
@@ -98,7 +124,7 @@ for suffix in loki mimir-blocks mimir-ruler mimir-alertmanager tempo logs-archiv
 done
 
 # ---------------------------------------------------------------------------
-log "2/6 Pulumi state bucket s3://${STATE_BUCKET}"
+log "2/7 Pulumi state bucket s3://${STATE_BUCKET}"
 # ---------------------------------------------------------------------------
 if ! s3 s3api head-bucket --bucket "$STATE_BUCKET" >/dev/null 2>&1; then
   s3 s3api create-bucket --bucket "$STATE_BUCKET" >/dev/null
@@ -118,7 +144,7 @@ policy="$(jq -n --arg b "$STATE_BUCKET" --arg p "arn:aws:iam:::user/p${PROJECT_I
 s3 s3api put-bucket-policy --bucket "$STATE_BUCKET" --policy "$policy"
 
 # ---------------------------------------------------------------------------
-log "3/6 Cloud DNS zone ${ZONE} (${DOMAIN}.), delegated from ${PARENT_ZONE}"
+log "3/7 Cloud DNS zone ${ZONE} (${DOMAIN}.), delegated from ${PARENT_ZONE}"
 # ---------------------------------------------------------------------------
 gcloud services enable dns.googleapis.com iam.googleapis.com secretmanager.googleapis.com \
   artifactregistry.googleapis.com --project "$GCP_PROJECT"
@@ -166,7 +192,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-log "4/6 Service accounts, scoped to zone ${ZONE}"
+log "4/7 Service accounts, scoped to zone ${ZONE}"
 # ---------------------------------------------------------------------------
 # IAM is eventually consistent and policy writes are read-modify-write;
 # retry the errors that come from that, fail on anything else.
@@ -230,7 +256,7 @@ retry_iam gcloud projects add-iam-policy-binding "$GCP_PROJECT" \
   --role roles/dns.reader --condition None
 
 # ---------------------------------------------------------------------------
-log "5/6 Artifact Registry ${GAR_LOCATION}-docker.pkg.dev/${GCP_PROJECT}/${GAR_REPO}"
+log "5/7 Artifact Registry ${GAR_LOCATION}-docker.pkg.dev/${GCP_PROJECT}/${GAR_REPO}"
 # ---------------------------------------------------------------------------
 if ! gcloud artifacts repositories describe "$GAR_REPO" --location "$GAR_LOCATION" --project "$GCP_PROJECT" >/dev/null 2>&1; then
   # Tags are commit SHAs and the deploy reuses an existing one, so a tag must
@@ -263,7 +289,7 @@ ensure_sa watchtower-image-puller "The hosts pull watchtower's images from ${GAR
 repo_role watchtower-image-puller roles/artifactregistry.reader
 
 # ---------------------------------------------------------------------------
-log "6/6 Secret Manager: every secret the deploy reads, readable by watchtower-deployer"
+log "6/7 Secret Manager: every secret the deploy reads, readable by watchtower-deployer"
 # ---------------------------------------------------------------------------
 mapfile -t secret_ids < <("${repo_root}/scripts/secret.sh" deploy-ids)
 [[ "${#secret_ids[@]}" -gt 0 ]] || die "deploy.yml reads no secrets; is the setup action's secrets: block intact?"
@@ -281,13 +307,106 @@ done
 
 # Written by the deploy, read only by the owner (`secret.sh pull`). A Go test
 # keeps this list equal to names.DeployWrittenSecrets.
-deploy_written=(wireguard-owner-peer)
+deploy_written=(wireguard-owner-peer wireguard-deploy-peer)
 "${repo_root}/scripts/secret.sh" ensure "${deploy_written[@]}"
 for id in "${deploy_written[@]}"; do
   gcloud secrets update "$id" --project "$GCP_PROJECT" --update-labels writer=deploy >/dev/null
   retry_iam gcloud secrets add-iam-policy-binding "$id" --project "$GCP_PROJECT" \
     --member "serviceAccount:${DEPLOYER}" --role roles/secretmanager.secretVersionAdder
 done
+# Of those, the deploy reads back its own VPN peer: its way in. A Go test
+# keeps this list equal to names.DeployReadBackSecrets.
+deploy_read_back=(wireguard-deploy-peer)
+for id in "${deploy_read_back[@]}"; do
+  retry_iam gcloud secrets add-iam-policy-binding "$id" --project "$GCP_PROJECT" \
+    --member "serviceAccount:${DEPLOYER}" --role roles/secretmanager.secretAccessor
+done
+
+# ---------------------------------------------------------------------------
+log "7/7 Break-glass bastion ${BASTION} (${BASTION_ZONE}), through IAP only"
+# ---------------------------------------------------------------------------
+gcloud services enable compute.googleapis.com iap.googleapis.com oslogin.googleapis.com \
+  --project "$GCP_PROJECT" --quiet
+compute() { gcloud compute "$@" --project "$GCP_PROJECT"; }
+exists() { compute "$@" >/dev/null 2>&1; } # a describe that succeeds
+
+# A network of its own; a custom VPC denies all ingress until a rule allows it.
+exists networks describe "$BASTION" || compute networks create "$BASTION" --subnet-mode custom
+exists networks subnets describe "$BASTION" --region "$BASTION_REGION" ||
+  compute networks subnets create "$BASTION" --network "$BASTION" --region "$BASTION_REGION" --range "$BASTION_RANGE"
+exists firewall-rules describe "${BASTION}-iap-ssh" ||
+  compute firewall-rules create "${BASTION}-iap-ssh" --network "$BASTION" --direction INGRESS \
+    --allow tcp:22 --source-ranges "$IAP_RANGE" --target-tags "$BASTION" \
+    --description "SSH from IAP TCP forwarding, and from nowhere else"
+
+# Out through one reserved address: the one the proxy admits.
+exists addresses describe "${BASTION}-nat" --region "$BASTION_REGION" ||
+  compute addresses create "${BASTION}-nat" --region "$BASTION_REGION" \
+    --description "Cloud NAT for ${BASTION}; the proxy admits SSH from it (breakGlassCidrs)"
+exists routers describe "$BASTION" --region "$BASTION_REGION" ||
+  compute routers create "$BASTION" --network "$BASTION" --region "$BASTION_REGION"
+exists routers nats describe "$BASTION" --router "$BASTION" --region "$BASTION_REGION" ||
+  compute routers nats create "$BASTION" --router "$BASTION" --region "$BASTION_REGION" \
+    --nat-external-ip-pool "${BASTION}-nat" --nat-all-subnet-ip-ranges
+
+# Security updates every day, rebooting at 04:00 UTC when one needs it.
+startup="$(mktemp)"
+cat >"$startup" <<'STARTUP'
+#!/bin/bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+dpkg -s unattended-upgrades >/dev/null 2>&1 || { apt-get update -q && apt-get install -yq unattended-upgrades; }
+cat >/etc/apt/apt.conf.d/52watchtower-bastion <<'CONF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "04:00";
+CONF
+STARTUP
+if ! exists instances describe "$BASTION" --zone "$BASTION_ZONE"; then
+  compute instances create "$BASTION" --zone "$BASTION_ZONE" --machine-type e2-micro \
+    --network-interface "subnet=${BASTION},private-network-ip=${BASTION_IP},no-address" \
+    --image-family debian-13 --image-project debian-cloud \
+    --boot-disk-size 10GB --boot-disk-type pd-standard \
+    --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
+    --no-service-account --no-scopes --tags "$BASTION" \
+    --metadata enable-oslogin=TRUE,block-project-ssh-keys=TRUE,enable-guest-attributes=TRUE \
+    --metadata-from-file startup-script="$startup"
+fi
+rm -f "$startup"
+
+# The deployer: OS Login on this VM (which includes looking it up), and an
+# IAP tunnel to its port 22 only.
+retry_iam compute instances add-iam-policy-binding "$BASTION" --zone "$BASTION_ZONE" \
+  --member "serviceAccount:${DEPLOYER}" --role roles/compute.osLogin
+retry_iam gcloud projects add-iam-policy-binding "$GCP_PROJECT" \
+  --member "serviceAccount:${DEPLOYER}" --role roles/iap.tunnelResourceAccessor \
+  --condition "expression=destination.ip == \"${BASTION_IP}\" && destination.port == 22,title=${BASTION}-ssh,description=IAP to the bastion's SSH and nothing else"
+
+nat_ip="$(compute addresses describe "${BASTION}-nat" --region "$BASTION_REGION" --format 'value(address)')"
+# The guest agent publishes the host keys once the VM has booted.
+host_key=""
+for _ in $(seq 1 36); do
+  host_key="$(compute instances get-guest-attributes "$BASTION" --zone "$BASTION_ZONE" \
+    --query-path hostkeys/ssh-ed25519 --format 'value(value)' 2>/dev/null || true)"
+  [[ -n "$host_key" ]] && break
+  sleep 5
+done
+[[ -n "$host_key" ]] || die "${BASTION} published no ed25519 host key; re-run once it has booted"
+# Into the stack file, in place of any earlier values, never to the terminal.
+stack_tmp="$(mktemp)"
+awk -v cidr="${nat_ip}/32" -v key="ssh-ed25519 ${host_key}" '
+  function add() { print "  watchtower:breakGlassCidrs:"; print "    - " cidr; print "  watchtower:bastionHostKey: " key; done = 1 }
+  /^  watchtower:bastionHostKey:/ { next }
+  /^  watchtower:breakGlassCidrs:/ { skip = 1; next }
+  skip && /^    - / { next }
+  { skip = 0 }
+  /^encryptionsalt:/ && !done { add() }
+  { print }
+  END { if (!done) add() }' "$stack_file" >"$stack_tmp"
+cat "$stack_tmp" >"$stack_file"
+rm -f "$stack_tmp"
+unset host_key
 
 cat <<EOF
 
@@ -296,7 +415,10 @@ Done.
   DNS          : zone ${ZONE} (${DOMAIN}.), delegated from ${PARENT_ZONE} in ${PARENT_PROJECT}
   Registry     : ${GAR_LOCATION}-docker.pkg.dev/${GCP_PROJECT}/${GAR_REPO}
   Secrets      : the ${#secret_ids[@]} the deploy reads, in ${GCP_PROJECT}; ${granted} readable by ${DEPLOYER},
-                 which may only add to ${deploy_written[*]}
+                 which may add to ${deploy_written[*]} and read back ${deploy_read_back[*]}
+  Bastion      : ${BASTION} (${BASTION_ZONE}), SSH through IAP only; its traffic leaves from ${nat_ip}.
+                 Its address and host key are in infra/cloud/Pulumi.prod.yaml
+                 (breakGlassCidrs, bastionHostKey): commit any change and deploy.
 
 Next (docs/runbook.md, "First deploy"):
   1. dig +short NS ${DOMAIN}

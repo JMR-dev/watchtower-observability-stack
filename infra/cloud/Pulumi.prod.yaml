@@ -32,4 +32,7 @@ config:
   # Holds the DNS zone, the image registry and the secrets.
   watchtower:gcpProject: watchtower-observe
   watchtower:dnsZone: watchtower
+  watchtower:breakGlassCidrs:
+    - 35.231.222.153/32
+  watchtower:bastionHostKey: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBLzAO2Cd9Hh8+qvEcwO9SpmiiqgHhj9oe/cAsc/ShNA
 encryptionsalt: v1:IURg/P90chM=:v1:KOUOy+cy4hDhux6J:ck7o2LiYSp9jmmkQMqH/M1ZPJY/oAw==
