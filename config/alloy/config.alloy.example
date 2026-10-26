@@ -8,8 +8,8 @@
 // overwrites X-Scope-OrgID for them, so the headers below only say so.
 // Everything is TLS with a public certificate, so no `insecure` settings.
 //
-// Replace SERVICE, HOST and ENV (production or disposable). The OTLP section
-// is for hosts whose apps send OTLP to it; delete it otherwise.
+// Replace SERVICE, HOST and ENV (production or disposable). No OTLP receiver
+// in v1: nothing of ours emits traces yet (docs/client-telemetry.md).
 //
 // Nothing on the server scrubs: loki.process "scrub" is all that stands
 // between these logs and storage. stage.replace rewrites each capture group
@@ -80,52 +80,89 @@ loki.process "scrub" {
 		drop_counter_reason = "audit_record"
 	}
 
-	// JWTs.
+	// JWTs, and bearer tokens wherever they appear.
 	stage.replace {
 		expression = `\b(eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*)`
 		replace    = "[REDACTED-JWT]"
 	}
 
-	// Authorization headers, plain or as JSON arrays: the credential.
 	stage.replace {
-		expression = `(?i)\b(?:proxy-)?authorization"?\s*[:=]\s*\[?\s*"?(?:(?:bearer|basic|token|digest|negotiate)\s+)?([^\s",\]]+)`
+		expression = `(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{8,})`
 		replace    = "[REDACTED-CREDENTIAL]"
 	}
 
-	// Cookie and Set-Cookie headers: the whole value.
+	// Authorization and cookie headers, whole: as a JSON field (a string, an
+	// array or an object), then as `Name: value`, to the end of the line.
 	stage.replace {
-		expression = `(?i)\b(?:set-)?cookie"?\s*[:=]\s*\[?\s*"?([^"\]\r\n]+)`
+		expression = `(?i)"(?:proxy-)?authorization"\s*:\s*(\[[^\]]*\]|"[^"]*")`
+		replace    = "[REDACTED-CREDENTIAL]"
+	}
+
+	stage.replace {
+		expression = `(?i)"(?:set-)?cookies?"\s*:\s*(\[[^\]]*\]|\{[^}]*\}|"[^"]*")`
 		replace    = "[REDACTED-COOKIE]"
 	}
 
-	// Secrets as JSON fields.
 	stage.replace {
-		expression = `(?i)"(?:password|passwd|pass|secret|client_secret|token|access_token|refresh_token|id_token|api_?key|private_key)"\s*:\s*"([^"]*)"`
+		expression = `(?i)\b(?:proxy-)?authorization\s*[:=]\s*([^\r\n]+)`
+		replace    = "[REDACTED-CREDENTIAL]"
+	}
+
+	stage.replace {
+		expression = `(?i)\b(?:set-)?cookie\s*[:=]\s*([^\r\n]+)`
+		replace    = "[REDACTED-COOKIE]"
+	}
+
+	// Secrets under any key that names one (DB_PASSWORD, X-API-Key,
+	// "session", privateKey, ...): as JSON with a double- or single-quoted
+	// value, then as key=value or key: value, quoted or bare.
+	stage.replace {
+		expression = `(?i)"[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|session|credential)[\w.-]*"\s*:\s*"([^"]*)"`
 		replace    = "[REDACTED-SECRET]"
 	}
 
-	// Secrets as key=value or key: value.
 	stage.replace {
-		expression = `(?i)\b(?:password|passwd|pwd|secret|client_secret|api_?key|access_token|refresh_token)\s*[=:]\s*([^\s&,;"'\[\]]+)`
+		expression = `(?i)"[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|session|credential)[\w.-]*"\s*:\s*'([^']*)'`
 		replace    = "[REDACTED-SECRET]"
 	}
 
-	// Credentials in query strings.
 	stage.replace {
-		expression = `(?i)[?&](?:access_token|refresh_token|id_token|token|code|state|key|sig|signature|x-amz-signature|x-goog-signature|password)=([^&\s"#]+)`
+		expression = `(?i)[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|session|credential)[\w.-]*\s*[=:]\s*"([^"]*)"`
 		replace    = "[REDACTED-SECRET]"
 	}
 
-	// Email addresses.
 	stage.replace {
-		expression = `\b([A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})\b`
+		expression = `(?i)[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|session|credential)[\w.-]*\s*[=:]\s*'([^']*)'`
+		replace    = "[REDACTED-SECRET]"
+	}
+
+	stage.replace {
+		expression = `(?i)[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|session|credential)[\w.-]*\s*[=:]\s*([^\s&,;"'\[\]{}()<>]+)`
+		replace    = "[REDACTED-SECRET]"
+	}
+
+	// Other credentials in query strings.
+	stage.replace {
+		expression = `(?i)[?&](?:code|state|key|sig|signature|x-amz-signature|x-amz-credential|x-goog-signature|x-goog-credential)=([^&\s"#]+)`
+		replace    = "[REDACTED-SECRET]"
+	}
+
+	// Passwords in connection strings: scheme://user:PASSWORD@host.
+	stage.replace {
+		expression = `(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]*:([^@\s/]+)@`
+		replace    = "[REDACTED-SECRET]"
+	}
+
+	// Email addresses, URL-encoded (%40) too.
+	stage.replace {
+		expression = `\b([A-Za-z0-9._%+-]+(?:@|%40)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})\b`
 		replace    = "[REDACTED-EMAIL]"
 	}
 
-	// OS Login usernames, which are email addresses (user_example_com) or a
-	// service account's number (sa_<id>).
+	// OS Login usernames: an email address in a domain in use
+	// (user_gmail_com), or a service account's number (sa_<id>).
 	stage.replace {
-		expression = `\b([a-z0-9][a-z0-9._-]*_[a-z0-9-]+_(?:com|net|org|dev|io|co|edu|gov|me|us|uk|de))\b`
+		expression = `\b([a-z0-9][a-z0-9._-]*_(?:gmail_com|googlemail_com|jasonmross_dev))\b`
 		replace    = "[REDACTED-USER]"
 	}
 
@@ -134,23 +171,37 @@ loki.process "scrub" {
 		replace    = "[REDACTED-USER]"
 	}
 
-	// IPv4 addresses, whole.
+	// IPv4 addresses, whole. A four-part version number goes too.
 	stage.replace {
 		expression = `\b((?:\d{1,3}\.){3}\d{1,3})\b`
 		replace    = "[REDACTED-IP]"
 	}
 
-	// IPv6 addresses: eight groups, or compressed with "::". Never a clock
-	// time or a Rust path (crate::module), which have neither.
+	// IPv6 addresses: eight groups, or compressed with "::" and a group after
+	// it or two before it, so never a clock time or a Rust path (db::query).
+	// Then the same after a colon (client:2001:db8::1), with three groups or
+	// more.
 	stage.replace {
-		expression = `(?:^|[^\w:.])((?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?)`
+		expression = `(?:^|[^\w:.])((?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?::[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6}|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){1,6}::)`
 		replace    = "[REDACTED-IP6]"
 	}
 
-	// Card numbers: 13 to 19 digits starting 2 to 6, so never an epoch time
-	// in ms or ns, which start with 1 until 2033.
 	stage.replace {
-		expression = `\b([2-6](?:[ -]?\d){12,18})\b`
+		expression = `:((?:[0-9A-Fa-f]{1,4}:){2,6}:(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,5})?|(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){1,5})`
+		replace    = "[REDACTED-IP6]"
+	}
+
+	// MAC addresses.
+	stage.replace {
+		expression = `\b((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})\b`
+		replace    = "[REDACTED-MAC]"
+	}
+
+	// Card numbers: 15 or 16 digits starting 2 to 6, unbroken or in dashed
+	// fours. Never an epoch time (they start with 1 until 2033) or a list of
+	// ports; a number typed with spaces gets through.
+	stage.replace {
+		expression = `\b([2-6]\d{14,15}|[2-6]\d{3}(?:-\d{4}){3})\b`
 		replace    = "[REDACTED-PAN]"
 	}
 
@@ -162,7 +213,7 @@ loki.process "scrub" {
 
 	// A secret in a shape none of the rules caught: drop the line.
 	stage.drop {
-		expression          = `(?i)\b(?:password|passwd|ssn|cvv|cvc)\s*[:=]\s*[^\s\["]`
+		expression          = `(?i)[\w.-]*(?:password|passwd|secret|ssn|cvv|cvc)[\w.-]*\s*[:=]\s*[^\s\["']`
 		drop_counter_reason = "secret"
 	}
 }
@@ -221,102 +272,4 @@ prometheus.remote_write "watchtower" {
 		headers = {"X-Scope-OrgID" = "jasonmross"}
 	}
 	external_labels = {service = "SERVICE", host = "HOST", env = "ENV"}
-}
-
-// ============================================================
-// OTLP from local apps  ──► Tempo, Mimir, Loki (optional)
-// ============================================================
-
-// Loopback only: nothing but this host's own apps may send.
-otelcol.receiver.otlp "local" {
-	grpc {
-		endpoint = "127.0.0.1:4317"
-	}
-
-	http {
-		endpoint = "127.0.0.1:4318"
-	}
-
-	output {
-		traces  = [otelcol.processor.memory_limiter.default.input]
-		metrics = [otelcol.processor.memory_limiter.default.input]
-		logs    = [otelcol.processor.memory_limiter.default.input]
-	}
-}
-
-otelcol.processor.memory_limiter "default" {
-	check_interval = "1s"
-	limit          = "150MiB"
-	spike_limit    = "30MiB"
-
-	output {
-		traces  = [otelcol.processor.attributes.scrub.input]
-		metrics = [otelcol.processor.attributes.scrub.input]
-		logs    = [otelcol.processor.attributes.scrub.input]
-	}
-}
-
-otelcol.processor.attributes "scrub" {
-	action {
-		key    = "enduser.id"
-		action = "hash"
-	}
-
-	action {
-		key    = "user.email"
-		action = "delete"
-	}
-
-	action {
-		key    = "client.address"
-		action = "delete"
-	}
-
-	action {
-		key    = "http.request.header.authorization"
-		action = "delete"
-	}
-
-	action {
-		key    = "http.request.header.cookie"
-		action = "delete"
-	}
-
-	action {
-		key    = "http.request.body"
-		action = "delete"
-	}
-
-	output {
-		traces  = [otelcol.processor.batch.default.input]
-		metrics = [otelcol.processor.batch.default.input]
-		logs    = [otelcol.processor.batch.default.input]
-	}
-}
-
-otelcol.processor.batch "default" {
-	output {
-		traces  = [otelcol.exporter.otlp.tempo.input]
-		metrics = [otelcol.exporter.otlphttp.mimir.input]
-		// Logs go through the same scrub as the journal's.
-		logs = [otelcol.exporter.loki.scrub.input]
-	}
-}
-
-otelcol.exporter.otlp "tempo" {
-	client {
-		endpoint = "watchtower.jasonmross.dev:4317"
-		headers  = {"X-Scope-OrgID" = "jasonmross"}
-	}
-}
-
-otelcol.exporter.otlphttp "mimir" {
-	client {
-		endpoint = "https://watchtower.jasonmross.dev:8080/otlp"
-		headers  = {"X-Scope-OrgID" = "jasonmross"}
-	}
-}
-
-otelcol.exporter.loki "scrub" {
-	forward_to = [loki.process.scrub.receiver]
 }

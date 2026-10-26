@@ -86,12 +86,20 @@
       ansible.builtin.set_fact:
         edge_peer_id: "{{ edge_peer_created.json.clientId }}"
 
-# wg-easy's update takes the whole client, so read it, change three fields
-# and send it back without the keys and bookkeeping (it rejects nothing it
-# doesn't know, but the keys have no business in a request). Before the
+# An agent's config runs on someone else's server, as root (wg-quick), so
+# every deploy puts back what watchtower decides: its address, keepalive and
+# MTU; the tunnel range as its only route and the server's only route to it
+# (so it can't take an admin address); no DNS; and no hooks, which wg-quick
+# would run. wg-easy's update takes the whole client, so read it, set those
+# fields and send it back without the keys and bookkeeping. Before the
 # config is fetched, so the published one has them.
-- name: Pin an agent peer's address, keepalive and MTU
+- name: Pin an agent peer's settings
   when: edge_peer.address is defined
+  vars:
+    edge_agent_settings: >-
+      {{ {'ipv4Address': edge_peer.address, 'persistentKeepalive': edge_agent_keepalive | int,
+          'mtu': edge_agent_mtu | int, 'allowedIps': [watchtower_tunnel_cidr], 'serverAllowedIps': [],
+          'dns': [], 'preUp': '', 'postUp': '', 'preDown': '', 'postDown': ''} }}
   block:
     - name: No other peer holds its address
       ansible.builtin.assert:
@@ -116,9 +124,7 @@
         method: POST
         body_format: json
         body: >-
-          {{ edge_agent_client.json
-             | combine({'ipv4Address': edge_peer.address, 'persistentKeepalive': edge_agent_keepalive | int,
-                        'mtu': edge_agent_mtu | int})
+          {{ edge_agent_client.json | combine(edge_agent_settings)
              | dict2items
              | rejectattr('key', 'in', ['id', 'createdAt', 'updatedAt', 'privateKey', 'publicKey', 'preSharedKey',
                                         'userId', 'interfaceId', 'endpoint', 'oneTimeLink'])
@@ -127,11 +133,20 @@
         url_password: "{{ watchtower_secret.wg_easy_password }}"
         force_basic_auth: true
       when: >-
-        edge_agent_client.json.ipv4Address != edge_peer.address
-        or edge_agent_client.json.persistentKeepalive | int != edge_agent_keepalive | int
-        or edge_agent_client.json.mtu | int != edge_agent_mtu | int
+        edge_agent_client.json | dict2items | selectattr('key', 'in', edge_agent_settings.keys()) | items2dict
+        != edge_agent_settings
+      register: edge_agent_update
+      failed_when: false
       changed_when: true
       no_log: true
+
+    # The update's own result is hidden (its request holds the client), so
+    # say here, with nothing from the body, whether wg-easy took it.
+    - name: The update went through
+      ansible.builtin.assert:
+        that: edge_agent_update is skipped or edge_agent_update.status | default(0) == 200
+        fail_msg: "wg-easy refused the update of {{ edge_peer.name }}: HTTP {{ edge_agent_update.status | default('none') }}"
+        quiet: true
 
 - name: The peer's config
   ansible.builtin.uri:
@@ -142,6 +157,22 @@
     return_content: true
   register: edge_peer_config
   no_log: true
+
+# An agent's config goes out only as pinned: nothing wg-quick would run, no
+# DNS, the tunnel as its only route, its address and settings. The checks
+# print nothing from the config.
+- name: An agent's config is safe to publish
+  when: edge_peer.address is defined
+  ansible.builtin.assert:
+    that:
+      - edge_peer_config.content is not regex('(?im)^\s*(PreUp|PostUp|PreDown|PostDown|DNS|Table|FwMark|SaveConfig)\s*=')
+      - edge_peer_config.content | regex_findall('(?m)^\[Peer\]$') | length == 1
+      - edge_peer_config.content is regex('(?m)^AllowedIPs = ' ~ (watchtower_tunnel_cidr | regex_escape) ~ '$')
+      - edge_peer_config.content is regex('(?m)^Address = ' ~ (edge_peer.address | regex_escape) ~ '/32$')
+      - edge_peer_config.content is regex('(?m)^MTU = ' ~ edge_agent_mtu ~ '$')
+      - edge_peer_config.content is regex('(?m)^PersistentKeepalive = ' ~ edge_agent_keepalive ~ '$')
+    fail_msg: wg-easy's config for {{ edge_peer.name }} has hooks, DNS or more routes, or lacks its pinned settings; not publishing it
+    quiet: true
 
 - name: What was last published
   ansible.builtin.slurp:

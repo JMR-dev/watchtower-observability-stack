@@ -51,7 +51,7 @@ Alerts and a fleet dashboard (W4, here) come last, for verified hosts only.
 | State | Alloy's storage path on persistent disk (a named volume, or `StateDirectory=alloy`): the journal position and the remote-write WAL survive restarts |
 | WireGuard | Interface `wg-watchtower`, unit `wg-quick@wg-watchtower`, config `/etc/wireguard/wg-watchtower.conf`, root 0600 |
 | Peer config | From Secret Manager `projects/watchtower-observe/secrets/wireguard-<peer>-peer/versions/latest`, read cross-project by the one identity granted it (below). **Never printed**: no `set -x`, `no_log: true`, and nothing on boot output (the blog's and Gitea's reach Cloud Logging) |
-| Peer checks | Refuse the config unless it has exactly one `[Peer]` with an `Endpoint` and `AllowedIPs` exactly `10.8.0.0/24`. Refuse any `PreUp`, `PostUp`, `PreDown`, `PostDown`, `Table`, `FwMark` or `SaveConfig`. Then drop any `DNS =` line, and set `PersistentKeepalive = 25` and `MTU = 1380` if missing (watchtower sets both). A full tunnel would send the metadata server's traffic to the proxy and break the VM's credentials, image pulls and DNS-01 |
+| Peer checks | watchtower's deploy resets each agent's hooks, DNS and routes on every run and refuses to publish a config that has any; check again on the host, since the config runs there as root. Refuse the config unless it has exactly one `[Peer]` with an `Endpoint` and `AllowedIPs` exactly `10.8.0.0/24`. Refuse any `PreUp`, `PostUp`, `PreDown`, `PostDown`, `Table`, `FwMark` or `SaveConfig`. Then drop any `DNS =` line, and set `PersistentKeepalive = 25` and `MTU = 1380` if missing (watchtower sets both). A full tunnel would send the metadata server's traffic to the proxy and break the VM's credentials, image pulls and DNS-01 |
 | No peer | A missing or empty secret is a warning, never a failed deploy: stop and disable the tunnel and Alloy and remove their config |
 | Labels | Everything: `service`, `host`, `env` (`production`, or `disposable`). Logs also `unit`, `container`, `level`. **Never** a label from an IP, user, email, URL path, UUID or pod name |
 | Metrics | `prometheus.exporter.unix` (`job="integrations/unix"`), `prometheus.exporter.self` (`job="alloy"`), Caddy's metrics (`job="caddy"`), a blackbox probe of the public health URL (`job="blackbox"`); every 60 s |
@@ -73,7 +73,14 @@ Nothing on watchtower scrubs. What a host sends is stored.
   groups, so it redacted nothing; SilverBullet's `roles/logship` copied it
   and is fixed in S1.
 - Copy the example's scrub block whole, then add the service's own rules
-  inside the `// scrub: begin` and `// scrub: end` markers.
+  inside the `// scrub: begin` and `// scrub: end` markers. Secrets are
+  caught by key name (anything containing password, secret, token, api key,
+  private key, session or credential, with any prefix), in JSON, `key=value`
+  and `key: value` forms, quoted or not; Authorization and cookie headers
+  whole; connection-string passwords; emails, also `%40`-encoded; IPv4,
+  IPv6 and MAC addresses; OS Login names; UUIDs; card numbers unbroken or
+  in dashed fours. Not caught: phone numbers, and card numbers typed with
+  spaces (a port list looks the same).
 - Drop conmon's split lines: every piece of a long line but the last has
   `__journal_container_partial_message="true"` (the example's relabel rule).
   In a Caddy pipeline, also `stage.json` with `drop_malformed = true` on
@@ -116,7 +123,9 @@ Nothing on watchtower scrubs. What a host sends is stored.
 ## Agent peers
 
 The deploy creates each in wg-easy and publishes its config; it may add to
-the secrets but never read them. `scripts/bootstrap.sh` (owner-run) creates
+the secrets but never read them. Every run it puts back the agent's
+address, keepalive and MTU, the tunnel as its only route both ways, no DNS
+and no hooks, and it refuses to publish a config without them. `scripts/bootstrap.sh` (owner-run) creates
 the secrets and lets one identity per peer read its own. The list lives in
 `infra/internal/names` (`AgentPeers`); tests keep the inventory and
 `bootstrap.sh` in step with it.

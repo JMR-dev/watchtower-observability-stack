@@ -278,6 +278,19 @@ func TestBootstrapMakesTheBastion(t *testing.T) {
 	}
 }
 
+// scripts/bootstrap.sh makes the reader service account gitea's stacks
+// grant: under another name, their bindings would name an account that
+// doesn't exist.
+func TestBootstrapMakesTheReader(t *testing.T) {
+	b, err := os.ReadFile("../../../scripts/bootstrap.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`(?m)^ensure_sa ` + ReaderSA + ` "`).Match(b) {
+		t.Errorf("bootstrap.sh does not ensure_sa %s", ReaderSA)
+	}
+}
+
 // ci.yml and deploy.yml build every image in build/ and nothing else: an
 // image missing from deploy.yml would never reach the registry, and the
 // hosts job would install a tag that isn't there.

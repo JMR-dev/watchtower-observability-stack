@@ -178,7 +178,9 @@ The tunnel range has two halves:
 - **Agent peers, 10.8.0.128/25:** one per service that ships telemetry here
   (`names.AgentPeers`; docs/client-telemetry.md). The deploy creates each,
   moves it to its fixed address with a keepalive and an MTU of 1380, and
-  adds its config to `wireguard-<peer>-peer`. The firewall lets them reach
+  adds its config to `wireguard-<peer>-peer`. Every deploy also resets an
+  agent's hooks, DNS and routes, so a change made to one in the UI is
+  undone: its config runs as root on someone else's server. The firewall lets them reach
   only Caddy's ingest listeners (3100, 8080, 4317, 4318), and Caddy only the
   write paths, putting everything in the tenant `jasonmross` whatever they
   ask for; anything else is 403.

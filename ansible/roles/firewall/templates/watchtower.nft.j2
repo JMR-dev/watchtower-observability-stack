@@ -71,6 +71,13 @@ table inet watchtower {
         # A host's traffic to its own mesh address arrives on lo too.
         iif "lo" accept
         ct state invalid drop
+{% if 'proxy' in group_names %}
+
+        # Agent peers (services shipping telemetry, docs/client-telemetry.md)
+        # go to a chain of their own, which ends in drop, so no rule here
+        # can admit them to anything else. CI checks it stays right here.
+        ip saddr @vpn_agents jump agent_peers
+{% endif %}
 
         # DHCP replies: both networks lease their IPv4 addresses.
         udp sport 67 udp dport 68 accept
@@ -105,17 +112,8 @@ table inet watchtower {
         ip saddr @wireguard_v4 udp dport {{ watchtower_wireguard_port }} accept
         ip6 saddr @wireguard_v6 udp dport {{ watchtower_wireguard_port }} accept
 
-        # Agent peers (services shipping telemetry, docs/client-telemetry.md)
-        # reach Caddy's ingest listeners and nothing else: no SSH, Grafana,
-        # query API or wg-easy. Ahead of the next rule, which would admit
-        # them to all of it, and in two rules so the log's rate limit never
-        # decides whether a packet is dropped. CI checks the order.
-        iifname "wg0" ip saddr @vpn_agents ip daddr {{ watchtower_tunnel_ip }} tcp dport { {{ agent_listeners | join(', ') }} } accept
-        iifname "wg0" ip saddr @vpn_agents limit rate 5/minute log prefix "nft-agent-drop: " level info
-        iifname "wg0" ip saddr @vpn_agents counter drop
-
-        # Admin peers, through the tunnel, to Caddy and SSH on the tunnel
-        # address and nothing else.
+        # Admin peers (agents never get here), through the tunnel, to Caddy
+        # and SSH on the tunnel address and nothing else.
         iifname "wg0" ip daddr {{ watchtower_tunnel_ip }} tcp dport { {{ (edge_listeners + [22]) | join(', ') }} } accept
 
         # SSH on the public address from the break-glass bastion only; the
@@ -130,6 +128,17 @@ table inet watchtower {
         counter drop
     }
 
+{% if 'proxy' in group_names %}
+    # Agent peers reach Caddy's ingest listeners through the tunnel and
+    # nothing else: no SSH, Grafana, query API or wg-easy. Two rules at the
+    # end, so the log's rate limit never decides whether a packet is dropped.
+    chain agent_peers {
+        iifname "wg0" ip daddr {{ watchtower_tunnel_ip }} tcp dport { {{ agent_listeners | join(', ') }} } accept
+        limit rate 5/minute log prefix "nft-agent-drop: " level info
+        counter drop
+    }
+
+{% endif %}
     chain forward {
         type filter hook forward priority filter; policy drop;
 
