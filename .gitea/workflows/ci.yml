@@ -185,3 +185,12 @@ jobs:
       # Nothing on watchtower scrubs: the client's rules are all there is.
       - name: Its scrub rules hold back the PII in the fixture, and only that
         run: scripts/check-alloy-scrub.sh
+      # The bastion's own config (config/bastion/startup.sh runs it), with
+      # the example's lines in its fixture too: its block holds their rules.
+      - name: The bastion's config is formatted and valid
+        run: |
+          set -euo pipefail
+          diff -u config/alloy/bastion.alloy <(alloy fmt config/alloy/bastion.alloy)
+          alloy validate config/alloy/bastion.alloy
+      - name: The bastion's scrub rules hold back the PII in its fixture, and only that
+        run: scripts/check-alloy-scrub.sh config/alloy/bastion.alloy config/alloy/testdata/bastion.log
