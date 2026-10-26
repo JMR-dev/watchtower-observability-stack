@@ -10,7 +10,8 @@
 #   guard  nftables.conf checked, loaded twice (a reload, as at boot), and
 #          probed on 169.254.169.254 (on lo): root reaches it over HTTP,
 #          other uids are refused at once, and every uid still reaches its
-#          DNS (53) and NTP (123), and everything else.
+#          DNS (53) and NTP (123), and everything else. The same on its IPv6
+#          address, fd20:ce::254, where the container has IPv6.
 #
 #   scripts/check-bastion.sh            # docker; CONTAINER_RUNTIME=podman locally
 #
@@ -33,20 +34,27 @@ trap cleanup EXIT
 cp "${repo_root}/config/bastion/startup.sh" "${repo_root}/config/bastion/nftables.conf" "$work/"
 
 cat >"${work}/probe.py" <<'PY'
-"""serve: answers "ok" on the guard's ports. <addr> <tcp|udp> <port>: prints
-open, refused or timeout."""
+"""serve [v6]: answers "ok" on the guard's ports, and with v6 on its IPv6
+address's too. <addr> <tcp|udp> <port>: prints open, refused or timeout."""
 import socket
 import sys
 import threading
 import time
 
 META = "169.254.169.254"
+META6 = "fd20:ce::254"
 TCP = [(META, 80), (META, 443), (META, 8080), (META, 53), ("127.0.0.1", 8081)]
 UDP = [(META, 53), (META, 123), (META, 9999)]
+TCP6 = [(META6, 80)]
+UDP6 = [(META6, 53)]
+
+
+def family(host):
+    return socket.AF_INET6 if ":" in host else socket.AF_INET
 
 
 def tcp(addr):
-    s = socket.socket()
+    s = socket.socket(family(addr[0]))
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(addr)
     s.listen()
@@ -57,7 +65,7 @@ def tcp(addr):
 
 
 def udp(addr):
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s = socket.socket(family(addr[0]), socket.SOCK_DGRAM)
     s.bind(addr)
     while True:
         _, peer = s.recvfrom(64)
@@ -65,9 +73,10 @@ def udp(addr):
 
 
 if sys.argv[1] == "serve":
-    for a in TCP:
+    v6 = sys.argv[2:] == ["v6"]
+    for a in TCP + (TCP6 if v6 else []):
         threading.Thread(target=tcp, args=(a,), daemon=True).start()
-    for a in UDP:
+    for a in UDP + (UDP6 if v6 else []):
         threading.Thread(target=udp, args=(a,), daemon=True).start()
     time.sleep(0.5)
     open("/tmp/ready", "w").close()
@@ -79,7 +88,7 @@ try:
     if proto == "tcp":
         s = socket.create_connection((addr, port), timeout=3)
     else:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s = socket.socket(family(addr), socket.SOCK_DGRAM)
         s.settimeout(3)
         s.connect((addr, port))
         s.send(b"hi")
@@ -216,6 +225,9 @@ set -e
 
 # --- guard: nftables.conf ----------------------------------------------------
 ip addr add 169.254.169.254/32 dev lo
+# Its IPv6 address too, where the container has IPv6 (Docker's may not).
+v6=""
+ip -6 addr add fd20:ce::254/128 dev lo nodad 2>/dev/null && v6=v6
 nft --check --file nftables.conf
 pass "guard: nft --check"
 nft --file nftables.conf
@@ -225,7 +237,7 @@ if [[ "$(nft list tables | grep -c 'metadata_guard')" == 1 ]]; then
 else
   flunk "guard: not exactly one metadata_guard table after a reload"
 fi
-python3 probe.py serve &
+python3 probe.py serve "$v6" &
 for _ in $(seq 50); do [[ -e /tmp/ready ]] && break; sleep 0.1; done
 
 # probe <uid> <addr> <proto> <port> <want>
@@ -247,6 +259,13 @@ probe 65534 "$meta" udp 53 open
 probe 65534 "$meta" tcp 53 open
 probe 65534 "$meta" udp 123 open
 probe 65534 127.0.0.1 tcp 8081 open
+if [[ -n "$v6" ]]; then
+  probe 0 fd20:ce::254 tcp 80 open
+  probe 65534 fd20:ce::254 tcp 80 refused
+  probe 65534 fd20:ce::254 udp 53 open
+else
+  echo "skip  guard: no IPv6 here, so fd20:ce::254 is only nft --check'ed"
+fi
 if nft list chain inet metadata_guard metadata | grep -Eq 'counter packets [1-9]'; then
   pass "guard: refusals counted"
 else
