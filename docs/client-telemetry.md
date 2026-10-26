@@ -328,7 +328,7 @@ host `H`:
 - `node_memory_MemAvailable_bytes{host="H"} / node_memory_MemTotal_bytes{host="H"}`
   stays above 0.15 for 48 h (the blog above all).
 
-**PII, over 24 h of real traffic; any hit blocks the next merge:**
+**PII, over the first hour of real traffic; any hit blocks the next merge:**
 
 ```
 {host="H"} |~ "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b"
