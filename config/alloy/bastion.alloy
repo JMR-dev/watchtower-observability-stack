@@ -93,6 +93,13 @@ loki.process "scrub" {
 		replace    = "[REDACTED-KEY]"
 	}
 
+	// A certificate's key ID, which its issuer may fill with whom it is for:
+	// sshd logs it with each certificate login and refusal, bare or quoted.
+	stage.replace {
+		expression = `\bID "?(.+?)"? (?:\(serial |serial=)\d`
+		replace    = "[REDACTED-KEY]"
+	}
+
 	// OS Login users' uids, which stand for them as their names do: pam's
 	// "(uid=…)", systemd's "UID …", user@….service, user-….slice and
 	// /run/user/…. System uids, under 1000, stay.

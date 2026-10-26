@@ -119,8 +119,8 @@ Nothing on watchtower scrubs. What a host sends is stored.
   email); scrub `httpRequest.remoteIp`, `userAgent`, and the login in
   webhook "author … is not allowed" lines.
 - **Bastion:** OS Login user names (the example's rule); SSH key
-  fingerprints and OS Login uids, also out of the `unit` label
-  (`user@.service`, `session.scope`).
+  fingerprints, certificate key IDs and OS Login uids, also out of the
+  `unit` label (`user@.service`, `session.scope`).
 
 ## Agent peers
 
