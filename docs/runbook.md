@@ -133,20 +133,40 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
 
 - **What it is:** `watchtower-bastion`, an e2-micro in us-east1-b, the free
   tier.
-  - It has no external address and no service account.
+  - It has no external address.
   - Its SSH is open only to IAP (35.235.240.0/20), with OS Login.
   - Its traffic leaves through Cloud NAT from the one address in
     `breakGlassCidrs`, the only public SSH source the proxy admits.
   - It installs security updates daily and reboots at 04:00 UTC when one
     needs it.
+  - It runs as `watchtower-bastion@`, which may read its own agent peer
+    (`wireguard-bastion-peer`) and nothing else, and ships its journal and
+    metrics to watchtower through `wg-watchtower` (docs/client-telemetry.md).
+    Until `watchtower-deployer` may act as that account (below), it runs as
+    no one and ships nothing.
+  - Only root may reach the metadata server, and with it the VM's token:
+    nftables (`config/bastion/nftables.conf`) refuses every other uid but
+    for DNS and NTP. `nft list chain inet metadata_guard metadata` counts
+    the refusals.
+  - Its startup script (`config/bastion/startup.sh`) sets all of this up
+    at every boot; its output is in `journalctl -u google-startup-scripts`
+    and on the serial console, and never holds the peer config.
 - **Who may use it:** you (project owner), and `watchtower-deployer`, which
   has OS Login on that VM and an IAP tunnel to its port 22, nothing more.
   The deploy uses it when dispatched with `ssh_via=bastion`: when wg-easy
-  is down, the proxy is being rebuilt, or the environment is new.
+  is down, the proxy is being rebuilt, or the environment is new. OS Login
+  admits a user to a VM that runs as a service account only if they may act
+  as it (`roles/iam.serviceAccountUser` on it), so bootstrap attaches
+  `watchtower-bastion@` only once the deployer holds that; it never grants
+  it.
 - **Rebuilding it:**
   - `scripts/bootstrap.sh` (step 7) makes the bastion, and writes its NAT
     address and SSH host key into `infra/cloud/Pulumi.prod.yaml`
     (`breakGlassCidrs`, `bastionHostKey`).
+  - A change to `config/bastion/` or `config/alloy/bastion.alloy` reaches
+    it when you rerun bootstrap: it stops the bastion, sets its account and
+    metadata, and starts it again. The boot disk, and with it the host key,
+    stays; anyone on the bastion then is cut off.
   - To replace it: `gcloud compute instances delete watchtower-bastion
     --zone us-east1-b`, rerun bootstrap, commit `Pulumi.prod.yaml`, and
     deploy. The NAT address is reserved and stays; the host key changes.
@@ -189,8 +209,9 @@ Never move a person's peer into the agent half, or an agent's out of it.
 
 **Rekey an agent peer:** delete its client in the UI. The next deploy makes
 a new one and publishes it; each service picks it up on its next deploy or
-boot (Vaultwarden only on a dispatch). Then `scripts/secret.sh pull
-wireguard-<peer>-peer` for the gopass copy.
+boot (Vaultwarden only on a dispatch; the bastion at boot, or at once with
+`sudo google_metadata_script_runner startup` on it). Then
+`scripts/secret.sh pull wireguard-<peer>-peer` for the gopass copy.
 
 **Check the gating** after any change to it, from a host that is an agent
 peer (each must fail as shown, and a line pushed with any tenant must

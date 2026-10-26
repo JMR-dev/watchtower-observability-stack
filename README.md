@@ -31,7 +31,8 @@ reachable only through WireGuard at the private endpoint
 | `build/patroni/` | Patroni + PostgreSQL 18 for the nodes, built with uv |
 | `build/wg-easy/` | The client VPN and its UI, on Alpine with nftables-backed iptables |
 | `scripts/` | Bootstrap, secrets, Healthchecks.io checks, key rotation, image builds and checks, deploy verification, tenant onboarding, GDPR erasure |
-| `config/alloy/` | Client-side Alloy config with PII scrubbing |
+| `config/alloy/` | Client-side Alloy config with PII scrubbing; the bastion's own |
+| `config/bastion/` | The break-glass bastion's startup script and nftables ruleset, which bootstrap puts in its metadata |
 | `docs/` | Architecture, runbook, secrets, multi-tenancy, client telemetry, GDPR |
 
 ## Quick start
@@ -66,6 +67,14 @@ renders every host's configs from the sample inventory and checks each with
 the program that reads it (quadlet, Loki, Mimir, Tempo, Fluent Bit;
 shellcheck for the host scripts), as CI's `configs` job does. `scripts/build-image.sh` checks the Caddyfile,
 `patroni.yml` and wg-easy's tools with the images it builds.
+
+```bash
+CONTAINER_RUNTIME=podman scripts/check-bastion.sh
+scripts/check-alloy-scrub.sh config/alloy/bastion.alloy config/alloy/testdata/bastion.log
+```
+
+test the bastion's peer checks and metadata guard in Debian 13, and its
+scrub rules with Alloy, as CI's `configs` and `alloy` jobs do.
 
 ## Documentation
 

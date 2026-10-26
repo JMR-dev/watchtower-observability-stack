@@ -118,7 +118,9 @@ Nothing on watchtower scrubs. What a host sends is stored.
 - **Gitea CI:** the sink excludes `cloudaudit` (it carries the owner's
   email); scrub `httpRequest.remoteIp`, `userAgent`, and the login in
   webhook "author … is not allowed" lines.
-- **Bastion:** OS Login user names (the example's rule).
+- **Bastion:** OS Login user names (the example's rule); SSH key
+  fingerprints and OS Login uids, also out of the `unit` label
+  (`user@.service`, `session.scope`).
 
 ## Agent peers
 
@@ -274,6 +276,18 @@ reads a secret's value or SSHes anywhere.
   deployer among them) can't read the peer with the VM's token. Tested
   before it ships.
 - `config/alloy/bastion.alloy`, validated and fixture-tested in CI.
+
+As built: the account is made with the others (step 4) and granted through
+`agent_readers`; step 7 attaches it only once `watchtower-deployer` holds
+`roles/iam.serviceAccountUser` on it, because OS Login admits a user to a
+VM that runs as a service account only then. Granting that is the owner's
+call; bootstrap never does. The startup script, the ruleset and the Alloy
+config are files (`config/bastion/`, `config/alloy/bastion.alloy`) that
+bootstrap puts in the VM's metadata. The guard leaves DNS (53) and NTP
+(123) open to every uid, since Alloy, apt and chrony need them and they
+carry no credential, and refuses the rest at once (reject, not drop), so a
+lookup that hits it fails fast instead of hanging. `scripts/check-bastion.sh`
+tests it and the peer checks in Debian 13 (CI's `configs` job).
 
 ### G2: gitea, the VM (after the Ansible cutover)
 
