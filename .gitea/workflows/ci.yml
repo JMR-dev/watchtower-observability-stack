@@ -101,6 +101,10 @@ jobs:
         run: ansible-playbook -i inventory/hosts.sample.yml playbooks/render.yml >/dev/null
       - name: quadlet, Loki, Mimir, Tempo and Fluent Bit check them
         run: scripts/check-configs.sh
+      # The bastion's peer checks and metadata guard, in Debian 13 as on the
+      # VM: root reaches the metadata server, no other uid does.
+      - name: The bastion's startup pieces hold
+        run: scripts/check-bastion.sh
 
   images:
     # The check names branch protection requires; without this Gitea would
@@ -165,7 +169,7 @@ jobs:
         with:
           tools: shellcheck actionlint
       - name: shellcheck
-        run: shellcheck -x scripts/*.sh
+        run: shellcheck -x scripts/*.sh config/bastion/*.sh
       - name: actionlint (workflows, with shellcheck on their scripts)
         run: actionlint -config-file .gitea/actionlint.yaml .gitea/workflows/*.yml
 
