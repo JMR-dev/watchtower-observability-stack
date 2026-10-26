@@ -21,7 +21,9 @@
 #      watchtower-deployer (the deploy: Pulumi writes the records) and
 #      watchtower-caddy-dns01 (Caddy answers DNS-01). Also
 #      watchtower-gcp-reader, with no role here and no key: gitea's own
-#      stacks let it pull Gitea CI's logs and metrics.
+#      stacks let it pull Gitea CI's logs and metrics. And
+#      watchtower-bastion, the bastion's own identity, with no key: it may
+#      read the bastion's agent peer (step 6) and nothing else.
 #   5. Creates the Artifact Registry repo `watchtower` (europe-west3, docker,
 #      immutable tags, keeps the 10 newest versions of each image) for the
 #      caddy and patroni images, plus two service accounts scoped to that one
@@ -42,14 +44,24 @@
 #      its own project (agent_readers), and by nothing else.
 #   7. Creates the break-glass bastion watchtower-bastion: an e2-micro in
 #      us-east1 (the free tier) on a network of its own, with no external
-#      address and no service account, reachable only through IAP TCP
-#      forwarding (SSH from 35.235.240.0/20, nothing else) and OS Login.
-#      Its traffic leaves through Cloud NAT on one reserved address, which
-#      the proxy's firewalls admit for SSH (breakGlassCidrs): the way in when
-#      the VPN is down, and the deploy's when the proxy is rebuilt
-#      (ssh_via=bastion). watchtower-deployer may log in to that one VM and
-#      tunnel to its port 22, nothing more. Not Pulumi: the deploy must not
-#      hold compute admin, and break glass must not depend on the deploy.
+#      address, reachable only through IAP TCP forwarding (SSH from
+#      35.235.240.0/20, nothing else) and OS Login. Its traffic leaves
+#      through Cloud NAT on one reserved address, which the proxy's
+#      firewalls admit for SSH (breakGlassCidrs): the way in when the VPN is
+#      down, and the deploy's when the proxy is rebuilt (ssh_via=bastion).
+#      watchtower-deployer may log in to that one VM and tunnel to its port
+#      22, nothing more. Not Pulumi: the deploy must not hold compute admin,
+#      and break glass must not depend on the deploy.
+#      It also ships its journal and metrics to watchtower as an agent peer
+#      (docs/client-telemetry.md): its startup script (config/bastion/)
+#      reads its peer with the VM's token, as watchtower-bastion, and keeps
+#      every other user from the metadata server. OS Login lets a user onto
+#      a VM that runs as a service account only if they may act as it, so
+#      the account is attached only once watchtower-deployer holds
+#      roles/iam.serviceAccountUser on it; this script never grants that.
+#      An existing bastion is updated in place (stop, its account and
+#      metadata, start), keeping its boot disk and with it its SSH host
+#      key; anyone on it then is cut off.
 #      Writes the NAT address and the bastion's SSH host key into
 #      infra/cloud/Pulumi.prod.yaml (breakGlassCidrs, bastionHostKey), never
 #      to the terminal; commit the change and deploy.
@@ -254,6 +266,7 @@ zone_admin watchtower-deployer
 ensure_sa watchtower-caddy-dns01 "Caddy on the proxy answers ACME DNS-01 for ${DOMAIN}; key in the caddy-dns-key secret"
 zone_admin watchtower-caddy-dns01
 ensure_sa watchtower-gcp-reader "Watchtower pulls Gitea CI's logs and metrics as this (Pub/Sub, Cloud Monitoring); granted in gitea's stacks, no role here"
+ensure_sa watchtower-bastion "The break-glass bastion runs as this: it reads its own agent peer, wireguard-bastion-peer, at boot; no key"
 # googleclouddns finds its zone by LISTING the project's zones, a
 # project-level permission no zone binding confers (gitea pkg/dns/dns.go).
 # dns.reader is read-only; every write stays scoped to the zone.
@@ -329,10 +342,11 @@ for id in "${deploy_read_back[@]}"; do
     --member "serviceAccount:${DEPLOYER}" --role roles/secretmanager.secretAccessor
 done
 # Each agent peer's config is read by one identity of the service it is for,
-# in that service's project: a grant on that one secret. The bastion's
-# comes with its own service account. A Go test keeps this list equal to
+# in that service's project: a grant on that one secret. The bastion's is
+# its own account here (step 4). A Go test keeps this list equal to
 # names.AgentPeers.
 agent_readers=(
+  wireguard-bastion-peer=watchtower-bastion@watchtower-observe.iam.gserviceaccount.com
   wireguard-gitea-vm-peer=gitea-vm@gitea-496920.iam.gserviceaccount.com
   wireguard-vaultwarden-production-peer=vaultwarden-deployer@vaultwarden-497422.iam.gserviceaccount.com
   wireguard-vaultwarden-disposable-peer=vaultwarden-deployer@vaultwarden-497422.iam.gserviceaccount.com
@@ -371,31 +385,57 @@ exists routers nats describe "$BASTION" --router "$BASTION" --region "$BASTION_R
   compute routers nats create "$BASTION" --router "$BASTION" --region "$BASTION_REGION" \
     --nat-external-ip-pool "${BASTION}-nat" --nat-all-subnet-ip-ranges
 
-# Security updates every day, rebooting at 04:00 UTC when one needs it.
-startup="$(mktemp)"
-cat >"$startup" <<'STARTUP'
-#!/bin/bash
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-dpkg -s unattended-upgrades >/dev/null 2>&1 || { apt-get update -q && apt-get install -yq unattended-upgrades; }
-cat >/etc/apt/apt.conf.d/52watchtower-bastion <<'CONF'
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-Unattended-Upgrade::Automatic-Reboot "true";
-Unattended-Upgrade::Automatic-Reboot-Time "04:00";
-CONF
-STARTUP
+# What it runs (config/bastion/startup.sh): security updates every day,
+# rebooting at 04:00 UTC when one needs it; the metadata guard; its agent
+# peer and Alloy. The other two files it reads from its metadata at boot.
+bastion_dir="${repo_root}/config/bastion"
+bastion_alloy="${repo_root}/config/alloy/bastion.alloy"
+bastion_files="startup-script=${bastion_dir}/startup.sh,watchtower-nftables=${bastion_dir}/nftables.conf,watchtower-alloy=${bastion_alloy}"
+BASTION_SA="$(sa_email "$BASTION")"
+# OS Login lets a user onto a VM that runs as a service account only if they
+# may act as that account (roles/iam.serviceAccountUser on it): attached
+# without that, the account would lock watchtower-deployer out of break
+# glass. Granting it is the owner's call (docs/client-telemetry.md, W3);
+# until then the bastion runs as no one and ships nothing.
+if gcloud iam service-accounts get-iam-policy "$BASTION_SA" --project "$GCP_PROJECT" --format json 2>/dev/null |
+  jq -e --arg m "serviceAccount:${DEPLOYER}" \
+    'any(.bindings[]?; .role == "roles/iam.serviceAccountUser" and any(.members[]; . == $m))' >/dev/null; then
+  bastion_sa=(--service-account "$BASTION_SA" --scopes cloud-platform)
+  create_as=("${bastion_sa[@]}")
+else
+  bastion_sa=()
+  create_as=(--no-service-account --no-scopes)
+  echo "note: ${DEPLOYER} may not act as ${BASTION_SA}, so the bastion keeps running as no one (docs/client-telemetry.md, W3)"
+fi
 if ! exists instances describe "$BASTION" --zone "$BASTION_ZONE"; then
   compute instances create "$BASTION" --zone "$BASTION_ZONE" --machine-type e2-micro \
     --network-interface "subnet=${BASTION},private-network-ip=${BASTION_IP},no-address" \
     --image-family debian-13 --image-project debian-cloud \
     --boot-disk-size 10GB --boot-disk-type pd-standard \
     --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
-    --no-service-account --no-scopes --tags "$BASTION" \
+    "${create_as[@]}" --tags "$BASTION" \
     --metadata enable-oslogin=TRUE,block-project-ssh-keys=TRUE,enable-guest-attributes=TRUE \
-    --metadata-from-file startup-script="$startup"
+    --metadata-from-file "$bastion_files"
+elif [[ "${#bastion_sa[@]}" -gt 0 ]]; then
+  # In place, and only when something differs: its account and scope, and
+  # the three files. Stop and start keep the boot disk, so the SSH host key
+  # the stack pins stays; Secret Manager has no narrower scope than
+  # cloud-platform, so IAM (one secret, read only) is the fence.
+  current="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format json | jq -cS '{
+    sa: (.serviceAccounts[0].email // ""), scopes: (.serviceAccounts[0].scopes // []),
+    meta: ([.metadata.items[]? | select(.key | IN("startup-script", "watchtower-nftables", "watchtower-alloy"))] | from_entries)}')"
+  want="$(jq -ncS --arg sa "$BASTION_SA" --rawfile s "${bastion_dir}/startup.sh" \
+    --rawfile n "${bastion_dir}/nftables.conf" --rawfile a "$bastion_alloy" '{
+    sa: $sa, scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+    meta: {"startup-script": $s, "watchtower-nftables": $n, "watchtower-alloy": $a}}')"
+  if [[ "$current" != "$want" ]]; then
+    log "  updating ${BASTION} in place: stop, its account and metadata, start"
+    compute instances stop "$BASTION" --zone "$BASTION_ZONE"
+    compute instances set-service-account "$BASTION" --zone "$BASTION_ZONE" "${bastion_sa[@]}"
+    compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata-from-file "$bastion_files"
+    compute instances start "$BASTION" --zone "$BASTION_ZONE"
+  fi
 fi
-rm -f "$startup"
 
 # The deployer: OS Login on this VM (which includes looking it up), and an
 # IAP tunnel to its port 22 only.
@@ -429,6 +469,7 @@ awk -v cidr="${nat_ip}/32" -v key="ssh-ed25519 ${host_key}" '
 cat "$stack_tmp" >"$stack_file"
 rm -f "$stack_tmp"
 unset host_key
+bastion_as="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format 'value(serviceAccounts[0].email)')"
 
 cat <<EOF
 
@@ -440,6 +481,7 @@ Done.
                  which may add to the ${#deploy_written[@]} peer secrets and read back ${deploy_read_back[*]};
                  ${#agent_readers[@]} agent peers readable by their own service's identity
   Bastion      : ${BASTION} (${BASTION_ZONE}), SSH through IAP only; its traffic leaves from ${nat_ip}.
+                 It runs as ${bastion_as:-no one, so it ships no telemetry}.
                  Its address and host key are in infra/cloud/Pulumi.prod.yaml
                  (breakGlassCidrs, bastionHostKey): commit any change and deploy.
 

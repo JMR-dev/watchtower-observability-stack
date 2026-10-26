@@ -276,6 +276,28 @@ func TestBootstrapMakesTheBastion(t *testing.T) {
 			t.Errorf("bootstrap.sh %s = %v, want %q", v, m, want)
 		}
 	}
+	if !regexp.MustCompile(`(?m)^ensure_sa ` + strings.TrimSuffix(BastionSA, "@"+GCPProject+".iam.gserviceaccount.com") + ` "`).Match(b) {
+		t.Errorf("bootstrap.sh does not ensure_sa %s", BastionSA)
+	}
+}
+
+// The bastion's startup script reads the bastion's own agent peer: the one
+// secret its service account may read.
+func TestBastionReadsItsOwnPeer(t *testing.T) {
+	b, err := os.ReadFile("../../../config/bastion/startup.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want string
+	for _, p := range AgentPeers {
+		if p.Reader == BastionSA {
+			want = "projects/" + GCPProject + "/secrets/" + p.Secret
+		}
+	}
+	m := regexp.MustCompile(`(?m)^PEER_SECRET="([^"]*)"$`).FindStringSubmatch(string(b))
+	if want == "" || m == nil || m[1] != want {
+		t.Errorf("startup.sh PEER_SECRET = %v, want %q", m, want)
+	}
 }
 
 // scripts/bootstrap.sh makes the reader service account gitea's stacks

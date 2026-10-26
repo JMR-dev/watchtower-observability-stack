@@ -65,6 +65,11 @@ const (
 	BastionZone = "us-east1-b"
 )
 
+// BastionSA is the bastion's own service account, also made by
+// scripts/bootstrap.sh: it reads the bastion's agent peer at boot, and
+// nothing else.
+const BastionSA = BastionName + "@" + GCPProject + ".iam.gserviceaccount.com"
+
 // NodeName is data node i (1-based).
 func NodeName(i int) string {
 	return fmt.Sprintf("watchtower-%d", i)
@@ -161,8 +166,9 @@ type AgentPeer struct {
 
 // AgentPeers are the agent peers, each at a fixed address in AgentCIDR.
 var AgentPeers = []AgentPeer{
-	// Fetched at boot by the bastion's own service account (made later).
-	{"bastion", "wireguard-bastion-peer", "10.8.0.129", ""},
+	// Fetched at boot by the bastion's own service account
+	// (config/bastion/startup.sh).
+	{"bastion", "wireguard-bastion-peer", "10.8.0.129", BastionSA},
 	// Fetched on the VM by its service account.
 	{"gitea-vm", "wireguard-gitea-vm-peer", "10.8.0.130", "gitea-vm@gitea-496920.iam.gserviceaccount.com"},
 	// Fetched by the deploy job, as the deployer of that project.
