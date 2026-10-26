@@ -18,6 +18,16 @@ all:
     watchtower_tunnel_ip: 10.8.0.1
     watchtower_tunnel_cidr: 10.8.0.0/24
     watchtower_gcp_project: watchtower-observe
+    watchtower_admin_cidr: 10.8.0.0/25
+    watchtower_agent_cidr: 10.8.0.128/25
+    watchtower_agent_tenant: jasonmross
+    watchtower_agent_peers:
+      - {name: bastion, secret: wireguard-bastion-peer, address: 10.8.0.129}
+      - {name: gitea-vm, secret: wireguard-gitea-vm-peer, address: 10.8.0.130}
+      - {name: vaultwarden-production, secret: wireguard-vaultwarden-production-peer, address: 10.8.0.131}
+      - {name: vaultwarden-disposable, secret: wireguard-vaultwarden-disposable-peer, address: 10.8.0.132}
+      - {name: silverbullet-vm, secret: wireguard-silverbullet-vm-peer, address: 10.8.0.133}
+      - {name: blog-vm, secret: wireguard-blog-vm-peer, address: 10.8.0.134}
     watchtower_s3_endpoint: fsn1.your-objectstorage.com
     watchtower_s3_region: fsn1
     watchtower_buckets:

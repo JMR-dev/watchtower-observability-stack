@@ -9,8 +9,9 @@
 #   1. Hetzner Cloud Firewall: on the proxy only, SSH from the break-glass
 #      bastion and UDP 51820; the nodes take nothing on their public
 #      addresses
-#   2. this ruleset: the same; SSH to the proxy from WireGuard peers on the
-#      tunnel address, and to a node from the proxy's private address; the
+#   2. this ruleset: the same; SSH to the proxy from WireGuard admin peers on
+#      the tunnel address (agent peers reach only the ingest listeners), and
+#      to a node from the proxy's private address; the
 #      mesh transport from the private network; on wg1, everything between
 #      nodes but only Caddy's backend ports from the proxy
 #   3. fail2ban: per-address SSH bans in its own table, inet f2b-table
@@ -44,6 +45,11 @@
      watchtower_ports.otlp.grpc,
      watchtower_ports.otlp.http] %}
 {% set edge_listeners = watchtower_ports.edge.values() | list %}
+{% set agent_listeners = [
+     watchtower_ports.edge.loki,
+     watchtower_ports.edge.mimir,
+     watchtower_ports.edge.otlp_grpc,
+     watchtower_ports.edge.otlp_http] %}
 
 table inet watchtower
 delete table inet watchtower
@@ -56,6 +62,7 @@ table inet watchtower {
 {{ cidr_set('break_glass_v6', 'ipv6_addr', watchtower_break_glass_cidrs | select('search', ':') | list) }}
 {{ cidr_set('wireguard_v4', 'ipv4_addr', watchtower_wireguard_cidrs | reject('search', ':') | list) }}
 {{ cidr_set('wireguard_v6', 'ipv6_addr', watchtower_wireguard_cidrs | select('search', ':') | list) }}
+{{ cidr_set('vpn_agents', 'ipv4_addr', [watchtower_agent_cidr]) }}
 {% endif %}
     chain input {
         type filter hook input priority filter; policy drop;
@@ -98,8 +105,17 @@ table inet watchtower {
         ip saddr @wireguard_v4 udp dport {{ watchtower_wireguard_port }} accept
         ip6 saddr @wireguard_v6 udp dport {{ watchtower_wireguard_port }} accept
 
-        # Peers, through the tunnel, to Caddy and SSH on the tunnel address
-        # and nothing else.
+        # Agent peers (services shipping telemetry, docs/client-telemetry.md)
+        # reach Caddy's ingest listeners and nothing else: no SSH, Grafana,
+        # query API or wg-easy. Ahead of the next rule, which would admit
+        # them to all of it, and in two rules so the log's rate limit never
+        # decides whether a packet is dropped. CI checks the order.
+        iifname "wg0" ip saddr @vpn_agents ip daddr {{ watchtower_tunnel_ip }} tcp dport { {{ agent_listeners | join(', ') }} } accept
+        iifname "wg0" ip saddr @vpn_agents limit rate 5/minute log prefix "nft-agent-drop: " level info
+        iifname "wg0" ip saddr @vpn_agents counter drop
+
+        # Admin peers, through the tunnel, to Caddy and SSH on the tunnel
+        # address and nothing else.
         iifname "wg0" ip daddr {{ watchtower_tunnel_ip }} tcp dport { {{ (edge_listeners + [22]) | join(', ') }} } accept
 
         # SSH on the public address from the break-glass bastion only; the

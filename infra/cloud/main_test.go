@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -631,6 +632,9 @@ func TestInventoryVars(t *testing.T) {
 		"watchtower_tunnel_ip":       names.TunnelIP,
 		"watchtower_tunnel_cidr":     names.TunnelCIDR,
 		"watchtower_gcp_project":     names.GCPProject,
+		"watchtower_admin_cidr":      names.AdminCIDR,
+		"watchtower_agent_cidr":      names.AgentCIDR,
+		"watchtower_agent_tenant":    names.AgentTenant,
 		"watchtower_s3_endpoint":     names.S3Endpoint,
 		"watchtower_s3_region":       names.S3Region,
 		"watchtower_archive_prefixes": map[string]interface{}{
@@ -649,6 +653,36 @@ func TestInventoryVars(t *testing.T) {
 	for _, b := range names.Buckets {
 		if buckets[b.Suffix] != "test-wt-"+b.Suffix {
 			t.Errorf("bucket %s = %v", b.Suffix, buckets[b.Suffix])
+		}
+	}
+	agents := vars["watchtower_agent_peers"].([]interface{})
+	if len(agents) != len(names.AgentPeers) {
+		t.Fatalf("agent peers %v", agents)
+	}
+	for i, a := range names.AgentPeers {
+		want := map[string]interface{}{"name": a.Name, "secret": a.Secret, "address": a.Address}
+		if !reflect.DeepEqual(agents[i], want) {
+			t.Errorf("agent peer %d = %v, want %v", i, agents[i], want)
+		}
+	}
+}
+
+// CI renders and checks every config from the sample inventory, so it must
+// carry every var the real one does: one it lacked would render only in
+// the deploy.
+func TestSampleInventoryHasEveryVar(t *testing.T) {
+	sample, err := os.ReadFile("../../ansible/inventory/hosts.sample.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(?m)^    ([a-z0-9_]+):`).FindAllStringSubmatch(string(sample), -1) {
+		have[m[1]] = true
+	}
+	inv := inventory(t, baseConfig())
+	for key := range inv["all"].(map[string]interface{})["vars"].(map[string]interface{}) {
+		if !have[key] {
+			t.Errorf("hosts.sample.yml has no %s", key)
 		}
 	}
 }

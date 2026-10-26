@@ -23,7 +23,8 @@
 #            /config and /tmp, no capabilities but binding 443), so an unknown
 #            directive, a missing plugin or a module that can't provision
 #            there (Coraza without a writable /tmp) fails here, not on the
-#            proxy.
+#            proxy. Then the adapted config holds agent peers to writing
+#            telemetry (scripts/check-agent-gating.sh).
 #   patroni  `patroni --validate-config` on a node's rendered patroni.yml
 #            (etcd being unreachable from the build is the one complaint
 #            ignored).
@@ -90,6 +91,10 @@ case "$what" in
       -e GOOGLE_APPLICATION_CREDENTIALS=/etc/caddy-dns/key.json \
       --entrypoint sh "$ref" -c 'cat >/tmp/Caddyfile && exec caddy validate --config /tmp/Caddyfile --adapter caddyfile' \
       <"${render}/watchtower-proxy/caddy/Caddyfile"
+    echo "==> Agent peers may only write telemetry (scripts/check-agent-gating.sh)"
+    docker run --rm -i --network none -e DOMAIN=watchtower.jasonmross.dev -e GCP_PROJECT=watchtower-observe \
+      --entrypoint sh "$ref" -c 'cat >/tmp/Caddyfile && exec caddy adapt --config /tmp/Caddyfile --adapter caddyfile' \
+      <"${render}/watchtower-proxy/caddy/Caddyfile" | "${repo_root}/scripts/check-agent-gating.sh" caddy
     ;;
   patroni)
     echo "==> Validating a node's patroni.yml with ${ref}"

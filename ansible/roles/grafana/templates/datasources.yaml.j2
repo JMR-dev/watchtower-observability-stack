@@ -3,6 +3,15 @@
 # *.internal names resolve to all three nodes, this one first. `version` lets
 # the three Grafanas provision the shared database without fighting.
 apiVersion: 1
+{% if watchtower_retired_tenants | default([]) %}
+deleteDatasources:
+{% for t in watchtower_retired_tenants %}
+{% for kind in ['Mimir', 'Loki', 'Tempo'] %}
+  - name: {{ kind }} ({{ t.org_name }})
+    orgId: 1
+{% endfor %}
+{% endfor %}
+{% endif %}
 datasources:
 {% for t in watchtower_tenants %}
   - name: Mimir ({{ t.org_name }})

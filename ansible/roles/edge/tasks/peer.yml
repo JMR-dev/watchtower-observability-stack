@@ -2,12 +2,17 @@
 # One WireGuard peer the deploy makes (defaults/main.yml, edge_peers), once:
 # it creates the client edge_peer.name in wg-easy (through its API on
 # loopback) and adds its config to the Secret Manager secret
-# edge_peer.secret. Two of them:
+# edge_peer.secret. They are:
 #   owner   the owner's first peer, so nobody needs public SSH to make one.
 #           The deployer may add to wireguard-owner-peer but not read it; the
 #           owner fetches it with `scripts/secret.sh pull wireguard-owner-peer`.
 #   deploy  the deploy's own way to the proxy over the VPN, which it reads
 #           back from wireguard-deploy-peer (scripts/ssh-config.sh vpn).
+#   agents  one per service that ships telemetry here (edge_peer.address
+#           set): moved to that fixed address in the agent half, where the
+#           firewall and Caddy let it only write telemetry, with a keepalive
+#           and a smaller MTU. The deployer may add to their secrets but not
+#           read them; each is read by its own service (scripts/bootstrap.sh).
 #
 # Before creating it, wg-easy's default client DNS is cleared: the tunnel is
 # split (only the tunnel range goes through it), so a peer keeps its own
@@ -80,6 +85,53 @@
     - name: Remember its id
       ansible.builtin.set_fact:
         edge_peer_id: "{{ edge_peer_created.json.clientId }}"
+
+# wg-easy's update takes the whole client, so read it, change three fields
+# and send it back without the keys and bookkeeping (it rejects nothing it
+# doesn't know, but the keys have no business in a request). Before the
+# config is fetched, so the published one has them.
+- name: Pin an agent peer's address, keepalive and MTU
+  when: edge_peer.address is defined
+  block:
+    - name: No other peer holds its address
+      ansible.builtin.assert:
+        that: >-
+          edge_wg_clients.json | rejectattr('id', 'equalto', edge_peer_id | int)
+          | selectattr('ipv4Address', 'equalto', edge_peer.address) | list | length == 0
+        fail_msg: another wg-easy client already has {{ edge_peer.address }}; free it or change names.AgentPeers
+        quiet: true
+
+    - name: Read the agent peer
+      ansible.builtin.uri:
+        url: "{{ edge_wg_easy_api }}/client/{{ edge_peer_id }}"
+        url_username: admin
+        url_password: "{{ watchtower_secret.wg_easy_password }}"
+        force_basic_auth: true
+      register: edge_agent_client
+      no_log: true
+
+    - name: Update it
+      ansible.builtin.uri:
+        url: "{{ edge_wg_easy_api }}/client/{{ edge_peer_id }}"
+        method: POST
+        body_format: json
+        body: >-
+          {{ edge_agent_client.json
+             | combine({'ipv4Address': edge_peer.address, 'persistentKeepalive': edge_agent_keepalive | int,
+                        'mtu': edge_agent_mtu | int})
+             | dict2items
+             | rejectattr('key', 'in', ['id', 'createdAt', 'updatedAt', 'privateKey', 'publicKey', 'preSharedKey',
+                                        'userId', 'interfaceId', 'endpoint', 'oneTimeLink'])
+             | items2dict }}
+        url_username: admin
+        url_password: "{{ watchtower_secret.wg_easy_password }}"
+        force_basic_auth: true
+      when: >-
+        edge_agent_client.json.ipv4Address != edge_peer.address
+        or edge_agent_client.json.persistentKeepalive | int != edge_agent_keepalive | int
+        or edge_agent_client.json.mtu | int != edge_agent_mtu | int
+      changed_when: true
+      no_log: true
 
 - name: The peer's config
   ansible.builtin.uri:

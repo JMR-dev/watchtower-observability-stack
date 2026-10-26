@@ -20,6 +20,27 @@ Tenant isolation is enforced at two layers:
 `watchtower-smoke` is reserved: `deploy.yml` pushes its verification line
 there.
 
+## The shared tenant and agent peers
+
+Our own services (Gitea, Vaultwarden, SilverBullet, the blog, the bastion)
+share one tenant, `jasonmross` (docs/client-telemetry.md). Each ships as an
+**agent peer**, in the tunnel's upper half, 10.8.0.128/25:
+
+- nftables lets agents reach only Caddy's ingest listeners;
+- Caddy lets them use only the write paths (Loki and Mimir push and OTLP,
+  Tempo OTLP), overwrites their `X-Scope-OrgID` with `jasonmross`, and
+  answers anything else with 403. So an agent can't read, query, delete, or
+  write to another tenant.
+
+One tenant is one budget: its Mimir limits (`mimir_limits` in
+`tenants.yml`) are sized for all of them together.
+
+**Accepted risk:** inside the shared tenant, labels are what tell services
+apart, and any agent can write any label. A compromised blog VM could write
+lines or series labelled `host="vault-production"`, and so keep that host's
+silence alert quiet. Forcing the tenant doesn't stop that; it keeps a
+compromised agent from reading or erasing anything.
+
 ## Onboarding
 
 1. Add the tenant (`slug`, `org_name`) to `watchtower_tenants` in
@@ -32,12 +53,16 @@ there.
    This creates the Grafana org "Team Alpha" with Mimir, Loki and Tempo
    datasources that send `X-Scope-OrgID: team-alpha`. The three Grafanas
    share one database, so one call reaches all of them.
-3. Add a WireGuard peer for each of the tenant's hosts (wg-easy UI) and hand
-   over `config/alloy/config.alloy.example` with `TENANT_SLUG` replaced.
+3. Give the tenant's hosts a way in. A peer made in the wg-easy UI is an
+   **admin** peer: it can query and delete every tenant's data, so make one
+   only for people you trust with all of it. Write-only agent peers exist
+   only for `jasonmross` today; another tenant's would need an agent range
+   and a forced tenant of its own in the firewall and Caddy.
 
 ## Client endpoints
 
-All on `watchtower.jasonmross.dev`, TLS, from a WireGuard peer only:
+All on `watchtower.jasonmross.dev`, TLS, from a WireGuard peer only. Agent
+peers get the write endpoints and nothing else (no Grafana):
 
 | Signal | Endpoint |
 |---|---|
@@ -58,6 +83,9 @@ loki.write "default" {
 }
 ```
 
+`config/alloy/config.alloy.example` is the full client config, with the
+scrubbing every client needs.
+
 ## Offboarding
 
 1. Erase the tenant's logs:
@@ -72,9 +100,12 @@ loki.write "default" {
 
 All through the roles and a deploy:
 
-- **Mimir**: `ansible/roles/mimir/templates/runtime.yaml.j2`, which Mimir
-  rereads without a restart; add `overrides: {<tenant>: {...}}`.
-- **Loki**: `limits_config` in `ansible/roles/loki/templates/loki.yaml.j2` for
-  everyone; for one tenant, add a `runtime_config` file the same way Mimir's
-  is done.
-- **Tempo**: `overrides` in `ansible/roles/tempo/templates/tempo.yaml.j2`.
+- **Mimir**: a tenant's `mimir_limits` in `tenants.yml`, rendered into
+  `ansible/roles/mimir/templates/runtime.yaml.j2`, which Mimir rereads
+  without a restart.
+- **Loki**: `limits_config` in `ansible/roles/loki/templates/loki.yaml.j2`,
+  the same for every tenant (4 MB/s, 5000 streams); for one tenant, add a
+  `runtime_config` file the same way Mimir's is done.
+- **Tempo**: `overrides.defaults` in
+  `ansible/roles/tempo/templates/tempo.yaml.j2`, the same for every tenant
+  (5 MB/s; 10k span-metrics series).

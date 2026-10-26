@@ -8,17 +8,20 @@ Hetzner's Falkenstein location (fsn1), behind one small ARM proxy, with
 their Object Storage in the same location. Clients
 ship telemetry over WireGuard to the private endpoint
 `watchtower.jasonmross.dev`, which resolves to the in-tunnel address 10.8.0.1
-and nothing else.
+and nothing else. The services in Google Cloud (Gitea, Vaultwarden,
+SilverBullet, the blog, the bastion) do so as agent peers, which may only
+write telemetry, into the shared tenant `jasonmross`
+(docs/client-telemetry.md).
 
 ```
                           Internet
                              │ UDP 51820 (WireGuard) to vpn.watchtower.jasonmross.dev
                 ┌────────────┴────────────┐
-                │ Hetzner Cloud Firewalls │ 22/tcp ← admin + CI (34.26.149.196), all hosts
+                │ Hetzner Cloud Firewalls │ 22/tcp ← break-glass bastion (Cloud NAT), proxy only
                 │ (public interfaces)     │ 51820/udp ← wireguardAllowCidrs, proxy only
                 └────────────┬────────────┘
  ┌ watchtower-proxy (cax11, ARM) ────────────────────────────────────────────────────┐
- │ wg-easy: wg0 10.8.0.1/24 (peers, split tunnel)                                    │
+ │ wg-easy: wg0 10.8.0.1/24 (peers, split tunnel): admin .0/25, agents .128/25       │
  │ Caddy + Coraza: TLS for watchtower.jasonmross.dev (DNS-01), on 10.8.0.1 only      │
  │   :443 Grafana ×3 · :3100 Loki ×3 · :8080 Mimir ×3 · :3200 Tempo frontends ×2     │
  │   :4317/:4318 Tempo distributors ×3 · :51821 wg-easy UI                           │
@@ -136,6 +139,7 @@ and nothing else.
 | Layer | Control |
 |---|---|
 | Edge | Hetzner Cloud Firewalls: the nodes take nothing on their public addresses; the proxy takes SSH from the break-glass bastion only, and WireGuard from `wireguardAllowCidrs`. People and the deploy (its own peer, through wireproxy) SSH in over the VPN, and to a node through the proxy. The bastion (GCE, reached only through IAP with OS Login) is the way in when the VPN is down |
+| VPN peers | Admin peers (10.8.0.0/25: people, the deploy, anything made in the wg-easy UI) reach every listener on 10.8.0.1. Agent peers (10.8.0.128/25: the services that ship telemetry) reach only the ingest listeners (nftables), and there only the write paths, with their tenant overwritten to `jasonmross` (Caddy); everything else is 403. CI checks both (`scripts/check-agent-gating.sh`) |
 | Host | nftables (no firewalld) mirroring the cloud firewalls; SSH to a node only from the proxy's private address; on the mesh, nodes reach each other fully and the proxy only Caddy's backend ports; Kafka, etcd and Postgres from nodes only. SELinux enforcing; fail2ban (sshd, recidive); security updates nightly, reboots one host a week, gated on the others' health |
 | Containers | Non-root where the image allows, read-only roots, every capability dropped but what each needs; only wg-easy (wg0, iptables) and Fluent Bit (the host's journal and audit log) run without SELinux confinement |
 | Credentials | Two S3 keys, fenced by bucket policies: the cluster key can't touch Pulumi state and can only write to the archive and the backups. Every secret in Secret Manager, read by the deployer through a grant per secret; the image jobs hold only a push key for the one registry repo |
@@ -149,7 +153,9 @@ and nothing else.
   config through the program that reads it (quadlet, Loki, Mimir, Tempo,
   Fluent Bit; shellcheck for the host scripts); our images (native builds,
   their configs checked with the built image, Trivy, a new tag for any
-  change); Semgrep; shellcheck, actionlint, the Alloy example.
+  change), agent peers held to writes (nftables and Caddy); Semgrep;
+  shellcheck, actionlint, the Alloy example and its scrub rules against a
+  PII fixture.
 - **`deploy.yml`** on merge to main, and at 05:00 UTC Monday to Saturday:
   our images (to Artifact Registry, on Alpine's newest patch release and
   the day's packages), `infra/cloud`, `ansible/playbooks/site.yml`,

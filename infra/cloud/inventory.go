@@ -43,6 +43,12 @@ func inventoryJSON(cfg *Config, hs *hosts) pulumi.StringOutput {
 			nodes[n.name] = hv
 		}
 
+		// No reader: that is granted in GCP, not on the hosts.
+		var agents []obj
+		for _, a := range names.AgentPeers {
+			agents = append(agents, obj{"name": a.Name, "secret": a.Secret, "address": a.Address})
+		}
+
 		buckets := obj{}
 		for _, b := range names.Buckets {
 			buckets[b.Suffix] = names.BucketName(cfg.BucketPrefix, b.Suffix)
@@ -75,6 +81,12 @@ func inventoryJSON(cfg *Config, hs *hosts) pulumi.StringOutput {
 				"watchtower_tunnel_ip":   names.TunnelIP,
 				"watchtower_tunnel_cidr": names.TunnelCIDR,
 				"watchtower_gcp_project": cfg.GCPProject,
+				// roles/edge makes the agent peers; roles/firewall and
+				// Caddy hold them to the ingest endpoints and the tenant.
+				"watchtower_admin_cidr":   names.AdminCIDR,
+				"watchtower_agent_cidr":   names.AgentCIDR,
+				"watchtower_agent_tenant": names.AgentTenant,
+				"watchtower_agent_peers":  agents,
 
 				"watchtower_s3_endpoint": names.S3Endpoint,
 				"watchtower_s3_region":   names.S3Region,

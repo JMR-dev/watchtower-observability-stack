@@ -2,8 +2,10 @@
 
 This stack processes telemetry that is **likely to contain personal data**
 (IPs, user IDs, request bodies, emails). Compute, telemetry storage, the log
-archive and the infrastructure state are all with Hetzner in Nuremberg,
-Germany, so personal data stays in the EU.
+archive and the infrastructure state are all with Hetzner in Falkenstein,
+Germany, so personal data is stored in the EU. The services that ship their
+telemetry here run in Google Cloud in the US (us-east1), so their telemetry
+crosses from there (below).
 
 ## Roles
 
@@ -14,8 +16,11 @@ Germany, so personal data stays in the EU.
   - Google holds the two DNS records of `watchtower.jasonmross.dev` (Cloud
     DNS), the stack's credentials (Secret Manager, europe-west3) and our
     container images (Artifact Registry, europe-west3), and runs the
-    break-glass bastion (Compute Engine, us-east1). No telemetry, no
-    personal data.
+    break-glass bastion (Compute Engine, us-east1). It also hosts the
+    services that ship their telemetry here (docs/client-telemetry.md):
+    their logs and metrics leave Google over WireGuard, scrubbed on the host
+    first, and Gitea CI's sit in a Pub/Sub subscription (up to 7 days) until
+    watchtower pulls them.
   - Let's Encrypt issues the TLS certificate (the domain name only).
 
 ## Legal basis (Art. 6)
@@ -48,6 +53,7 @@ Typical bases:
 | DNS records | Google Cloud DNS (global; no personal data) |
 | Credentials (API tokens, keys, passwords) | Google Secret Manager, payloads replicated to europe-west3 only (no personal data) |
 | Our container images (Caddy, wg-easy, Patroni) | Google Artifact Registry, europe-west3 (no personal data) |
+| Our services' telemetry, in transit | Scrubbed on each service's host in Google Compute Engine, us-east1, then sent over WireGuard to fsn1; nothing stored on the way. Gitea CI's logs wait in Pub/Sub (gitea projects, up to 7 days) until pulled. Personal data is scrubbed before it leaves the host: IPs and emails in full, credentials, cookies, OS Login usernames; Vaultwarden ships only allow-listed lines |
 | Break-glass SSH sessions | Relayed by the bastion in Google Compute Engine, us-east1 (the free tier exists only in US regions). It relays SSH end to end encrypted to the proxy, holds no key for it and stores nothing. Used only when the VPN is down or the proxy is rebuilt |
 
 ## Retention register

@@ -84,6 +84,7 @@ jobs:
               unshare --user --map-root-user --net nft --check --file "$nft"
               echo "${variant} $(basename "$(dirname "$nft")"): ok"
             done
+            ../scripts/check-agent-gating.sh nft .render/watchtower-proxy/watchtower.nft
           done
 
   configs:
@@ -176,5 +177,11 @@ jobs:
       - uses: ./.gitea/actions/setup
         with:
           tools: alloy
-      - name: The client example parses and is formatted
-        run: diff -u config/alloy/config.alloy.example <(alloy fmt config/alloy/config.alloy.example)
+      - name: The client example is formatted and valid
+        run: |
+          set -euo pipefail
+          diff -u config/alloy/config.alloy.example <(alloy fmt config/alloy/config.alloy.example)
+          alloy validate config/alloy/config.alloy.example
+      # Nothing on watchtower scrubs: the client's rules are all there is.
+      - name: Its scrub rules hold back the PII in the fixture, and only that
+        run: scripts/check-alloy-scrub.sh

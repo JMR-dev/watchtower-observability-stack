@@ -1,12 +1,22 @@
-// Grafana Alloy (v1.21.2) for client hosts shipping telemetry into
-// watchtower. The host must be a WireGuard peer (wg-easy UI at
-// https://watchtower.jasonmross.dev:51821): watchtower.jasonmross.dev
+// Grafana Alloy (v1.21.2) for a service that ships its telemetry to
+// watchtower; docs/client-telemetry.md is the contract. The host must be one
+// of watchtower's agent peers (its config is in Secret Manager,
+// watchtower-observe/wireguard-<peer>-peer): watchtower.jasonmross.dev
 // resolves to 10.8.0.1, inside the tunnel, and nowhere else.
 //
-// Everything is TLS with a public certificate for watchtower.jasonmross.dev,
-// so no `insecure` settings. Replace TENANT_SLUG with your tenant id.
+// Agents may only write, and only into the shared tenant jasonmross: Caddy
+// overwrites X-Scope-OrgID for them, so the headers below only say so.
+// Everything is TLS with a public certificate, so no `insecure` settings.
 //
-// Defense-in-depth PII redaction before forwarding to Loki/Tempo/Mimir.
+// Replace SERVICE, HOST and ENV (production or disposable). The OTLP section
+// is for hosts whose apps send OTLP to it; delete it otherwise.
+//
+// Nothing on the server scrubs: loki.process "scrub" is all that stands
+// between these logs and storage. stage.replace rewrites each capture group
+// with `replace` and nothing else (a regex without one changes nothing), so
+// every rule captures exactly the part to hide. scripts/check-alloy-scrub.sh
+// runs the rules against testdata/scrub.log; copy both with this file and
+// add your service's own lines.
 
 logging {
 	level  = "info"
@@ -17,91 +27,227 @@ logging {
 // LOGS  ──► Loki
 // ============================================================
 
-loki.write "default" {
-	endpoint {
-		url     = "https://watchtower.jasonmross.dev:3100/loki/api/v1/push"
-		headers = {
-			"X-Scope-OrgID" = "TENANT_SLUG",
-		}
-	}
-}
-
 loki.source.journal "system" {
 	forward_to    = [loki.process.scrub.receiver]
-	relabel_rules = loki.relabel.system.rules
-	labels        = {job = "systemd-journal"}
+	relabel_rules = loki.relabel.journal.rules
+	labels        = {service = "SERVICE", host = "HOST", env = "ENV"}
 }
 
-loki.relabel "system" {
+loki.relabel "journal" {
 	forward_to = []
+
+	// conmon splits a long line into several journal entries and marks all
+	// but the last. Drop those, so no piece of a long record (an audit log
+	// with headers in it) ships out of context; a JSON pipeline drops the
+	// last piece as malformed.
+	rule {
+		source_labels = ["__journal_container_partial_message"]
+		regex         = "true"
+		action        = "drop"
+	}
 
 	rule {
 		source_labels = ["__journal__systemd_unit"]
 		target_label  = "unit"
 	}
 
+	// A rootless (user) unit's name is in _SYSTEMD_USER_UNIT; its
+	// _SYSTEMD_UNIT is just user@<uid>.service.
 	rule {
-		source_labels = ["__journal__hostname"]
-		target_label  = "host"
+		source_labels = ["__journal__systemd_user_unit"]
+		regex         = "(.+)"
+		target_label  = "unit"
+	}
+
+	rule {
+		source_labels = ["__journal_container_name"]
+		target_label  = "container"
+	}
+
+	rule {
+		source_labels = ["__journal_priority_keyword"]
+		target_label  = "level"
 	}
 }
 
+// scrub: begin (scripts/check-alloy-scrub.sh tests what is between the markers)
 loki.process "scrub" {
-	forward_to = [loki.write.default.receiver]
+	forward_to = [loki.write.watchtower.receiver]
 
-	stage.replace {
-		expression = `\b(?:\d{1,3}\.){3}\d{1,3}\b`
-		replace    = "[REDACTED-IP]"
+	// Coraza's audit records hold whole requests: headers, cookies, bodies.
+	stage.drop {
+		expression          = `"transaction"\s*:\s*\{`
+		drop_counter_reason = "audit_record"
 	}
 
+	// JWTs.
 	stage.replace {
-		expression = `\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b`
-		replace    = "[REDACTED-IP6]"
-	}
-
-	stage.replace {
-		expression = `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`
-		replace    = "[REDACTED-EMAIL]"
-	}
-
-	stage.replace {
-		expression = `\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`
+		expression = `\b(eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*)`
 		replace    = "[REDACTED-JWT]"
 	}
 
+	// Authorization headers, plain or as JSON arrays: the credential.
 	stage.replace {
-		expression = `(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._-]+`
-		replace    = "$1[REDACTED-TOKEN]"
+		expression = `(?i)\b(?:proxy-)?authorization"?\s*[:=]\s*\[?\s*"?(?:(?:bearer|basic|token|digest|negotiate)\s+)?([^\s",\]]+)`
+		replace    = "[REDACTED-CREDENTIAL]"
+	}
+
+	// Cookie and Set-Cookie headers: the whole value.
+	stage.replace {
+		expression = `(?i)\b(?:set-)?cookie"?\s*[:=]\s*\[?\s*"?([^"\]\r\n]+)`
+		replace    = "[REDACTED-COOKIE]"
+	}
+
+	// Secrets as JSON fields.
+	stage.replace {
+		expression = `(?i)"(?:password|passwd|pass|secret|client_secret|token|access_token|refresh_token|id_token|api_?key|private_key)"\s*:\s*"([^"]*)"`
+		replace    = "[REDACTED-SECRET]"
+	}
+
+	// Secrets as key=value or key: value.
+	stage.replace {
+		expression = `(?i)\b(?:password|passwd|pwd|secret|client_secret|api_?key|access_token|refresh_token)\s*[=:]\s*([^\s&,;"'\[\]]+)`
+		replace    = "[REDACTED-SECRET]"
+	}
+
+	// Credentials in query strings.
+	stage.replace {
+		expression = `(?i)[?&](?:access_token|refresh_token|id_token|token|code|state|key|sig|signature|x-amz-signature|x-goog-signature|password)=([^&\s"#]+)`
+		replace    = "[REDACTED-SECRET]"
+	}
+
+	// Email addresses.
+	stage.replace {
+		expression = `\b([A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})\b`
+		replace    = "[REDACTED-EMAIL]"
+	}
+
+	// OS Login usernames, which are email addresses (user_example_com) or a
+	// service account's number (sa_<id>).
+	stage.replace {
+		expression = `\b([a-z0-9][a-z0-9._-]*_[a-z0-9-]+_(?:com|net|org|dev|io|co|edu|gov|me|us|uk|de))\b`
+		replace    = "[REDACTED-USER]"
 	}
 
 	stage.replace {
-		expression = `\b(?:\d[ -]*?){13,19}\b`
+		expression = `\b(sa_\d{10,})\b`
+		replace    = "[REDACTED-USER]"
+	}
+
+	// IPv4 addresses, whole.
+	stage.replace {
+		expression = `\b((?:\d{1,3}\.){3}\d{1,3})\b`
+		replace    = "[REDACTED-IP]"
+	}
+
+	// IPv6 addresses: eight groups, or compressed with "::". Never a clock
+	// time or a Rust path (crate::module), which have neither.
+	stage.replace {
+		expression = `(?:^|[^\w:.])((?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?)`
+		replace    = "[REDACTED-IP6]"
+	}
+
+	// Card numbers: 13 to 19 digits starting 2 to 6, so never an epoch time
+	// in ms or ns, which start with 1 until 2033.
+	stage.replace {
+		expression = `\b([2-6](?:[ -]?\d){12,18})\b`
 		replace    = "[REDACTED-PAN]"
 	}
 
+	// UUIDs, which name users and their records.
 	stage.replace {
-		expression = `\b[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b`
+		expression = `\b([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\b`
 		replace    = "[REDACTED-UUID]"
 	}
 
-	stage.match {
-		selector = `{job=~".+"} |~ "(?i)(password|ssn|cvv|cvc)\\s*[:=]"`
-		action   = "drop"
+	// A secret in a shape none of the rules caught: drop the line.
+	stage.drop {
+		expression          = `(?i)\b(?:password|passwd|ssn|cvv|cvc)\s*[:=]\s*[^\s\["]`
+		drop_counter_reason = "secret"
+	}
+}
+// scrub: end
+
+loki.write "watchtower" {
+	endpoint {
+		url     = "https://watchtower.jasonmross.dev:3100/loki/api/v1/push"
+		headers = {"X-Scope-OrgID" = "jasonmross"}
+
+		// Keep retrying through a watchtower restart or reboot (about a
+		// day at most); the journal position waits meanwhile.
+		max_backoff_period  = "5m"
+		max_backoff_retries = 300
+		retry_on_http_429   = true
 	}
 }
 
 // ============================================================
-// TRACES  ──► Tempo (OTLP)
+// METRICS  ──► Mimir
 // ============================================================
 
-otelcol.receiver.otlp "default" {
+prometheus.exporter.unix "host" {
+	set_collectors = ["cpu", "diskstats", "filesystem", "loadavg", "meminfo", "netdev", "pressure", "stat", "time", "uname", "vmstat"]
+}
+
+prometheus.exporter.self "alloy" { }
+
+discovery.relabel "unix" {
+	targets = prometheus.exporter.unix.host.targets
+
+	rule {
+		target_label = "job"
+		replacement  = "integrations/unix"
+	}
+}
+
+discovery.relabel "alloy" {
+	targets = prometheus.exporter.self.alloy.targets
+
+	rule {
+		target_label = "job"
+		replacement  = "alloy"
+	}
+}
+
+prometheus.scrape "local" {
+	targets         = array.concat(discovery.relabel.unix.output, discovery.relabel.alloy.output)
+	forward_to      = [prometheus.remote_write.watchtower.receiver]
+	scrape_interval = "60s"
+}
+
+prometheus.remote_write "watchtower" {
+	endpoint {
+		url     = "https://watchtower.jasonmross.dev:8080/api/v1/push"
+		headers = {"X-Scope-OrgID" = "jasonmross"}
+	}
+	external_labels = {service = "SERVICE", host = "HOST", env = "ENV"}
+}
+
+// ============================================================
+// OTLP from local apps  ──► Tempo, Mimir, Loki (optional)
+// ============================================================
+
+// Loopback only: nothing but this host's own apps may send.
+otelcol.receiver.otlp "local" {
 	grpc {
-		endpoint = "0.0.0.0:4317"
+		endpoint = "127.0.0.1:4317"
 	}
 
 	http {
-		endpoint = "0.0.0.0:4318"
+		endpoint = "127.0.0.1:4318"
 	}
+
+	output {
+		traces  = [otelcol.processor.memory_limiter.default.input]
+		metrics = [otelcol.processor.memory_limiter.default.input]
+		logs    = [otelcol.processor.memory_limiter.default.input]
+	}
+}
+
+otelcol.processor.memory_limiter "default" {
+	check_interval = "1s"
+	limit          = "150MiB"
+	spike_limit    = "30MiB"
 
 	output {
 		traces  = [otelcol.processor.attributes.scrub.input]
@@ -142,38 +288,35 @@ otelcol.processor.attributes "scrub" {
 	}
 
 	output {
+		traces  = [otelcol.processor.batch.default.input]
+		metrics = [otelcol.processor.batch.default.input]
+		logs    = [otelcol.processor.batch.default.input]
+	}
+}
+
+otelcol.processor.batch "default" {
+	output {
 		traces  = [otelcol.exporter.otlp.tempo.input]
 		metrics = [otelcol.exporter.otlphttp.mimir.input]
+		// Logs go through the same scrub as the journal's.
+		logs = [otelcol.exporter.loki.scrub.input]
 	}
 }
 
 otelcol.exporter.otlp "tempo" {
 	client {
 		endpoint = "watchtower.jasonmross.dev:4317"
-		headers  = {"X-Scope-OrgID" = "TENANT_SLUG"}
+		headers  = {"X-Scope-OrgID" = "jasonmross"}
 	}
-}
-
-// ============================================================
-// METRICS  ──► Mimir
-// ============================================================
-
-prometheus.remote_write "mimir" {
-	endpoint {
-		url     = "https://watchtower.jasonmross.dev:8080/api/v1/push"
-		headers = {"X-Scope-OrgID" = "TENANT_SLUG"}
-	}
-	external_labels = {tenant = "TENANT_SLUG"}
 }
 
 otelcol.exporter.otlphttp "mimir" {
 	client {
 		endpoint = "https://watchtower.jasonmross.dev:8080/otlp"
-		headers  = {"X-Scope-OrgID" = "TENANT_SLUG"}
+		headers  = {"X-Scope-OrgID" = "jasonmross"}
 	}
 }
 
-prometheus.scrape "node" {
-	targets    = [{"__address__" = "127.0.0.1:9100"}]
-	forward_to = [prometheus.remote_write.mimir.receiver]
+otelcol.exporter.loki "scrub" {
+	forward_to = [loki.process.scrub.receiver]
 }
