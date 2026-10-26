@@ -1,0 +1,48 @@
+same:01 2026-10-26T03:12:45Z vaultwarden::api::core::accounts at 12:34:56.789 took 1761448334123 ms
+keep:02 Failed login from 192.0.2.10 port 51515
+keep:03 peer 2001:db8::1 and [fe80::1%eth0]:443 and ::1
+keep:04 GET /api/v1/pull?access_token=fakeLEAK01&page=2&code=fakeLEAK02 HTTP/1.1
+keep:05 Authorization: Bearer fakeLEAK03
+keep:06 {"request":{"headers":{"Authorization":["Basic Zm9vOmJhcg=="],"Cookie":["i_like_gitea=fakeLEAK04; lang=en"]}}}
+keep:07 Set-Cookie: session=fakeLEAK05; Path=/; HttpOnly
+keep:08 {"user":"x","password":"fakeLEAK06","api_key":"fakeLEAK07"}
+keep:09 login password=fakeLEAK08 user=bob
+keep:10 contact bob@example.com or alice.smith+tag@mail.example.org
+keep:11 sshd[123]: Accepted publickey for jason_ross841_gmail_com from 198.51.100.7
+keep:12 sudo: sa_1234567890123 : TTY=pts/0 ; COMMAND=/bin/true
+keep:13 card 4111111111111111 and 5500-0000-0000-0004 and 378282246310005
+keep:14 cipher 3f2504e0-4f89-41d3-9a0c-0305e82c3301 for user 7c9e6679-7425-40de-944b-e07fc1f90ae7
+keep:15 jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl here # nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token
+drop:16 {"transaction":{"client_ip":"192.0.2.66","request":{"headers":{"cookie":["x"]}}}}
+drop:17 config dump: cvv=123 ssn: 078051120
+keep:20 env DB_PASSWORD=fakeLEAK20 POSTGRES_PASSWORD=fakeLEAK21 SMTP_PASSWORD=fakeLEAK22
+keep:21 {"db_password":"fakeLEAK23","smtp_password":"fakeLEAK24"}
+keep:22 login password="fakeLEAK25" user=bob
+keep:23 X-API-Key: fakeLEAK26
+keep:24 X-Auth-Token: fakeLEAK27
+keep:25 token=fakeLEAK28 session=fakeLEAK29
+keep:26 {"resp_headers":{"Set-Cookie":["sid=fakeLEAK30; Path=/","_csrf=fakeLEAK31; Path=/"]}}
+keep:27 dsn postgres://app:fakeLEAK32@localhost:5432/app and redis://:fakeLEAK33@10.0.0.5:6379
+keep:28 GET /reset?email=bob%40leak.example.com HTTP/1.1
+keep:29 aws_secret_access_key=fakeLEAK34 github_token=fakeLEAK35
+keep:30 {"cookies":{"session":"fakeLEAK36"}}
+keep:31 client:2001:db8::77 connected
+keep:32 mac 00:1a:2b:3c:4d:5e
+keep:33 Authorization: Digest username="fakeLEAK37", response="fakeLEAK38"
+keep:34 secret: "fakeLEAK39"
+keep:35 "password": 'fakeLEAK40'
+keep:36 PASSWORD: "fakeLEAK41"
+keep:37 user_password=fakeLEAK42 old-password=fakeLEAK43
+keep:38 {"Password" : "fakeLEAK44"}
+keep:39 privateKey=fakeLEAK45 private_key=fakeLEAK46
+keep:40 retrying with bearer fakeLEAK47tok after 401
+same:50 listening on ports 3100 8080 4317 4318 9095
+same:51 vaultwarden::api::core::organizations: find_by_user_and_org took 3 ms
+same:52 metric node_disk_io scraped
+same:53 kernel 6.12.0-55.9.1.el10_0.x86_64 build 10.0.19041.1
+same:54 db::query ok
+same:55 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7 dur=3 ms
+same:56 rows 1 2 3 4 5 6 7 8 9 10 11 12 13
+same:57 offset 3456789012345 committed
+same:58 deploy finished: 3 hosts ok, cert expires 2026-12-01, version 1.21.2
+same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series

@@ -8,7 +8,10 @@
 # Per host in ansible/.render/:
 #   quadlets      podman's quadlet generator (-dryrun), from a pinned podman image
 #   loki          loki -verify-config
-#   mimir         mimir -print.config (strict: an unknown key fails)
+#   mimir         mimir -print.config (strict: an unknown key fails), and its
+#                 runtime.yaml (per-tenant limits), which only a running Mimir
+#                 loads: the overrides exporter must still be up after a few
+#                 seconds
 #   tempo         tempo -config.verify, per component
 #   fluent-bit    fluent-bit --dry-run
 #   scripts       shellcheck on the host scripts (reboot, Postgres backup)
@@ -64,6 +67,26 @@ with() {
   return "$rc"
 }
 
+# stays_up <src file> <dest> <image> [args...]: like `with`, but for a
+# program that serves rather than exits: it must still be running a few
+# seconds after it starts.
+# shellcheck disable=SC2329 # called through check()
+stays_up() {
+  local src=$1 dest=$2 image=$3 cid running rc=0
+  shift 3
+  cid="$("$rt" create --network none "$image" "$@")"
+  "$rt" cp "$src" "${cid}:${dest}"
+  "$rt" start "$cid" >/dev/null
+  sleep 6
+  running="$("$rt" inspect -f '{{.State.Running}}' "$cid")"
+  if [[ "$running" != true ]]; then
+    "$rt" logs "$cid" 2>&1
+    rc=1
+  fi
+  "$rt" rm -f "$cid" >/dev/null
+  return "$rc"
+}
+
 for host_dir in "$render"/*/; do
   host="$(basename "$host_dir")"
 
@@ -84,6 +107,10 @@ for host_dir in "$render"/*/; do
 
   check "${host}: mimir" with "${host_dir}mimir" /etc/mimir "$(image mimir)" \
     -config.file=/etc/mimir/mimir.yaml -print.config
+
+  check "${host}: mimir runtime.yaml" stays_up "${host_dir}mimir/runtime.yaml" /runtime.yaml "$(image mimir)" \
+    -target=overrides-exporter -runtime-config.file=/runtime.yaml \
+    -server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1
 
   for cfg in "${host_dir}"tempo/*.yaml; do
     component="$(basename "$cfg" .yaml)"

@@ -32,7 +32,7 @@ reachable only through WireGuard at the private endpoint
 | `build/wg-easy/` | The client VPN and its UI, on Alpine with nftables-backed iptables |
 | `scripts/` | Bootstrap, secrets, Healthchecks.io checks, key rotation, image builds and checks, deploy verification, tenant onboarding, GDPR erasure |
 | `config/alloy/` | Client-side Alloy config with PII scrubbing |
-| `docs/` | Architecture, runbook, secrets, multi-tenancy, GDPR |
+| `docs/` | Architecture, runbook, secrets, multi-tenancy, client telemetry, GDPR |
 
 ## Quick start
 
@@ -73,4 +73,5 @@ shellcheck for the host scripts), as CI's `configs` job does. `scripts/build-ima
 - [Runbook](docs/runbook.md)
 - [Required secrets](docs/required-secrets.md)
 - [Multi-tenancy](docs/multi-tenancy.md)
+- [Client telemetry](docs/client-telemetry.md): our services into watchtower
 - [GDPR compliance](docs/gdpr-compliance.md)

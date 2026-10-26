@@ -19,7 +19,9 @@
 #      DNS down.
 #   4. Creates two service accounts with grants scoped to that one zone:
 #      watchtower-deployer (the deploy: Pulumi writes the records) and
-#      watchtower-caddy-dns01 (Caddy answers DNS-01).
+#      watchtower-caddy-dns01 (Caddy answers DNS-01). Also
+#      watchtower-gcp-reader, with no role here and no key: gitea's own
+#      stacks let it pull Gitea CI's logs and metrics.
 #   5. Creates the Artifact Registry repo `watchtower` (europe-west3, docker,
 #      immutable tags, keeps the 10 newest versions of each image) for the
 #      caddy and patroni images, plus two service accounts scoped to that one
@@ -34,7 +36,10 @@
 #      (deploy_written: wireguard-owner-peer, the owner's first VPN peer, and
 #      wireguard-deploy-peer, its own) it may add versions to:
 #      secretVersionAdder. Of those it reads back only its own peer
-#      (deploy_read_back), never the owner's.
+#      (deploy_read_back), never the owner's. The rest are the agent peers
+#      of the services that ship telemetry here (docs/client-telemetry.md):
+#      each one's config is readable by one identity of that service, in
+#      its own project (agent_readers), and by nothing else.
 #   7. Creates the break-glass bastion watchtower-bastion: an e2-micro in
 #      us-east1 (the free tier) on a network of its own, with no external
 #      address and no service account, reachable only through IAP TCP
@@ -248,6 +253,7 @@ ensure_sa watchtower-deployer "The deploy workflow: reads the stack's secrets an
 zone_admin watchtower-deployer
 ensure_sa watchtower-caddy-dns01 "Caddy on the proxy answers ACME DNS-01 for ${DOMAIN}; key in the caddy-dns-key secret"
 zone_admin watchtower-caddy-dns01
+ensure_sa watchtower-gcp-reader "Watchtower pulls Gitea CI's logs and metrics as this (Pub/Sub, Cloud Monitoring); granted in gitea's stacks, no role here"
 # googleclouddns finds its zone by LISTING the project's zones, a
 # project-level permission no zone binding confers (gitea pkg/dns/dns.go).
 # dns.reader is read-only; every write stays scoped to the zone.
@@ -305,9 +311,10 @@ for id in "${secret_ids[@]}"; do
   granted=$((granted + 1))
 done
 
-# Written by the deploy, read only by the owner (`secret.sh pull`). A Go test
-# keeps this list equal to names.DeployWrittenSecrets.
-deploy_written=(wireguard-owner-peer wireguard-deploy-peer)
+# Written by the deploy, read only by the owner (`secret.sh pull`) or an
+# agent peer's reader. A Go test keeps this list equal to
+# names.DeployWrittenSecrets.
+deploy_written=(wireguard-owner-peer wireguard-deploy-peer wireguard-bastion-peer wireguard-gitea-vm-peer wireguard-vaultwarden-production-peer wireguard-vaultwarden-disposable-peer wireguard-silverbullet-vm-peer wireguard-blog-vm-peer)
 "${repo_root}/scripts/secret.sh" ensure "${deploy_written[@]}"
 for id in "${deploy_written[@]}"; do
   gcloud secrets update "$id" --project "$GCP_PROJECT" --update-labels writer=deploy >/dev/null
@@ -320,6 +327,21 @@ deploy_read_back=(wireguard-deploy-peer)
 for id in "${deploy_read_back[@]}"; do
   retry_iam gcloud secrets add-iam-policy-binding "$id" --project "$GCP_PROJECT" \
     --member "serviceAccount:${DEPLOYER}" --role roles/secretmanager.secretAccessor
+done
+# Each agent peer's config is read by one identity of the service it is for,
+# in that service's project: a grant on that one secret. The bastion's
+# comes with its own service account. A Go test keeps this list equal to
+# names.AgentPeers.
+agent_readers=(
+  wireguard-gitea-vm-peer=gitea-vm@gitea-496920.iam.gserviceaccount.com
+  wireguard-vaultwarden-production-peer=vaultwarden-deployer@vaultwarden-497422.iam.gserviceaccount.com
+  wireguard-vaultwarden-disposable-peer=vaultwarden-deployer@vaultwarden-497422.iam.gserviceaccount.com
+  wireguard-silverbullet-vm-peer=cb-infra@silver-bullet-dev.iam.gserviceaccount.com
+  wireguard-blog-vm-peer=blog-vm@dev-blog-494815.iam.gserviceaccount.com
+)
+for pair in "${agent_readers[@]}"; do
+  retry_iam gcloud secrets add-iam-policy-binding "${pair%%=*}" --project "$GCP_PROJECT" \
+    --member "serviceAccount:${pair#*=}" --role roles/secretmanager.secretAccessor
 done
 
 # ---------------------------------------------------------------------------
@@ -415,7 +437,8 @@ Done.
   DNS          : zone ${ZONE} (${DOMAIN}.), delegated from ${PARENT_ZONE} in ${PARENT_PROJECT}
   Registry     : ${GAR_LOCATION}-docker.pkg.dev/${GCP_PROJECT}/${GAR_REPO}
   Secrets      : the ${#secret_ids[@]} the deploy reads, in ${GCP_PROJECT}; ${granted} readable by ${DEPLOYER},
-                 which may add to ${deploy_written[*]} and read back ${deploy_read_back[*]}
+                 which may add to the ${#deploy_written[@]} peer secrets and read back ${deploy_read_back[*]};
+                 ${#agent_readers[@]} agent peers readable by their own service's identity
   Bastion      : ${BASTION} (${BASTION_ZONE}), SSH through IAP only; its traffic leaves from ${nat_ip}.
                  Its address and host key are in infra/cloud/Pulumi.prod.yaml
                  (breakGlassCidrs, bastionHostKey): commit any change and deploy.

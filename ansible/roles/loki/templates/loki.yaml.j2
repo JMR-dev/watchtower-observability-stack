@@ -57,8 +57,12 @@ limits_config:
   retention_period: {{ watchtower_retention_days.loki * 24 }}h
   max_query_lookback: {{ watchtower_retention_days.loki * 24 }}h
   max_query_length: {{ watchtower_retention_days.loki * 24 + 1 }}h
-  ingestion_rate_mb: 16
-  ingestion_burst_size_mb: 32
+  # Per tenant, and every service shares one (group_vars/all/tenants.yml):
+  # well above what they send, well below what a runaway one could.
+  ingestion_rate_mb: 4
+  ingestion_burst_size_mb: 8
+  per_stream_rate_limit: 1MB
+  max_global_streams_per_user: 5000
   reject_old_samples: true
   reject_old_samples_max_age: 168h
   allow_structured_metadata: true

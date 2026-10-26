@@ -1,6 +1,7 @@
 package names
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -23,6 +24,76 @@ func TestNamesAreStable(t *testing.T) {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
 		}
+	}
+}
+
+// The admin and agent halves split the tunnel range exactly, and the proxy's
+// own address is admin: verify.sh pushes from it with any tenant.
+func TestTunnelHalves(t *testing.T) {
+	tunnel := netip.MustParsePrefix(TunnelCIDR)
+	admin := netip.MustParsePrefix(AdminCIDR)
+	agent := netip.MustParsePrefix(AgentCIDR)
+	if admin.Bits() != tunnel.Bits()+1 || agent.Bits() != tunnel.Bits()+1 {
+		t.Errorf("halves %s and %s of %s", admin, agent, tunnel)
+	}
+	if admin.Addr() != tunnel.Addr() || !tunnel.Contains(agent.Addr()) || admin.Overlaps(agent) {
+		t.Errorf("%s and %s do not split %s", admin, agent, tunnel)
+	}
+	if !admin.Contains(netip.MustParseAddr(TunnelIP)) {
+		t.Errorf("tunnel address %s is not admin", TunnelIP)
+	}
+}
+
+// Agent peers have unique names and fixed, unique addresses in the agent
+// half, and their secrets are named after them.
+func TestAgentPeers(t *testing.T) {
+	agent := netip.MustParsePrefix(AgentCIDR)
+	names, addrs := map[string]bool{}, map[string]bool{}
+	for _, p := range AgentPeers {
+		a, err := netip.ParseAddr(p.Address)
+		if err != nil || !agent.Contains(a) || a == agent.Addr() || a.As4()[3] == 255 {
+			t.Errorf("peer %s at %q, not a host in %s", p.Name, p.Address, AgentCIDR)
+		}
+		if names[p.Name] || addrs[p.Address] {
+			t.Errorf("peer %s at %s twice", p.Name, p.Address)
+		}
+		names[p.Name], addrs[p.Address] = true, true
+		if p.Secret != "wireguard-"+p.Name+"-peer" {
+			t.Errorf("peer %s publishes to %s", p.Name, p.Secret)
+		}
+		if p.Reader != "" && !strings.HasSuffix(p.Reader, ".iam.gserviceaccount.com") {
+			t.Errorf("peer %s reader %q is not a service account", p.Name, p.Reader)
+		}
+	}
+	if len(AgentPeers) == 0 {
+		t.Fatal("no agent peers")
+	}
+}
+
+// scripts/bootstrap.sh lets each agent peer's reader read that one secret,
+// and nothing else reads one.
+func TestBootstrapGrantsAgentReaders(t *testing.T) {
+	b, err := os.ReadFile("../../../scripts/bootstrap.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?ms)^agent_readers=\(\n(.*?)^\)$`).FindStringSubmatch(string(b))
+	if m == nil {
+		t.Fatal("bootstrap.sh has no agent_readers=( ... ) list")
+	}
+	var got, want []string
+	for _, l := range strings.Split(strings.TrimSpace(m[1]), "\n") {
+		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "#") {
+			got = append(got, l)
+		}
+	}
+	for _, p := range AgentPeers {
+		if p.Reader != "" {
+			want = append(want, p.Secret+"="+p.Reader)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("bootstrap.sh agent_readers = %v, want %v", got, want)
 	}
 }
 
@@ -204,6 +275,19 @@ func TestBootstrapMakesTheBastion(t *testing.T) {
 		if m == nil || m[1] != want {
 			t.Errorf("bootstrap.sh %s = %v, want %q", v, m, want)
 		}
+	}
+}
+
+// scripts/bootstrap.sh makes the reader service account gitea's stacks
+// grant: under another name, their bindings would name an account that
+// doesn't exist.
+func TestBootstrapMakesTheReader(t *testing.T) {
+	b, err := os.ReadFile("../../../scripts/bootstrap.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`(?m)^ensure_sa ` + ReaderSA + ` "`).Match(b) {
+		t.Errorf("bootstrap.sh does not ensure_sa %s", ReaderSA)
 	}
 }
 

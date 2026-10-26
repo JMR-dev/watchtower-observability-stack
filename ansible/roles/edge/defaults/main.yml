@@ -2,8 +2,17 @@
 # wg-easy's API, on the loopback port it listens on.
 edge_wg_easy_api: http://127.0.0.1:{{ watchtower_ports.wg_easy_ui }}/api
 # The wg-easy clients the deploy creates (tasks/peer.yml), each published to
-# its own Secret Manager secret: the owner's first VPN peer, and the deploy's
+# its own Secret Manager secret. Admin peers, numbered by wg-easy from the
+# bottom of the tunnel range: the owner's first VPN peer, and the deploy's
 # own way to the proxy over the VPN.
-edge_peers:
+edge_admin_peers:
   - {name: owner, secret: wireguard-owner-peer}
   - {name: deploy, secret: wireguard-deploy-peer}
+# Then the agent peers of the services that ship telemetry here, each at its
+# fixed address in the agent half (the inventory's watchtower_agent_peers,
+# from names.AgentPeers; docs/client-telemetry.md).
+edge_peers: "{{ edge_admin_peers + watchtower_agent_peers }}"
+# Agent peers are servers behind NAT that only ever send: keepalives hold
+# their tunnel open, and the MTU leaves room for WireGuard inside GCE's 1460.
+edge_agent_keepalive: 25
+edge_agent_mtu: 1380

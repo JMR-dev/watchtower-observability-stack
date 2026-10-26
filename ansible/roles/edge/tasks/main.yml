@@ -104,7 +104,15 @@
     port: "{{ watchtower_ports.edge.loki }}"
     timeout: 180
 
-- name: The VPN peers the deploy makes (the owner's, and its own)
+# Caddy puts every agent's writes in this tenant (templates/Caddyfile.j2);
+# Grafana has datasources only for the listed ones.
+- name: The agent tenant is a tenant
+  ansible.builtin.assert:
+    that: watchtower_agent_tenant in (watchtower_tenants | map(attribute='slug'))
+    fail_msg: "{{ watchtower_agent_tenant }} is not in watchtower_tenants (group_vars/all/tenants.yml)"
+    quiet: true
+
+- name: The VPN peers the deploy makes (the owner's, its own, the agents')
   ansible.builtin.include_tasks: peer.yml
   loop: "{{ edge_peers }}"
   loop_control:

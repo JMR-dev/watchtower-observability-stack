@@ -1,3 +1,8 @@
 # Managed by Ansible (roles/mimir). Per-tenant limit overrides
-# (docs/multi-tenancy.md); Mimir rereads this file without a restart.
-overrides: {}
+# (docs/multi-tenancy.md), from each tenant's mimir_limits in
+# group_vars/all/tenants.yml; Mimir rereads this file without a restart.
+{% set overrides = {} %}
+{% for t in watchtower_tenants if t.mimir_limits is defined %}
+{% set _ = overrides.update({t.slug: t.mimir_limits}) %}
+{% endfor %}
+{{ {'overrides': overrides} | to_nice_yaml(indent=2) }}

@@ -2,6 +2,23 @@
 # Tenants: one X-Scope-OrgID each. Grafana's main org gets a Mimir, Loki and
 # Tempo datasource per tenant (roles/grafana); scripts/onboard-tenant.sh gives
 # a tenant an org of its own.
+#
+# jasonmross is the shared tenant every service's telemetry goes to (the
+# inventory's watchtower_agent_tenant; docs/client-telemetry.md): Caddy puts
+# agent peers' writes there whatever tenant they ask for. One tenant is one
+# budget, so its Mimir limits (roles/mimir, runtime.yaml) are sized for all
+# of them together; Loki's and Tempo's are their defaults.
 watchtower_tenants:
-  - slug: default
-    org_name: Default
+  - slug: jasonmross
+    org_name: jasonmross
+    mimir_limits:
+      max_global_series_per_user: 150000
+      ingestion_rate: 20000
+      ingestion_burst_size: 200000
+      # Tempo's span metrics carry exemplars; Mimir keeps none by default.
+      max_global_exemplars_per_user: 100000
+
+# Tenants no longer in the list: Grafana deletes their datasources.
+# `default` became jasonmross before any client wrote to it.
+watchtower_retired_tenants:
+  - {slug: default, org_name: Default}

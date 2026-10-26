@@ -50,12 +50,35 @@
 	fail_duration 30s
 }
 
+# ── Agent peers ({{ watchtower_agent_cidr }}), the services that ship their
+# telemetry here (docs/client-telemetry.md). On an ingest site they may only
+# write, on the paths given, and only into {{ watchtower_agent_tenant }}: the
+# tenant header is overwritten, whatever they send. Anything else is 403, and
+# the other sites refuse them outright (the firewall already keeps them off
+# those ports). Admin peers and the proxy itself are untouched. CI checks
+# both (scripts/build-image.sh caddy).
+(agent_writes) {
+	@agent_denied {
+		remote_ip {{ watchtower_agent_cidr }}
+		not path {args[:]}
+	}
+	respond @agent_denied 403
+	@agent remote_ip {{ watchtower_agent_cidr }}
+	request_header @agent X-Scope-OrgID {{ watchtower_agent_tenant }}
+}
+
+(agent_denied) {
+	@agent remote_ip {{ watchtower_agent_cidr }}
+	respond @agent 403
+}
+
 # ── Grafana UI: browser-facing ──────────────────────────────────────────────
 # Full OWASP CRS in detection-only mode. Switch SecRuleEngine to On after
 # reviewing the Coraza audit log (in the log archive) and tuning false
 # positives. The three Grafanas share one database, so no stickiness.
 {$DOMAIN}:{{ watchtower_ports.edge.grafana }} {
 	bind {{ watchtower_tunnel_ip }}
+	import agent_denied
 	coraza_waf {
 		load_owasp_crs
 
@@ -83,6 +106,7 @@
 # no CRS (structured, often compressed payloads).
 {$DOMAIN}:{{ watchtower_ports.edge.loki }} {
 	bind {{ watchtower_tunnel_ip }}
+	import agent_writes /loki/api/v1/push /otlp/v1/logs
 	reverse_proxy {% for ip in nodes %}{{ ip }}:{{ watchtower_ports.loki.http }} {% endfor %}{
 		import balanced /ready
 	}
@@ -91,6 +115,7 @@
 # ── Mimir: remote_write, queries, rules, Alertmanager ──────────────────────
 {$DOMAIN}:{{ watchtower_ports.edge.mimir }} {
 	bind {{ watchtower_tunnel_ip }}
+	import agent_writes /api/v1/push /otlp/v1/metrics
 	reverse_proxy {% for ip in nodes %}{{ ip }}:{{ watchtower_ports.mimir.http }} {% endfor %}{
 		import balanced /ready
 	}
@@ -99,6 +124,7 @@
 # ── Tempo query API: the query frontends ────────────────────────────────────
 {$DOMAIN}:{{ watchtower_ports.edge.tempo }} {
 	bind {{ watchtower_tunnel_ip }}
+	import agent_denied
 	reverse_proxy {% for ip in frontends %}{{ ip }}:{{ watchtower_ports.tempo['query-frontend'].http }} {% endfor %}{
 		import balanced /ready
 	}
@@ -108,6 +134,7 @@
 # HTTP port.
 {$DOMAIN}:{{ watchtower_ports.edge.otlp_http }} {
 	bind {{ watchtower_tunnel_ip }}
+	import agent_writes /v1/traces
 	reverse_proxy {% for ip in nodes %}{{ ip }}:{{ watchtower_ports.otlp.http }} {% endfor %}{
 		import balanced /ready
 		health_port {{ watchtower_ports.tempo.distributor.http }}
@@ -120,6 +147,7 @@
 # speak. A failed connection still moves to the next node.
 {$DOMAIN}:{{ watchtower_ports.edge.otlp_grpc }} {
 	bind {{ watchtower_tunnel_ip }}
+	import agent_writes /opentelemetry.proto.collector.trace.v1.TraceService/Export
 	reverse_proxy {% for ip in nodes %}{{ ip }}:{{ watchtower_ports.otlp.grpc }} {% endfor %}{
 		lb_policy round_robin
 		lb_try_duration 5s
@@ -134,5 +162,6 @@
 # ── wg-easy web UI (peer management); wg-easy itself listens on loopback.
 {$DOMAIN}:{{ watchtower_ports.edge.wg_easy }} {
 	bind {{ watchtower_tunnel_ip }}
+	import agent_denied
 	reverse_proxy 127.0.0.1:{{ watchtower_ports.wg_easy_ui }}
 }

@@ -18,6 +18,16 @@ const (
 	// TunnelCIDR is the WireGuard peer range. Peers route only this range
 	// through the tunnel (split tunnel), so the proxy forwards nothing.
 	TunnelCIDR = "10.8.0.0/24"
+	// AdminCIDR and AgentCIDR split it in two. Admin peers (people, the
+	// deploy, and any peer made in the wg-easy UI, which numbers from the
+	// bottom) reach everything on the tunnel address. Agent peers (the
+	// services that ship telemetry, AgentPeers) reach only the ingest
+	// endpoints, write only, into AgentTenant whatever tenant they ask for
+	// (roles/firewall, roles/edge).
+	AdminCIDR = "10.8.0.0/25"
+	AgentCIDR = "10.8.0.128/25"
+	// AgentTenant is the one tenant every agent writes to.
+	AgentTenant = "jasonmross"
 
 	// S3Endpoint and S3Region are Hetzner Object Storage in Falkenstein, the
 	// servers' location. Everything (telemetry, log archive, backups, Pulumi
@@ -40,6 +50,11 @@ const (
 
 // ProxyName is the front box: Caddy and the WireGuard endpoint.
 const ProxyName = "watchtower-proxy"
+
+// ReaderSA is the service account watchtower reads Gitea CI's logs and
+// metrics from GCP as (Pub/Sub and Cloud Monitoring, granted in gitea's own
+// stacks). scripts/bootstrap.sh makes it, with no roles here and no key.
+const ReaderSA = "watchtower-gcp-reader"
 
 // The break-glass bastion, made by scripts/bootstrap.sh, not Pulumi: a GCE
 // VM reached only through IAP, whose Cloud NAT address (breakGlassCidrs) the
@@ -134,10 +149,42 @@ const (
 	SecretWireGuardDeployPeer = "wireguard-deploy-peer"
 )
 
+// AgentPeer is the WireGuard peer of one service that ships its telemetry to
+// watchtower (docs/client-telemetry.md). The deploy creates it in wg-easy at
+// Address and adds its config to Secret, like the owner's peer: it may add
+// versions but never read one. Reader is the one identity, in the service's
+// own project, that scripts/bootstrap.sh lets read Secret; none yet means
+// nothing can.
+type AgentPeer struct {
+	Name, Secret, Address, Reader string
+}
+
+// AgentPeers are the agent peers, each at a fixed address in AgentCIDR.
+var AgentPeers = []AgentPeer{
+	// Fetched at boot by the bastion's own service account (made later).
+	{"bastion", "wireguard-bastion-peer", "10.8.0.129", ""},
+	// Fetched on the VM by its service account.
+	{"gitea-vm", "wireguard-gitea-vm-peer", "10.8.0.130", "gitea-vm@gitea-496920.iam.gserviceaccount.com"},
+	// Fetched by the deploy job, as the deployer of that project.
+	{"vaultwarden-production", "wireguard-vaultwarden-production-peer", "10.8.0.131", "vaultwarden-deployer@vaultwarden-497422.iam.gserviceaccount.com"},
+	{"vaultwarden-disposable", "wireguard-vaultwarden-disposable-peer", "10.8.0.132", "vaultwarden-deployer@vaultwarden-497422.iam.gserviceaccount.com"},
+	{"silverbullet-vm", "wireguard-silverbullet-vm-peer", "10.8.0.133", "cb-infra@silver-bullet-dev.iam.gserviceaccount.com"},
+	// Fetched on the VM by its service account.
+	{"blog-vm", "wireguard-blog-vm-peer", "10.8.0.134", "blog-vm@dev-blog-494815.iam.gserviceaccount.com"},
+}
+
+func agentSecrets() []string {
+	var out []string
+	for _, p := range AgentPeers {
+		out = append(out, p.Secret)
+	}
+	return out
+}
+
 // DeployWrittenSecrets are written by the deploy, and read by it only if
 // also in DeployReadBackSecrets:
 // scripts/bootstrap.sh grants the deployer secretVersionAdder on each.
-var DeployWrittenSecrets = []string{SecretWireGuardOwnerPeer, SecretWireGuardDeployPeer}
+var DeployWrittenSecrets = append([]string{SecretWireGuardOwnerPeer, SecretWireGuardDeployPeer}, agentSecrets()...)
 
 // DeployReadBackSecrets are deploy-written secrets the deploy also reads:
 // scripts/bootstrap.sh grants the deployer secretAccessor on each, too.
@@ -164,6 +211,7 @@ func Secrets() []string {
 		SecretGARPushKey, SecretHealthchecksAPIKey,
 		SecretWireGuardOwnerPeer, SecretWireGuardDeployPeer,
 	}
+	out = append(out, agentSecrets()...)
 	for _, k := range append([]string{KeyAdmin}, Keys...) {
 		out = append(out, S3AccessKeySecret(k), S3SecretKeySecret(k))
 	}

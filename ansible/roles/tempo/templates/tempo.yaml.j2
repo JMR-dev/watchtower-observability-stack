@@ -131,10 +131,19 @@ storage:
     wal:
       path: /var/tempo/wal
 
+# Per tenant, and every service shares one (group_vars/all/tenants.yml).
 overrides:
   defaults:
+    ingestion:
+      rate_limit_bytes: 5000000
+      burst_size_bytes: 10000000
+    global:
+      max_bytes_per_trace: 5000000
     metrics_generator:
       processors: [service-graphs, span-metrics]
+      # Span metrics go to the tenant in Mimir; keep a noisy service from
+      # filling its series budget.
+      max_active_series: 10000
 
 usage_report:
   reporting_enabled: false

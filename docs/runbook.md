@@ -170,6 +170,46 @@ Peers are managed in the wg-easy UI at `https://watchtower.jasonmross.dev:51821`
 (the proxy) and routes only 10.8.0.0/24. Revoke a peer by disabling or
 deleting it in the UI; it takes effect at once.
 
+The tunnel range has two halves:
+
+- **Admin peers, 10.8.0.0/25:** the owner's, the deploy's, and any peer made
+  in the UI (wg-easy numbers from the bottom). They reach every listener on
+  10.8.0.1: Grafana, the query APIs, wg-easy's UI and SSH.
+- **Agent peers, 10.8.0.128/25:** one per service that ships telemetry here
+  (`names.AgentPeers`; docs/client-telemetry.md). The deploy creates each,
+  moves it to its fixed address with a keepalive and an MTU of 1380, and
+  adds its config to `wireguard-<peer>-peer`. Every deploy also resets an
+  agent's hooks, DNS and routes, so a change made to one in the UI is
+  undone: its config runs as root on someone else's server. The firewall lets them reach
+  only Caddy's ingest listeners (3100, 8080, 4317, 4318), and Caddy only the
+  write paths, putting everything in the tenant `jasonmross` whatever they
+  ask for; anything else is 403.
+
+Never move a person's peer into the agent half, or an agent's out of it.
+
+**Rekey an agent peer:** delete its client in the UI. The next deploy makes
+a new one and publishes it; each service picks it up on its next deploy or
+boot (Vaultwarden only on a dispatch). Then `scripts/secret.sh pull
+wireguard-<peer>-peer` for the gopass copy.
+
+**Check the gating** after any change to it, from a host that is an agent
+peer (each must fail as shown, and a line pushed with any tenant must
+arrive in `jasonmross`):
+
+```bash
+d=https://watchtower.jasonmross.dev
+curl -s -o /dev/null -w '%{http_code}\n' $d:3100/loki/api/v1/labels                      # 403
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$d:3100/loki/api/v1/delete?query=x"    # 403
+curl -s -o /dev/null -w '%{http_code}\n' "$d:8080/prometheus/api/v1/query?query=up"      # 403
+curl -s -o /dev/null -w '%{http_code}\n' $d:8080/prometheus/config/v1/rules              # 403
+curl -s -o /dev/null -w '%{http_code}\n' $d:8080/alertmanager/api/v2/status              # 403
+for port in 22 443 3200 51821; do timeout 5 bash -c "</dev/tcp/10.8.0.1/$port" && echo "$port OPEN"; done
+# nothing printed
+```
+
+On the proxy, `nft list table inet watchtower` shows the agents' drop
+counter, and `journalctl -k -g nft-agent-drop` what it dropped (sampled).
+
 ## Reboots
 
 dnf-automatic installs security updates nightly and never reboots. When one
@@ -193,8 +233,9 @@ The proxy's reboot is a minute of no ingest and no UI.
 Each host runs a raw nftables ruleset in its own table, `inet watchtower`
 (`ansible/roles/firewall`), loaded by `watchtower-nftables.service`. It
 mirrors the Hetzner Cloud Firewalls from the same `breakGlassCidrs` and
-`wireguardAllowCidrs`. SSH: on the proxy from WireGuard peers (the deploy
-among them) on the tunnel address and from the bastion on its public one;
+`wireguardAllowCidrs`. SSH: on the proxy from WireGuard admin peers (the
+deploy among them) on the tunnel address and from the bastion on its public
+one (agent peers reach only the ingest listeners);
 on a node only from the proxy's
 private address. On the mesh (wg1), nodes reach each other fully and the
 proxy only the ports Caddy proxies to. Kafka, etcd, Patroni and
@@ -436,6 +477,7 @@ copy. The hosts get it on the next deploy (push to main, or dispatch
 | Backup check's ping URL | a new check → `secret.sh put healthchecks-pg-backup-url` → deploy → delete the old check |
 | Healthchecks.io API key | a new key in the project's settings → `secret.sh put healthchecks-jasonmross-dev-api-key` → revoke the old one (only `scripts/healthchecks.sh` uses it) |
 | Hosts' ping URLs | delete a host's check, `scripts/healthchecks.sh` (it makes a new one), then deploy |
+| Agent peers' WireGuard keys | delete the client in the wg-easy UI, then deploy ("WireGuard peers") |
 
 Old versions stay in Secret Manager's history until destroyed:
 `gcloud secrets versions destroy <n> --secret <id> --project watchtower-observe`.
