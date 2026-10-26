@@ -12,7 +12,7 @@ keep:11 sshd[123]: Accepted publickey for jason_ross841_gmail_com from 198.51.10
 keep:12 sudo: sa_1234567890123 : TTY=pts/0 ; COMMAND=/bin/true
 keep:13 card 4111111111111111 and 5500-0000-0000-0004 and 378282246310005
 keep:14 cipher 3f2504e0-4f89-41d3-9a0c-0305e82c3301 for user 7c9e6679-7425-40de-944b-e07fc1f90ae7
-keep:15 jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl here
+keep:15 jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl here # nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token
 drop:16 {"transaction":{"client_ip":"192.0.2.66","request":{"headers":{"cookie":["x"]}}}}
 drop:17 config dump: cvv=123 ssn: 078051120
 keep:20 env DB_PASSWORD=fakeLEAK20 POSTGRES_PASSWORD=fakeLEAK21 SMTP_PASSWORD=fakeLEAK22
