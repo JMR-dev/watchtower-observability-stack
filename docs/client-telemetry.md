@@ -313,9 +313,8 @@ In order, each after the one before is verified:
 6. **G2**, after the Gitea cutover.
 7. **W4**.
 
-Merges and deploys: Monday to Friday, 14:00 to 21:00 UTC, about two hours
-apart. Never on Sunday or 00:00 to 09:30 UTC (watchtower's 05:00 deploy,
-the 02:30 to 03:30 backups, the reboot windows).
+Merges and deploys: one service at a time, at any time of day, but never
+while that repo's deploy is already running.
 
 ## Verification
 
