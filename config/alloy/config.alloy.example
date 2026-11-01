@@ -227,6 +227,20 @@ loki.process "scrub" {
 		replace    = "[REDACTED-SECRET]"
 	}
 
+	// A secret passed as a separate argument: --password x on a command
+	// line, sudo's COMMAND= included.
+	stage.replace {
+		expression = `(?i)--(?:[\w-]*(?:password|passwd|passphrase|pwd|secret|token|bearer|api[\s._-]?key|private[\s._-]?key|preshared[_-]?key|session|credential|csrf|pass[_-]?(?:phrase|word|code|key|hash)|(?:t?otp|auth|mfa)[_-]?(?:code|key)|(?:access|signing|encryption|ssh)[_-]?key)[\w-]*|(?:[\w-]*-)?(?:pass|t?otp|o?auth))\s+(\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"',]+)`
+		replace    = "[REDACTED-SECRET]"
+	}
+
+	// The same with the name and value as strings side by side: an argument
+	// array, ["--password","x"], or a Python header tuple, ('Cookie', 'x').
+	stage.replace {
+		expression = `(?i)["'](?:[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|bearer|api[\s._-]?key|private[\s._-]?key|preshared[_-]?key|session|credential|csrf|pass[_-]?(?:phrase|word|code|key|hash)|(?:t?otp|auth|mfa)[_-]?(?:code|key)|(?:access|signing|encryption|ssh)[_-]?key|authorization|cookie)[\w.-]*|(?:[\w.-]*[_.-])?(?:pass|t?otp|o?auth))["']\s*,\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')`
+		replace    = "[REDACTED-SECRET]"
+	}
+
 	// Other credentials in query strings, the ? or & as \u0026 (Go's JSON) or
 	// &amp;, or a URL nested in another, percent-encoded, in which case the
 	// value runs to the next blank.

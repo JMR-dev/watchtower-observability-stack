@@ -159,4 +159,8 @@ keep:181 GET /user/logout?_csrf=fakeLEAK332&sid=fakeLEAK333&tok=fakeLEAK334&tick
 keep:182 {"_csrf":"fakeLEAK337","csrf":"fakeLEAK338","sid":"fakeLEAK339"}
 keep:183 bearer: fakeLEAK340abcdefgh bearer=fakeLEAK341abcdefgh {"bearer":"fakeLEAK342abcdefgh"}
 same:130 sshd-session[2345]: Connection closed by authenticating user
+keep:185 sudo[1]: root : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/usr/bin/mysql --password fakeLEAK350 --token fakeLEAK351 --pass fakeLEAK352 --api-key "a fakeLEAK353"
+keep:186 {"Cmd":["app","--password","fakeLEAK354","--api-key","a fakeLEAK355"]}
+keep:187 headers=[('Cookie', 'sid=fakeLEAK356'), ('X-Api-Key', 'fakeLEAK357'), ('Authorization', 'Basic fakeLEAK358')]
+keep:188 {"msg":"run --token \"a fakeLEAK359\" now"}
 same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series
