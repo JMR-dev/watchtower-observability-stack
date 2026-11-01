@@ -1,0 +1,8 @@
+{"fixture":"keep:c01","level":"info","ts":1793018979.1,"logger":"http.log.access.log0","msg":"handled request","request":{"remote_ip":"203.0.113.90","remote_port":"40312","client_ip":"203.0.113.90","proto":"HTTP/2.0","method":"GET","host":"app.example.org","uri":"/","headers":{"User-Agent":["Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"],"X-Api-Key":["fakeLEAK901"],"Authorization":["REDACTED"]}},"bytes_read":0,"duration":0.0123,"size":512,"status":200,"resp_headers":{"Server":["Caddy"]}}
+drop:c02 the rest of a long header fakeLEAK902\",\"Accept\":[\"*/*\"]},\"status\":200}
+","status":200,"resp_headers":{"Server":["Caddy"]},"tag":"drop:c03","x":"fakeLEAK903"}
+{"drop:c04":"fakeLEAK904"}}
+["drop:c05","fakeLEAK905"]
+"drop:c06 fakeLEAK906"
+12345 drop:c07
+{"fixture":"keep:c08","level":"info","ts":1793018979.2,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance"}
