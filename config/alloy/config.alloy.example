@@ -15,8 +15,8 @@
 // between these logs and storage. stage.replace rewrites each capture group
 // with `replace` and nothing else (a regex without one changes nothing), so
 // every rule captures exactly the part to hide. scripts/check-alloy-scrub.sh
-// runs the rules against testdata/scrub.log; copy both with this file and
-// add your service's own lines.
+// runs the rules against testdata/scrub.log and scrub.caddy.log; copy them
+// with this file and add your service's own lines.
 
 logging {
 	level  = "info"
@@ -74,10 +74,49 @@ loki.relabel "journal" {
 loki.process "scrub" {
 	forward_to = [loki.write.watchtower.receiver]
 
+	// Caddy logs one JSON object a line. One that doesn't parse is the last
+	// piece of a line conmon split (the relabel rule drops the others): the
+	// tail of a record with headers in it, cut off from the keys the rules
+	// below look for. It never ships. First, since a redacted line is no
+	// longer JSON.
+	stage.match {
+		selector = "{container=\"caddy\"}"
+
+		stage.json {
+			expressions    = {logger = ""}
+			drop_malformed = true
+		}
+	}
+
 	// Coraza's audit records hold whole requests: headers, cookies, bodies.
 	stage.drop {
-		expression          = `"transaction"\s*:\s*\{`
+		expression          = `\\*"transaction\\*"\s*:\s*\{`
 		drop_counter_reason = "audit_record"
+	}
+
+	// A WAF rule match quotes what it matched as [data "..."]: a visitor's
+	// form value, header or cookie. The whole field goes, first, so a quoted
+	// "Cookie: ..." can't set off a rule below that cuts to the end of the
+	// line. Coraza writes [severity "..."] right after it, once a line, so
+	// the greedy match ends at the real field even when the data holds a
+	// lookalike. A rule with several matches adds [msg_match_N "..."]
+	// [data_match_N "..."] at the end of the line. Inside Caddy's JSON the
+	// quotes are \".
+	stage.replace {
+		expression = `(\[data \\?".*\\?"\] ?)\[severity `
+		replace    = ""
+	}
+
+	stage.replace {
+		expression = `(\[msg_match_\d+ \\?".*\\?"\])`
+		replace    = ""
+	}
+
+	// Matched data in a shape those two didn't expect: drop the line.
+	// fail2ban reads the journal on the host, so a ban doesn't depend on it.
+	stage.drop {
+		expression          = `\[data(?:_match_\d+)? \\?"`
+		drop_counter_reason = "waf_data"
 	}
 
 	// JWTs, and bearer tokens wherever they appear.
@@ -91,59 +130,88 @@ loki.process "scrub" {
 		replace    = "[REDACTED-CREDENTIAL]"
 	}
 
-	// Authorization and cookie headers, whole: as a JSON field (a string, an
-	// array or an object), then as `Name: value`, to the end of the line.
+	// SSH key fingerprints, which name a person's key. Upper case only: a
+	// lower-case sha256: is an image digest.
 	stage.replace {
-		expression = `(?i)"(?:proxy-)?authorization"\s*:\s*(\[[^\]]*\]|"[^"]*")`
+		expression = `\b(?:SHA256|MD5):([A-Za-z0-9+/=:]{16,})`
+		replace    = "[REDACTED-FINGERPRINT]"
+	}
+
+	// wg's errors quote the line or key they choke on, and that can be a
+	// private key.
+	stage.replace {
+		expression = `(?:Key is not the correct length or format|Line unrecognized): \x60(.+)`
+		replace    = "[REDACTED-SECRET]"
+	}
+
+	// A JSON field whose name holds one of these goes whole, name kept, the
+	// value read the way it is written: an array of strings (Caddy logs every
+	// header as "Name":["value"]) or one more deeply nested, an object, a
+	// string with escaped quotes, a single-quoted string (Python's repr), a
+	// number or other bare word. What doesn't close, or nests deeper than
+	// these, goes to the end of the line, so a closing bracket in a value or a
+	// line cut short never ships the rest.
+	stage.replace {
+		expression = `(?i)["'][\w.-]*authorization[\w.-]*["']\s*[:=]\s*(\[(?:"(?:[^"\\]|\\.)*"|\[(?:"(?:[^"\\]|\\.)*"|[^"\[\]])*\]|[^"\[\]])*\]|\{(?:"(?:[^"\\]|\\.)*"|\{(?:"(?:[^"\\]|\\.)*"|[^"{}])*\}|[^"{}])*\}|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,}\]\[{"'\\][^\s,}\]\\]*|.*)`
 		replace    = "[REDACTED-CREDENTIAL]"
 	}
 
 	stage.replace {
-		expression = `(?i)"(?:set-)?cookies?"\s*:\s*(\[[^\]]*\]|\{[^}]*\}|"[^"]*")`
+		expression = `(?i)["'][\w.-]*cookie[\w.-]*["']\s*[:=]\s*(\[(?:"(?:[^"\\]|\\.)*"|\[(?:"(?:[^"\\]|\\.)*"|[^"\[\]])*\]|[^"\[\]])*\]|\{(?:"(?:[^"\\]|\\.)*"|\{(?:"(?:[^"\\]|\\.)*"|[^"{}])*\}|[^"{}])*\}|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,}\]\[{"'\\][^\s,}\]\\]*|.*)`
 		replace    = "[REDACTED-COOKIE]"
 	}
 
+	// Secrets by key name (DB_PASSWORD, X-API-Key, "session", privateKey, ...).
+	// pass, otp and auth are the whole name or its last part (db_pass, x-auth),
+	// never part of a word (bypass, authenticated).
 	stage.replace {
-		expression = `(?i)\b(?:proxy-)?authorization\s*[:=]\s*([^\r\n]+)`
+		expression = `(?i)["'](?:[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|private[_-]?key|preshared[_-]?key|session|credential)[\w.-]*|(?:[\w.-]*[_.-])?(?:pass|t?otp|o?auth))["']\s*[:=]\s*(\[(?:"(?:[^"\\]|\\.)*"|\[(?:"(?:[^"\\]|\\.)*"|[^"\[\]])*\]|[^"\[\]])*\]|\{(?:"(?:[^"\\]|\\.)*"|\{(?:"(?:[^"\\]|\\.)*"|[^"{}])*\}|[^"{}])*\}|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,}\]\[{"'\\][^\s,}\]\\]*|.*)`
+		replace    = "[REDACTED-SECRET]"
+	}
+
+	// The same inside a JSON string: a log line that quotes a JSON body, with
+	// \" for its quotes. Deeper quoting than that goes to the end of the line.
+	stage.replace {
+		expression = `(?i)\\+"(?:[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|private[_-]?key|preshared[_-]?key|session|credential|authorization|cookie)[\w.-]*|(?:[\w.-]*[_.-])?(?:pass|t?otp|o?auth))\\+"\s*:\s*(\[(?:\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|[^"\\\]])*\]|\{(?:\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|[^"\\{}])*\}|\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|[^\s,}\]\[{"'\\][^\s,}\]\\]*|.*)`
+		replace    = "[REDACTED-SECRET]"
+	}
+
+	// Authorization and cookie headers as `Name: value`, under any name that
+	// holds one, to the end of the line.
+	stage.replace {
+		expression = `(?i)[\w.-]*authorization\s*[:=]\s*([^\r\n]+)`
 		replace    = "[REDACTED-CREDENTIAL]"
 	}
 
 	stage.replace {
-		expression = `(?i)\b(?:set-)?cookie\s*[:=]\s*([^\r\n]+)`
+		expression = `(?i)[\w.-]*cookies?\s*[:=]\s*([^\r\n]+)`
 		replace    = "[REDACTED-COOKIE]"
 	}
 
-	// Secrets under any key that names one (DB_PASSWORD, X-API-Key,
-	// "session", privateKey, ...): as JSON with a double- or single-quoted
-	// value, then as key=value or key: value, quoted or bare.
+	// key=value or key: value, quoted (quotes escaped inside it) or bare. A
+	// bare one goes up to the next blank, & or closing quote, so a comma or a
+	// semicolon in it (?password=a,b;c in a uri) doesn't ship the rest; \" is
+	// part of the value, as in a JSON string.
+	//
+	// The first two alternatives have no capture group, so they hide nothing:
+	// they match first and take these out of the rule's reach. systemd's
+	// `session-3.scope: Deactivated` names a unit, and sudo's `TTY=x ; PWD=/y ;`
+	// a directory. Any other PWD is a password's short name.
 	stage.replace {
-		expression = `(?i)"[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|session|credential)[\w.-]*"\s*:\s*"([^"]*)"`
+		expression = `(?i)session-\w+\.scope:|(?-i:\bTTY=[^\s;=:]+ ; PWD=/[^\s;=:]* ;)|[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|private[_-]?key|preshared[_-]?key|session|credential)[\w.-]*\s*[=:]\s*("(?:[^"\\]|\\.)*"|".*|'(?:[^'\\]|\\.)*'|'.*|(?:\\.|[^\s&"'\\])(?:\\.|[^\s&"\\])*)`
 		replace    = "[REDACTED-SECRET]"
 	}
 
+	// Short names that are also ordinary words: only with an equals sign, so
+	// `auth: ok` and `tests pass: 5` stay. `otp: 123456` gets through.
 	stage.replace {
-		expression = `(?i)"[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|session|credential)[\w.-]*"\s*:\s*'([^']*)'`
-		replace    = "[REDACTED-SECRET]"
-	}
-
-	stage.replace {
-		expression = `(?i)[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|session|credential)[\w.-]*\s*[=:]\s*"([^"]*)"`
-		replace    = "[REDACTED-SECRET]"
-	}
-
-	stage.replace {
-		expression = `(?i)[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|session|credential)[\w.-]*\s*[=:]\s*'([^']*)'`
-		replace    = "[REDACTED-SECRET]"
-	}
-
-	stage.replace {
-		expression = `(?i)[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|session|credential)[\w.-]*\s*[=:]\s*([^\s&,;"'\[\]{}()<>]+)`
+		expression = `(?i)\b(?:[\w.-]*[_.-])?(?:pass|t?otp|o?auth)\s*=\s*("(?:[^"\\]|\\.)*"|".*|'(?:[^'\\]|\\.)*'|'.*|(?:\\.|[^\s&"'\\])(?:\\.|[^\s&"\\])*)`
 		replace    = "[REDACTED-SECRET]"
 	}
 
 	// Other credentials in query strings.
 	stage.replace {
-		expression = `(?i)[?&](?:code|state|key|sig|signature|x-amz-signature|x-amz-credential|x-goog-signature|x-goog-credential)=([^&\s"#]+)`
+		expression = `(?i)[?&](?:code|state|key|sig|signature|x-amz-signature|x-amz-credential|x-goog-signature|x-goog-credential)=((?:\\.|[^&\s"#\\])+)`
 		replace    = "[REDACTED-SECRET]"
 	}
 

@@ -36,6 +36,60 @@ keep:37 user_password=fakeLEAK42 old-password=fakeLEAK43
 keep:38 {"Password" : "fakeLEAK44"}
 keep:39 privateKey=fakeLEAK45 private_key=fakeLEAK46
 keep:40 retrying with bearer fakeLEAK47tok after 401
+keep:60 {"level":"error","ts":1793018976.1,"logger":"http.handlers.waf","msg":"[client \"198.51.100.23\"] Coraza: Warning. XSS Attack Detected via libinjection [file \"@owasp_crs/REQUEST-941-APPLICATION-ATTACK-XSS.conf\"] [line \"5205\"] [id \"941100\"] [rev \"\"] [msg \"XSS Attack Detected via libinjection\"] [data \"Matched Data: XSS data found within ARGS:comment: <script>fakeLEAK60</script>\"] [severity \"critical\"] [ver \"OWASP_CRS/4.25.0\"] [maturity \"0\"] [accuracy \"0\"] [tag \"attack-xss\"] [hostname \"10.89.10.3\"] [uri \"/search\"] [unique_id \"iZeFgwRepEArdWut\"]"}
+keep:61 {"level":"error","logger":"http.handlers.waf","msg":"Coraza: Warning. [msg \"XSS\"] [data \"Matched Data: x found within ARGS:q: \\\"] [severity \\\"fakeLEAK61\"] [severity \"critical\"] [uri \"/search\"]"}
+keep:62 {"level":"error","logger":"http.handlers.waf","msg":"Coraza: Access denied (phase 2). [msg \"XSS\"] [data \"\"] [severity \"emergency\"] [uri \"/\"]"}
+keep:63 Coraza: Warning. [msg "XSS"] [data "Matched Data: fakeLEAK63 found"] [severity "critical"] [uri "/"]
+keep:64 {"level":"error","logger":"http.handlers.waf","msg":"Coraza: Warning. [msg \"XSS\"] [data \"Matched Data: fakeLEAK64\"] [severity \"critical\"] [uri \"/\"] [msg_match_1 \"XSS\"] [data_match_1 \"Matched Data: fakeLEAK65\"] [msg_match_2 \"XSS\"] [data_match_2 \"Matched Data: fakeLEAK66\"]"}
+drop:65 {"msg":"Coraza: Warning. [data_match_1 \"Matched Data: fakeLEAK67\"]"}
+drop:66 Coraza: Warning. [data "Matched Data: fakeLEAK68"] and no severity after it
+drop:67 {"level":"error","msg":"audit {\"transaction\":{\"id\":\"fakeLEAK69\"}}"}
+keep:70 sshd-session[2345]: Accepted publickey for root from 192.0.2.7 port 40122 ssh2: ED25519 SHA256:fakeLEAK70AbCdEfGhIjKl/+Mn0123
+keep:71 sshd[99]: key MD5:fakeLEAK71:aa:bb:cc:dd:ee:ff
+keep:72 login passphrase=fakeLEAK72 pass=fakeLEAK73 otp=fakeLEAK74 auth=fakeLEAK75 user=bob
+keep:73 GET /cb?auth=fakeLEAK76&pass=fakeLEAK77&otp=fakeLEAK78&passphrase=fakeLEAK79&page=2 HTTP/1.1
+keep:74 db_pass=fakeLEAK80 x-auth=fakeLEAK81 mfa.otp=fakeLEAK82 totp=fakeLEAK83 oauth=fakeLEAK84
+keep:75 {"passphrase":"fakeLEAK85","pass":"fakeLEAK86","otp":"fakeLEAK87","auth":["fakeLEAK88"]}
+keep:76 {"otp":8675301,"auth":{"user":"fakeLEAK89"}}
+keep:77 pass="ab\"fakeLEAK90" otp='ab\'fakeLEAK91' passphrase: "fakeLEAK92" key_passphrase: fakeLEAK93
+keep:78 {"msg":"bad body {\"otp\":\"fakeLEAK94\",\"pass\":\"fakeLEAK95\",\"auth\":\"fakeLEAK96\"} rejected"}
+keep:80 {"logger":"http.log.access.log0","request":{"remote_ip":"203.0.113.90","client_ip":"203.0.113.90","method":"GET","uri":"/","headers":{"User-Agent":["Mozilla/5.0"],"X-Auth-Token":["fakeLEAK100"],"X-Api-Key":["fakeLEAK101"],"X-Csrf-Token":["fakeLEAK102"],"X-Session-Id":["fakeLEAK103","fakeLEAK104"]}},"status":200,"resp_headers":{"Server":["Caddy"]}}
+keep:81 {"logger":"http.log.access.log0","request":{"method":"GET","uri":"/","headers":{"User-Agent":["Mozilla/5.0"],"X-Authorization":["Basic fakeLEAK105"],"X-Forwarded-Authorization":["Basic fakeLEAK106"],"X-Forwarded-Cookie":["sid=fakeLEAK107"]}},"status":200}
+keep:82 {"X-Authorization":"Basic fakeLEAK108","x-goog-authorization":"ab\"fakeLEAK109"}
+keep:83 {"headers":{"X-Api-Key":["fake]LEAK110","a\"]fakeLEAK111"],"Cookie":["a=\"]fakeLEAK112"],"Authorization":["Basic \"]fakeLEAK113"]}}
+keep:84 {"password":"ab\"fakeLEAK114","cookie":"ab\"fakeLEAK115","cookies":{"a}b":"fakeLEAK116}fakeLEAK117"}}
+keep:85 {"password":8675309,"token":-31415926,"session_ttl":271828.0,"secret":["fakeLEAK118"],"credentials":[1,"fakeLEAK119",2]}
+keep:86 {"session":{"id":"fakeLEAK120","user":"fakeLEAK121"}}
+keep:87 {"request":{"uri":"/?password=fakeLEAK122,fakeLEAK123;fakeLEAK124(fakeLEAK125&token=fakeLEAK126;fakeLEAK127&page=2"}}
+keep:88 {"request":{"uri":"/?password=\"fakeLEAK128\"&secret='fakeLEAK129'&page=2"}}
+keep:89 login password=fakeLEAK130,fakeLEAK131 user=bob
+keep:90 token=fakeLEAK132;fakeLEAK133 (retrying)
+keep:91 password=(fakeLEAK134) session: <fakeLEAK135>
+keep:92 login password="ab\"fakeLEAK136" user=bob
+keep:93 login secret='ab\'fakeLEAK137' user=bob
+keep:94 {"level":"error","msg":"bad body {\"password\":\"fakeLEAK138\",\"api_key\":\"ab\\\"fakeLEAK139\",\"session\":42424242,\"token\":[\"fakeLEAK140\"],\"Cookie\":\"fakeLEAK141\",\"credential\":{\"a\":\"fakeLEAK142\"}} rejected"}
+keep:95 wg-quick[812]: Key is not the correct length or format: `fakeLEAK143'
+keep:96 wg-quick[812]: Line unrecognized: `Secre=fakeLEAK144'
+keep:97 wg-quick[812]: Line unrecognized: `Shared=fakeLEAK145'
+keep:98 PrivateKey = fakeLEAK146 PresharedKey = fakeLEAK147
+keep:99 {"preshared_key":"fakeLEAK148"}
+keep:100 X_Authorization: Basic fakeLEAK149
+keep:101 x_cookie=fakeLEAK150 and all the rest
+keep:102 {"password":"fakeLEAK151 and a line cut short
+keep:103 password="fakeLEAK152 and a line cut short
+keep:104 {'password': 'fakeLEAK153', 'api_key': 'ab\'fakeLEAK154'}
+keep:105 {"session":{"a":{"b":{"c":"fakeLEAK155"}}}}
+keep:106 {"cookies":{"a":{"b":"fakeLEAK156"},"c}d":"fakeLEAK157"}}
+keep:107 {"token":[["fakeLEAK158"],"fakeLEAK159]x"]}
+keep:108 {"Authorization":"fakeLEAK160 and a line cut short
+keep:109 GET /x?code=ab\"fakeLEAK161&page=2 HTTP/1.1
+keep:110 {"msg":"{\"a\":\"{\\\"password\\\":\\\"fakeLEAK162\\\"}\"}"}
+keep:111 session-3.scope: Failed with password=fakeLEAK163 session=fakeLEAK164
+keep:112 x-session-3.scope: fakeLEAK165 session-3.scope=fakeLEAK166
+keep:113 PWD=fakeLEAK167 pwd=fakeLEAK168 DB_PWD=fakeLEAK169
+keep:114 TTY=pts/0 ; PWD=fakeLEAK170 ; USER=root
+keep:115 TTY=pts/0 ; PWD=/fakeLEAK171=x ; USER=root
+keep:116 sudo[4567]: pat_example_gmail_com : TTY=pts/0 ; PWD=/home/pat_example_gmail_com ; USER=root ; COMMAND=/usr/bin/journalctl -u caddy
 same:50 listening on ports 3100 8080 4317 4318 9095
 same:51 vaultwarden::api::core::organizations: find_by_user_and_org took 3 ms
 same:52 metric node_disk_io scraped
@@ -45,4 +99,14 @@ same:55 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7 dur=3
 same:56 rows 1 2 3 4 5 6 7 8 9 10 11 12 13
 same:57 offset 3456789012345 committed
 same:58 deploy finished: 3 hosts ok, cert expires 2026-12-01, version 1.21.2
+same:120 systemd[1]: session-3.scope: Deactivated successfully.
+same:121 systemd[1]: session-c12.scope: Consumed 1.234s CPU time, 5.2M memory peak.
+same:122 sudo[4567]: root : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/usr/bin/true
+same:123 bypass=1 compass=n passed=3 authenticated=true author=bob auth_method=publickey otp_enabled=true
+same:124 tests pass: 5 auth: ok pam_unix(sudo:auth): auth could not identify a user
+same:125 podman[3120]: pulled docker.io/grafana/alloy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+same:126 podman[3120]: container health_status 7d3f8a1b2c4e (image=docker.io/grafana/alloy:v1.21.2, name=alloy, health_status=healthy)
+same:127 ts=2026-10-26T05:00:13.123Z level=info msg="finished node evaluation" controller_path=/ controller_id="" node_id=loki.write.watchtower duration=1.2ms
+same:128 wg-quick[812]: Configuration parsing error
+same:129 {"level":"info","logger":"http.log.access.log0","request":{"method":"GET","uri":"/?page=2&q=a,b;c(d","headers":{"Accept":["*/*"]}},"status":200}
 same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series

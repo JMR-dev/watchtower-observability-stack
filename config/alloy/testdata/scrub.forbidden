@@ -20,3 +20,17 @@ eyJhbGci
 "transaction"
 078051120
 00:1a:2b
+Matched Data
+203\.0\.113\.
+10\.89\.10\.
+pat_example
+SHA256:[^[]
+MD5:[^[]
+fake\]LEAK
+8675309
+8675301
+31415926
+271828
+42424242
+"[A-Za-z_-]*([Cc]ookie|[Aa]uthorization)": *\[?"
+\\"[A-Za-z_-]*([Cc]ookie|[Pp]assword|[Tt]oken|[Ss]ession|[Kk]ey)\\": *(\[\\"|\\")
