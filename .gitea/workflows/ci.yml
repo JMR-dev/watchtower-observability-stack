@@ -63,10 +63,13 @@ jobs:
         run: |
           set -euo pipefail
           ansible-galaxy collection install -r requirements.yml -p .collections >/dev/null
-          for playbook in playbooks/site.yml playbooks/render.yml; do
+          for playbook in playbooks/site.yml playbooks/render.yml playbooks/test-peer-check.yml; do
             ansible-playbook -i inventory/hosts.sample.yml "$playbook" --syntax-check
           done
           ansible-lint
+      - name: The publish check on an agent's config refuses what it must
+        working-directory: ansible
+        run: ansible-playbook -i inventory/hosts.sample.yml playbooks/test-peer-check.yml
       - name: Render every host's firewall and check it with nft
         working-directory: ansible
         run: |

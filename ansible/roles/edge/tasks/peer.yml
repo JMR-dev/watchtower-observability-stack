@@ -158,21 +158,9 @@
   register: edge_peer_config
   no_log: true
 
-# An agent's config goes out only as pinned: nothing wg-quick would run, no
-# DNS, the tunnel as its only route, its address and settings. The checks
-# print nothing from the config.
 - name: An agent's config is safe to publish
   when: edge_peer.address is defined
-  ansible.builtin.assert:
-    that:
-      - edge_peer_config.content is not regex('(?im)^\s*(PreUp|PostUp|PreDown|PostDown|DNS|Table|FwMark|SaveConfig)\s*=')
-      - edge_peer_config.content | regex_findall('(?m)^\[Peer\]$') | length == 1
-      - edge_peer_config.content is regex('(?m)^AllowedIPs = ' ~ (watchtower_tunnel_cidr | regex_escape) ~ '$')
-      - edge_peer_config.content is regex('(?m)^Address = ' ~ (edge_peer.address | regex_escape) ~ '/32$')
-      - edge_peer_config.content is regex('(?m)^MTU = ' ~ edge_agent_mtu ~ '$')
-      - edge_peer_config.content is regex('(?m)^PersistentKeepalive = ' ~ edge_agent_keepalive ~ '$')
-    fail_msg: wg-easy's config for {{ edge_peer.name }} has hooks, DNS or more routes, or lacks its pinned settings; not publishing it
-    quiet: true
+  ansible.builtin.include_tasks: peer_check.yml
 
 - name: What was last published
   ansible.builtin.slurp:
