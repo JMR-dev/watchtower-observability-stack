@@ -10,14 +10,16 @@
 #   2. The metadata guard (nftables.conf): only root reaches the metadata
 #      server, so only root can use the VM's token. Nothing else runs if it
 #      doesn't load.
-#   3. Its agent peer (docs/client-telemetry.md), read from Secret Manager
+#   3. Prints "bastion: settled" once the guard is on and apt is done:
+#      scripts/bootstrap.sh stops the VM for its account only after that.
+#   4. Its agent peer (docs/client-telemetry.md), read from Secret Manager
 #      with that token, checked and normalised, as wg-quick@wg-watchtower.
 #      None to read (no service account, no version or an empty one): the
 #      tunnel and Alloy are stopped and disabled, and their config removed.
 #      A config that fails the checks goes the same way, as an error.
-#   4. Grafana Alloy from the release's .deb, pinned by sha256, run with the
+#   5. Grafana Alloy from the release's .deb, pinned by sha256, run with the
 #      config from metadata, capped at 192 MiB, and only with the tunnel.
-#   5. Warns, never fails, when Alloy isn't ready or the tunnel has no
+#   6. Warns, never fails, when Alloy isn't ready or the tunnel has no
 #      handshake within 2 minutes.
 #
 # scripts/check-bastion.sh tests the peer checks and the guard.
@@ -46,6 +48,31 @@ die() { printf 'bastion: error: %s\n' "$*" >&2; exit 1; }
 # umask, not this script's.
 apt_get() { (umask 022 && apt-get -q -o DPkg::Lock::Timeout=600 "$@"); }
 
+# A stop or a crash in the middle of an install leaves dpkg's journal behind,
+# and apt then refuses everything until dpkg has replayed it. dpkg has no lock
+# timeout of its own, so this waits as long as apt_get would.
+dpkg_heal() {
+  local i
+  for i in $(seq 60); do
+    (umask 022 && dpkg --force-confdef --force-confold --configure -a) && return 0
+    [[ "$i" -eq 60 ]] || sleep 10
+  done
+  die "dpkg --configure -a did not finish within 10 minutes"
+}
+
+apt_install() {
+  dpkg_heal
+  apt_get update
+  apt_get install -y "$@"
+}
+
+# True when every package named is fully installed: dpkg -s also says yes to a
+# package an interrupted install left half unpacked.
+installed() {
+  # shellcheck disable=SC2016 # dpkg-query's format, not the shell's
+  [[ "$(dpkg-query -W -f '${db:Status-Status}\n' "$@" 2>/dev/null | grep -cx installed)" == "$#" ]]
+}
+
 mds() { curl -fsS --retry 5 --retry-connrefused --max-time 30 -H 'Metadata-Flavor: Google' "${MDS}/$1"; }
 
 # get <url> <out> [curl args...]: the body into out; prints the HTTP status,
@@ -72,7 +99,7 @@ put() {
 }
 
 updates() {
-  dpkg -s unattended-upgrades >/dev/null 2>&1 || { apt_get update && apt_get install -y unattended-upgrades; }
+  installed unattended-upgrades || apt_install unattended-upgrades
   cat >"${work}/52watchtower-bastion" <<'CONF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
@@ -83,7 +110,7 @@ CONF
 }
 
 guard() {
-  command -v nft >/dev/null || { apt_get update && apt_get install -y --no-install-recommends nftables; }
+  installed nftables || apt_install --no-install-recommends nftables
   mds instance/attributes/watchtower-nftables >"${work}/nftables.conf"
   nft --check --file "${work}/nftables.conf"
   put "${work}/nftables.conf" /etc/nftables.conf 0644 root || true
@@ -92,55 +119,73 @@ guard() {
   nft list chain inet metadata_guard metadata >/dev/null || die "the metadata guard did not load"
 }
 
-# check_peer <in> <out>: writes the config wg-quick may run, normalised, or
-# fails saying why. Only its own words reach the output, never the
-# config's. wg-quick reads keys in any case and drops # comments; so does
-# this, and it keeps no comment or blank line.
+# check_peer <in> <out>: writes the config wg-quick may run, or fails saying
+# why. Only its own words reach the output, never the config's. wg deletes all
+# whitespace from a line, reads keys in any case and drops # comments, and
+# wg-quick trims whatever its locale calls a space: so this reads a line as wg
+# does, admits only the settings an agent needs, in their shape, and writes
+# them out afresh. Nothing but what it checked reaches wg-quick, and no value
+# wg would echo in an error message (into the journal, and so to Alloy).
 check_peer() {
   awk -v cidr="$TUNNEL_CIDR" '
     function refuse(why) { print "peer config refused: " why >"/dev/stderr"; bad = 1 }
+    # 32 bytes of base64, as wg reads a key.
+    function wg_key(v) { return length(v) == 44 && v ~ /^[A-Za-z0-9+\/]+[AEIMQUYcgkosw048]=$/ }
+    BEGIN {
+      name["[interface]", "privatekey"] = "PrivateKey"
+      name["[interface]", "address"] = "Address"
+      name["[interface]", "mtu"] = "MTU"
+      name["[peer]", "publickey"] = "PublicKey"
+      name["[peer]", "presharedkey"] = "PresharedKey"
+      name["[peer]", "allowedips"] = "AllowedIPs"
+      name["[peer]", "endpoint"] = "Endpoint"
+      name["[peer]", "persistentkeepalive"] = "PersistentKeepalive"
+      net = cidr
+      sub(/0\/24$/, "", net)
+    }
     {
       line = $0
-      sub(/\r$/, "", line)
       sub(/#.*/, "", line)
-      gsub(/^[ \t]+|[ \t]+$/, "", line)
+      gsub(/[[:space:]]/, "", line)
       if (line == "") next
       if (substr(line, 1, 1) == "[") {
         section = tolower(line)
-        if (section == "[interface]") { interfaces++; interface_at = n + 1 }
-        else if (section == "[peer]") { peers++; peer_at = n + 1 }
-        else refuse("a section other than [Interface] and [Peer]")
-        out[++n] = line
+        if (section == "[interface]") { interfaces++; out[++n] = "[Interface]"; interface_at = n }
+        else if (section == "[peer]") { peers++; out[++n] = "[Peer]"; peer_at = n }
+        else { refuse("a section other than [Interface] and [Peer]"); section = "?" }
         next
       }
       eq = index(line, "=")
       if (eq == 0) { refuse("a line that is not key = value"); next }
       key = tolower(substr(line, 1, eq - 1))
-      sub(/[ \t]+$/, "", key)
       value = substr(line, eq + 1)
-      gsub(/[ \t]/, "", value)
-      if (key ~ /^(preup|postup|predown|postdown|table|fwmark|saveconfig)$/) refuse("a " key " line")
       if (key == "dns") next
-      if (section == "") refuse("a setting before any section")
-      if (key == "mtu" && section == "[interface]") mtu = 1
-      if (key == "persistentkeepalive" && section == "[peer]") keepalive = 1
-      if (key == "endpoint") { endpoints++; if (section != "[peer]") refuse("an Endpoint outside [Peer]") }
-      if (key == "allowedips") {
-        allowed++
-        if (section != "[peer]" || value != cidr) refuse("AllowedIPs other than " cidr)
-      }
-      out[++n] = line
+      if (key ~ /^(preup|postup|predown|postdown|table|fwmark|saveconfig)$/) { refuse("a " key " line"); next }
+      if (section == "") { refuse("a setting before any section"); next }
+      # Not the key: a mistyped one may be the line holding the private key.
+      if (!((section, key) in name)) { refuse("a setting its section may not have"); next }
+      if (seen[key]++ == 1) refuse("more than one " key)
+      if (key ~ /key$/ && !wg_key(value)) refuse("a " key " that is not a WireGuard key")
+      if (key == "address" && (index(value, net) != 1 || substr(value, length(net) + 1) !~ /^[0-9]+\/32$/)) refuse("an Address other than one /32 in " cidr)
+      if (key == "mtu" && value !~ /^[0-9]+$/) refuse("an MTU that is not a number")
+      if (key == "persistentkeepalive" && value !~ /^[0-9]+$/) refuse("a PersistentKeepalive that is not a number")
+      if (key == "endpoint" && value !~ /^[A-Za-z0-9.-]+:[0-9]+$/ && value !~ /^\[[0-9A-Fa-f:]+\]:[0-9]+$/) refuse("an Endpoint that is not host:port")
+      if (key == "allowedips" && value != cidr) refuse("AllowedIPs other than " cidr)
+      out[++n] = name[section, key] " = " value
     }
     END {
       if (interfaces != 1) refuse("not exactly one [Interface]")
       if (peers != 1) refuse("not exactly one [Peer]")
-      if (endpoints != 1) refuse("not exactly one Endpoint")
-      if (allowed != 1) refuse("not exactly one AllowedIPs")
+      if (!seen["privatekey"]) refuse("no PrivateKey")
+      if (!seen["address"]) refuse("no Address")
+      if (!seen["publickey"]) refuse("no PublicKey")
+      if (!seen["endpoint"]) refuse("not exactly one Endpoint")
+      if (!seen["allowedips"]) refuse("not exactly one AllowedIPs")
       if (bad) exit 1
       for (i = 1; i <= n; i++) {
         print out[i]
-        if (i == interface_at && !mtu) print "MTU = 1380"
-        if (i == peer_at && !keepalive) print "PersistentKeepalive = 25"
+        if (i == interface_at && !seen["mtu"]) print "MTU = 1380"
+        if (i == peer_at && !seen["persistentkeepalive"]) print "PersistentKeepalive = 25"
       }
     }' "$1" >"$2"
 }
@@ -194,7 +239,7 @@ teardown() {
 
 alloy_installed() {
   # shellcheck disable=SC2016 # dpkg-query's format, not the shell's
-  [[ "$(dpkg-query -W -f '${Version}' alloy 2>/dev/null || true)" == "${ALLOY_VERSION}-1" ]]
+  [[ "$(dpkg-query -W -f '${db:Status-Status} ${Version}' alloy 2>/dev/null || true)" == "installed ${ALLOY_VERSION}-1" ]]
 }
 
 # Alloy's .deb: the release's own, checked against its pinned sha256. No
@@ -205,6 +250,7 @@ alloy_install() {
   curl -fsSL --retry 5 --max-time 600 -o "$deb" \
     "https://github.com/grafana/alloy/releases/download/v${ALLOY_VERSION}/alloy-${ALLOY_VERSION}-1.amd64.deb"
   echo "${ALLOY_DEB_SHA256}  ${deb}" | sha256sum -c --quiet -
+  dpkg_heal
   apt_get install -y --no-install-recommends "$deb"
 }
 
@@ -239,10 +285,9 @@ main() {
   guard
   log "metadata guard loaded"
 
-  if ! dpkg -s wireguard-tools jq >/dev/null 2>&1; then
-    apt_get update
-    apt_get install -y --no-install-recommends wireguard-tools jq
-  fi
+  installed wireguard-tools jq || apt_install --no-install-recommends wireguard-tools jq
+  # What scripts/bootstrap.sh waits for: from here a stop can't break apt.
+  log "settled"
   fetch_peer "${work}/peer.in"
   if [[ -z "$have_peer" ]]; then
     teardown

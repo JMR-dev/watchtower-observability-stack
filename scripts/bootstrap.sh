@@ -398,6 +398,28 @@ BASTION_SA="$(sa_email "$BASTION")"
 # deployer from the VM's token.
 retry_iam gcloud iam service-accounts add-iam-policy-binding "$BASTION_SA" --project "$GCP_PROJECT" \
   --member "serviceAccount:${DEPLOYER}" --role roles/iam.serviceAccountUser
+bastion_start() {
+  compute instances start "$BASTION" --zone "$BASTION_ZONE" ||
+    die "${BASTION} is stopped and did not start, so break glass is down: rerun this, which starts it first"
+}
+# Up, or on its way: a run that failed between a stop and its start leaves it
+# stopped with nothing below left to do, and nothing below starts it otherwise.
+bastion_up() {
+  local state=""
+  for _ in $(seq 30); do
+    state="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format 'value(status)')"
+    case "$state" in
+      RUNNING | PROVISIONING | STAGING) return 0 ;;
+      TERMINATED)
+        log "  ${BASTION} is stopped: starting it"
+        bastion_start
+        return 0
+        ;;
+      *) sleep 10 ;;
+    esac
+  done
+  die "${BASTION} stayed ${state} for 5 minutes, so break glass is down"
+}
 if ! exists instances describe "$BASTION" --zone "$BASTION_ZONE"; then
   compute instances create "$BASTION" --zone "$BASTION_ZONE" --machine-type e2-micro \
     --network-interface "subnet=${BASTION},private-network-ip=${BASTION_IP},no-address" \
@@ -412,6 +434,7 @@ fi
 # disk, so the SSH host key the stack pins stays; Secret Manager has no
 # narrower scope than cloud-platform, so IAM (one secret, read only) is the
 # fence.
+bastion_up
 current="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format json | jq -cS '{
   sa: (.serviceAccounts[0].email // ""), scopes: (.serviceAccounts[0].scopes // []),
   meta: ([.metadata.items[]? | select(.key | IN("startup-script", "watchtower-nftables", "watchtower-alloy"))] | from_entries)}')"
@@ -423,28 +446,30 @@ if [[ "$(jq -c .meta <<<"$current")" != "$(jq -c .meta <<<"$want")" ]]; then
   log "  updating ${BASTION} in place: stop, its metadata, start"
   compute instances stop "$BASTION" --zone "$BASTION_ZONE"
   compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata-from-file "$bastion_files"
-  compute instances start "$BASTION" --zone "$BASTION_ZONE"
+  bastion_start
 fi
 if [[ "$(jq -c 'del(.meta)' <<<"$current")" != "$(jq -c 'del(.meta)' <<<"$want")" ]]; then
   # Never on a VM that hasn't loaded the guard: its startup script does that
   # only after sshd is up, so on a first boot with the account a user could
   # reach the token for about a minute. Once it has, nftables.service loads
   # the guard before the network at every boot, so a line left in the serial
-  # output from an earlier boot says as much as a new one.
-  log "  waiting for ${BASTION} to load its metadata guard"
+  # output from an earlier boot says as much as a new one. And not during its
+  # first apt install, which the line comes after: a stop there can leave
+  # dpkg half done.
+  log "  waiting for ${BASTION} to load its metadata guard and finish apt"
   guarded=""
   for _ in $(seq 90); do
     if compute instances get-serial-port-output "$BASTION" --zone "$BASTION_ZONE" 2>/dev/null |
-      grep -cF 'bastion: metadata guard loaded' >/dev/null; then
+      grep -cF 'bastion: settled' >/dev/null; then
       guarded=1; break
     fi
     sleep 10
   done
-  [[ -n "$guarded" ]] || die "${BASTION} didn't report its metadata guard within 15 minutes, so it still runs as no one: see its serial output, gcloud compute instances reset it and rerun"
+  [[ -n "$guarded" ]] || die "${BASTION} didn't report 'bastion: settled' within 15 minutes, so it still runs as no one: see its serial output, gcloud compute instances reset it if it is running, and rerun (a rerun starts it if it is stopped)"
   log "  attaching ${BASTION}'s account: stop, its account, start"
   compute instances stop "$BASTION" --zone "$BASTION_ZONE"
   compute instances set-service-account "$BASTION" --zone "$BASTION_ZONE" --service-account "$BASTION_SA" --scopes cloud-platform
-  compute instances start "$BASTION" --zone "$BASTION_ZONE"
+  bastion_start
 fi
 
 # The deployer: OS Login on this VM (which includes looking it up), and an
@@ -456,6 +481,8 @@ retry_iam gcloud projects add-iam-policy-binding "$GCP_PROJECT" \
   --condition "expression=destination.ip == \"${BASTION_IP}\" && destination.port == 22,title=${BASTION}-ssh,description=IAP to the bastion's SSH and nothing else"
 
 nat_ip="$(compute addresses describe "${BASTION}-nat" --region "$BASTION_REGION" --format 'value(address)')"
+# Never "Done" with break glass down.
+bastion_up
 # The guest agent publishes the host keys once the VM has booted.
 host_key=""
 for _ in $(seq 1 36); do

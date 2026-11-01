@@ -168,7 +168,12 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     anyone on the bastion then is cut off.
   - The first time, or on a new bastion, that takes two restarts: bootstrap
     attaches the account only once the serial output shows a boot that
-    loaded the guard, so don't run it during a deploy with `ssh_via=bastion`.
+    loaded the guard and finished apt (`bastion: settled`), so don't run it
+    during a deploy with `ssh_via=bastion`.
+  - If a run fails between a stop and its start (no capacity in the zone, a
+    lost connection), the bastion stays stopped and break glass is down.
+    Rerun bootstrap, which starts a stopped bastion first, or
+    `gcloud compute instances start watchtower-bastion --zone us-east1-b`.
   - To replace it: `gcloud compute instances delete watchtower-bastion
     --zone us-east1-b`, rerun bootstrap, commit `Pulumi.prod.yaml`, and
     deploy. The NAT address is reserved and stays; the host key changes.

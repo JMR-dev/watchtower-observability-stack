@@ -288,7 +288,10 @@ bootstrap puts in the VM's metadata. The guard leaves DNS (53) and NTP
 (123) open to every uid, since Alloy, apt and chrony need them and they
 carry no credential, and refuses the rest at once (reject, not drop), so a
 lookup that hits it fails fast instead of hanging. `scripts/check-bastion.sh`
-tests it and the peer checks in Debian 13 (CI's `configs` job).
+tests it and the peer checks in Debian 13 (CI's `configs` job). The peer
+checks go past the contract's: the host reads a line as `wg` does and admits
+only the settings an agent needs, in their shape, so a config with a stray
+character in a key is refused here rather than echoed by `wg` into the journal.
 
 ### G2: gitea, the VM (after the Ansible cutover)
 

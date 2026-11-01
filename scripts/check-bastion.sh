@@ -3,10 +3,14 @@
 # 13, the bastion's own release, since the only other place they run is the
 # VM itself:
 #
-#   peer   startup.sh's check_peer on made-up configs (dummy keys): it takes
-#          wg-easy's agent config as it is, adds a missing MTU and keepalive,
-#          drops DNS, and refuses hooks, Table, FwMark, SaveConfig, more
-#          routes, a second peer or none, without echoing the config.
+#   peer   startup.sh's check_peer on made-up configs (all-zero dummy keys):
+#          it takes wg-easy's agent config as it is, adds a missing MTU and
+#          keepalive, drops DNS, writes the rest afresh, and refuses hooks,
+#          Table, FwMark, SaveConfig, more routes, a second peer or none, any
+#          other setting and any malformed key, however its whitespace hides
+#          them from all but wg, without echoing the config.
+#   apt    startup.sh recovers from an install a stop interrupted, and main
+#          prints what bootstrap.sh waits for only after apt is done.
 #   guard  nftables.conf checked, loaded twice (a reload, as at boot), and
 #          probed on 169.254.169.254 (on lo): root reaches it over HTTP,
 #          other uids are refused at once, and every uid still reaches its
@@ -32,6 +36,11 @@ cleanup() { [[ -z "$cid" ]] || "$rt" rm -f "$cid" >/dev/null 2>&1 || true; rm -r
 trap cleanup EXIT
 
 cp "${repo_root}/config/bastion/startup.sh" "${repo_root}/config/bastion/nftables.conf" "$work/"
+# The line bootstrap.sh stops the VM on, which run.sh checks main prints.
+grep -qF "grep -cF 'bastion: settled'" "${repo_root}/scripts/bootstrap.sh" || {
+  echo "FAIL  bootstrap.sh doesn't wait for 'bastion: settled'"
+  exit 1
+}
 
 cat >"${work}/probe.py" <<'PY'
 """serve [v6]: answers "ok" on the guard's ports, and with v6 on its IPv6
@@ -136,29 +145,32 @@ peer_case() {
   fi
 }
 
+# A dummy in a real key's shape: all zeros.
+key="$(printf 'A%.0s' {1..43})="
+
 # What wg-easy publishes for an agent (roles/edge/tasks/peer.yml pins it):
 # taken as it is.
-cat >peers/wg-easy.want <<'EOF'
+cat >peers/wg-easy.want <<EOF
 [Interface]
-PrivateKey = dummy-private-key
+PrivateKey = ${key}
 Address = 10.8.0.129/32
 MTU = 1380
 [Peer]
-PublicKey = dummy-public-key
-PresharedKey = dummy-preshared-key
+PublicKey = ${key}
+PresharedKey = ${key}
 AllowedIPs = 10.8.0.0/24
 PersistentKeepalive = 25
 Endpoint = vpn.watchtower.jasonmross.dev:51820
 EOF
-peer_case wg-easy accept <<'EOF'
+peer_case wg-easy accept <<EOF
 [Interface]
-PrivateKey = dummy-private-key
+PrivateKey = ${key}
 Address = 10.8.0.129/32
 MTU = 1380
 
 [Peer]
-PublicKey = dummy-public-key
-PresharedKey = dummy-preshared-key
+PublicKey = ${key}
+PresharedKey = ${key}
 AllowedIPs = 10.8.0.0/24
 PersistentKeepalive = 25
 Endpoint = vpn.watchtower.jasonmross.dev:51820
@@ -166,25 +178,25 @@ EOF
 
 # No MTU or keepalive, a DNS line, comments, CRLF and odd case and spacing:
 # normalised.
-cat >peers/normalised.want <<'EOF'
-[interface]
+cat >peers/normalised.want <<EOF
+[Interface]
 MTU = 1380
-privatekey=dummy-private-key
+PrivateKey = ${key}
 Address = 10.8.0.129/32
-[PEER]
+[Peer]
 PersistentKeepalive = 25
-PublicKey = dummy-public-key
-allowedips = 10.8.0.0/24
+PublicKey = ${key}
+AllowedIPs = 10.8.0.0/24
 Endpoint = 192.0.2.1:51820
 EOF
-peer_case normalised accept <<'EOF'
+peer_case normalised accept <<EOF
 # made by wg-easy
 [interface]
-privatekey=dummy-private-key
+privatekey=${key}
   Address = 10.8.0.129/32   # the agent half
 dns = 1.1.1.1
 [PEER]
-PublicKey = dummy-public-key
+PublicKey = ${key}
 allowedips = 10.8.0.0/24
 Endpoint = 192.0.2.1:51820
 EOF
@@ -195,13 +207,13 @@ else
   flunk "peer crlf: not normalised"
 fi
 
-good_interface='[Interface]
-PrivateKey = dummy-private-key
-Address = 10.8.0.129/32'
-good_peer='[Peer]
-PublicKey = dummy-public-key
+good_interface="[Interface]
+PrivateKey = ${key}
+Address = 10.8.0.129/32"
+good_peer="[Peer]
+PublicKey = ${key}
 AllowedIPs = 10.8.0.0/24
-Endpoint = 192.0.2.1:51820'
+Endpoint = 192.0.2.1:51820"
 for hook in PreUp PostUp PreDown PostDown; do
   printf '%s\n%s = touch /tmp/LEAKCHECK\n%s\n' "$good_interface" "$hook" "$good_peer" | peer_case "$hook" refuse
 done
@@ -221,6 +233,75 @@ printf 'MTU = 1380\n%s\n%s\n' "$good_interface" "$good_peer" | peer_case before-
 printf '%s\n%s\n[Extra]\nLEAKCHECK = 1\n' "$good_interface" "$good_peer" | peer_case unknown-section refuse
 printf '%s\n%s\nLEAKCHECK\n' "$good_interface" "$good_peer" | peer_case not-key-value refuse
 printf '' | peer_case empty refuse
+
+# wg deletes all whitespace from a line, and wg-quick trims any: what either
+# would run or route must not get past as some other key.
+i=0
+for shape in 'PreUp\f' 'PreUp\v' 'PreUp\r' 'Pre Up' 'Post\tUp' 'PostUp\xe2\x80\x83' '\xe2\x80\x83PostUp' 'PostUp\xc2\xa0'; do
+  i=$((i + 1))
+  printf "%s\n${shape} = touch /tmp/LEAKCHECK\n%s\n" "$good_interface" "$good_peer" | peer_case "spaced-hook-${i}" refuse
+done
+for shape in 'Table\f = off' 'SaveConfig\f = true' 'Fw Mark = 51820' 'Save Config = true' 'ListenPort = 51820'; do
+  i=$((i + 1))
+  printf "%s\n${shape}\n%s\n" "$good_interface" "$good_peer" | peer_case "spaced-interface-${i}" refuse
+done
+for shape in 'Allowed IPs = 0.0.0.0/0' 'AllowedIPs\f = 0.0.0.0/0' 'Allowed\tIPs = 169.254.169.254/32'; do
+  i=$((i + 1))
+  printf "%s\n[Peer]\nPublicKey = %s\n${shape}\nEndpoint = 192.0.2.1:51820\n" "$good_interface" "$key" | peer_case "spaced-route-${i}" refuse
+done
+# ... or be left for wg to echo: a key it can't read, or under another name.
+for bad in dummy-private-key-LEAKCHECK "${key%?}LEAKCHECK=" "${key:1}" "${key%?}"; do
+  i=$((i + 1))
+  printf '%s\n%s\n' "${good_interface/${key}/${bad}}" "$good_peer" | peer_case "bad-private-key-${i}" refuse
+done
+printf '%s\n%s\n' "$good_interface" "${good_peer/${key}/dummy-public-key-LEAKCHECK}" | peer_case bad-public-key refuse
+printf '%s\n%s\nPresharedKey = dummy-preshared-key-LEAKCHECK\n' "$good_interface" "$good_peer" | peer_case bad-preshared-key refuse
+printf '[Interface]\nPrivKey = dummy-private-key-LEAKCHECK\nAddress = 10.8.0.129/32\n%s\n' "$good_peer" | peer_case misnamed-key refuse
+printf '%s\nLEAKCHECK = 1\n%s\n' "$good_interface" "$good_peer" | peer_case unknown-setting refuse
+printf '%s\nPublicKey = %s\n%s\n' "$good_interface" "$key" "$good_peer" | peer_case key-in-the-wrong-section refuse
+printf '%s\nPrivateKey = %s\n%s\n' "$good_interface" "$key" "$good_peer" | peer_case two-private-keys refuse
+printf '%s\n%s\nEndpoint = 192.0.2.2:51820\n' "$good_interface" "$good_peer" | peer_case two-endpoints refuse
+printf '[Interface]\nAddress = 10.8.0.129/32\n%s\n' "$good_peer" | peer_case no-private-key refuse
+printf '[Interface]\nPrivateKey = %s\nAddress = 169.254.169.254/32\n%s\n' "$key" "$good_peer" | peer_case address-off-the-tunnel refuse
+printf '[Interface]\nPrivateKey = %s\nAddress = 10.8.0.129/24\n%s\n' "$key" "$good_peer" | peer_case address-a-whole-network refuse
+printf '%s\nMTU = LEAKCHECK\n%s\n' "$good_interface" "$good_peer" | peer_case bad-mtu refuse
+printf '%s\n%s\nPersistentKeepalive = LEAKCHECK\n' "$good_interface" "$good_peer" | peer_case bad-keepalive refuse
+printf '%s\n%s\n' "$good_interface" "${good_peer/192.0.2.1:51820/LEAKCHECK}" | peer_case bad-endpoint refuse
+# Whitespace wg deletes in a setting that is fine: written out clean.
+printf '[Interface]\nPrivateKey = %s\nAdd\fress =\t10.8.0. 129/32\n%s\n' "$key" "$good_peer" | peer_case spaced-address accept
+if grep -qx 'Address = 10.8.0.129/32' peers/spaced-address.out; then pass "peer spaced-address: written out clean"; else flunk "peer spaced-address: not written out clean"; fi
+
+# --- apt: what a stop leaves, and what bootstrap.sh waits for ------------------
+# An unreplayed entry in dpkg's journal, which is what an install killed in
+# the middle of its unpacking leaves.
+touch /var/lib/dpkg/updates/0000
+if apt_get install -y jq >/dev/null 2>&1; then
+  flunk "apt: apt_get took an interrupted dpkg; the next check shows nothing"
+else
+  pass "apt: an interrupted dpkg stops apt_get"
+fi
+if apt_install --no-install-recommends jq >/dev/null 2>&1 && installed jq; then
+  pass "apt: apt_install heals it and installs"
+else
+  flunk "apt: apt_install didn't heal an interrupted dpkg"
+fi
+if installed jq no-such-package; then flunk "apt: installed says yes to a missing package"; else pass "apt: installed says no to a missing package"; fi
+
+# main, with everything that touches the system stubbed: the order is the test.
+main_order="$(
+  updates() { :; }
+  guard() { echo guard; }
+  installed() { return 1; }
+  apt_install() { echo apt; }
+  fetch_peer() { have_peer=""; }
+  teardown() { echo teardown; }
+  main 2>/dev/null | tr '\n' ' '
+)"
+if [[ "$main_order" == "guard bastion: metadata guard loaded apt bastion: settled teardown " ]]; then
+  pass "apt: main says settled only after the guard and apt"
+else
+  flunk "apt: main's order is: ${main_order}"
+fi
 set -e
 
 # --- guard: nftables.conf ----------------------------------------------------
