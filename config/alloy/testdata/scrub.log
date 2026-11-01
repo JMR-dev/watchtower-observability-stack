@@ -201,4 +201,7 @@ keep:221 ssn="078051122" cvv='fakeLEAK382' SSN: "078051123"
 drop:222 form password=&fakeLEAK383
 same:143 app[1]: processname=alloy classname=Foo pid=3
 same:144 app[1]: successNumber: 3 accessNumber=4
+keep:225 {"a":"{\"msg\":\"[data \\\"Matched Data: fakeLEAK390\\\"] [severity \\\"critical\\\"]\"}"}
+keep:226 {"a":"{\"msg\":\"[msg_match_1 \\\"x\\\"] [data_match_1 \\\"Matched Data: fakeLEAK391\\\"]\"}"}
+drop:227 {"a":"{\"msg\":\"[data \\\"Matched Data: fakeLEAK392\\\"] and no severity\"}"}
 same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series

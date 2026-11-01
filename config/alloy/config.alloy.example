@@ -101,21 +101,21 @@ loki.process "scrub" {
 	// the greedy match ends at the real field even when the data holds a
 	// lookalike. A rule with several matches adds [msg_match_N "..."]
 	// [data_match_N "..."] at the end of the line. Inside Caddy's JSON the
-	// quotes are \".
+	// quotes are \", and more backslashes in JSON inside that.
 	stage.replace {
-		expression = `(\[data \\?".*\\?"\] ?)\[severity `
+		expression = `(\[data \\*".*\\*"\] ?)\[severity `
 		replace    = ""
 	}
 
 	stage.replace {
-		expression = `(\[msg_match_\d+ \\?".*\\?"\])`
+		expression = `(\[msg_match_\d+ \\*".*\\*"\])`
 		replace    = ""
 	}
 
 	// Matched data in a shape those two didn't expect: drop the line.
 	// fail2ban reads the journal on the host, so a ban doesn't depend on it.
 	stage.drop {
-		expression          = `\[data(?:_match_\d+)? \\?"`
+		expression          = `\[data(?:_match_\d+)? \\*"`
 		drop_counter_reason = "waf_data"
 	}
 
