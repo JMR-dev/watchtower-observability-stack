@@ -163,4 +163,16 @@ keep:185 sudo[1]: root : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/usr/bin/my
 keep:186 {"Cmd":["app","--password","fakeLEAK354","--api-key","a fakeLEAK355"]}
 keep:187 headers=[('Cookie', 'sid=fakeLEAK356'), ('X-Api-Key', 'fakeLEAK357'), ('Authorization', 'Basic fakeLEAK358')]
 keep:188 {"msg":"run --token \"a fakeLEAK359\" now"}
+keep:190 authorization_header: Basic fakeLEAK360 and more
+keep:191 cookie_value=fakeLEAK361 and more
+keep:192 Cookie2: sid=fakeLEAK362
+keep:193 x-cookie-id: fakeLEAK363
+keep:194 header was Basic fakeLEAK364Zm9vOmJhcg== rejected
+keep:195 Authorization Basic fakeLEAK365Zm9vOmJhcg==
+keep:196 dsn postgres://app:ab/fakeLEAK366@db:5432/app and postgres://app:p@fakeLEAK367@db:5432/app
+keep:197 app:fakeLEAK368@tcp(db.example.org:3306)/app and app:fakeLEAK369@unix(/run/db.sock)/app
+keep:198 https://bob@example.com:fakeLEAK370@git.internal/x.git
+same:131 sysctl: net.ipv4.tcp_syncookies = 1
+same:132 sshd[12]: Basic authentication failed for user root
+same:133 {"uri":"http://localhost:8080/x","note":"a@b"}
 same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series

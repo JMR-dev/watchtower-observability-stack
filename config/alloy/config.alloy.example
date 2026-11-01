@@ -130,6 +130,13 @@ loki.process "scrub" {
 		replace    = "[REDACTED-CREDENTIAL]"
 	}
 
+	// Basic credentials: a value with a digit or base64's + / = in it, so
+	// `basic authentication failed` stays. All letters gets through.
+	stage.replace {
+		expression = `(?i)\bbasic\s+([A-Za-z._~-]*[0-9+/=][A-Za-z0-9._~+/=-]*)`
+		replace    = "[REDACTED-CREDENTIAL]"
+	}
+
 	// SSH key fingerprints, which name a person's key. Upper case only: a
 	// lower-case sha256: is an image digest.
 	stage.replace {
@@ -182,14 +189,15 @@ loki.process "scrub" {
 	}
 
 	// Authorization and cookie headers as `Name: value`, under any name that
-	// holds one, to the end of the line.
+	// holds one, to the end of the line. The kernel's tcp_syncookies is no
+	// cookie: that alternative has no capture group, so it hides nothing.
 	stage.replace {
-		expression = `(?i)[\w.-]*authorization\s*[:=]\s*([^\r\n]+)`
+		expression = `(?i)[\w.-]*authorization[\w.-]*\s*[:=]\s*([^\r\n]+)`
 		replace    = "[REDACTED-CREDENTIAL]"
 	}
 
 	stage.replace {
-		expression = `(?i)[\w.-]*cookies?\s*[:=]\s*([^\r\n]+)`
+		expression = `(?i)[\w.-]*syncookies\s*[:=]|[\w.-]*cookie[\w.-]*\s*[:=]\s*([^\r\n]+)`
 		replace    = "[REDACTED-COOKIE]"
 	}
 
@@ -249,9 +257,18 @@ loki.process "scrub" {
 		replace    = "[REDACTED-SECRET]"
 	}
 
-	// Passwords in connection strings: scheme://user:PASSWORD@host.
+	// Passwords in connection strings: scheme://user:PASSWORD@host, up to the
+	// last @ before a blank or quote, since a password holding / or @ is what
+	// makes a driver fail and log its URL. A path with an @ after a port goes
+	// too.
 	stage.replace {
-		expression = `(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]*:([^@\s/]+)@`
+		expression = `(?i)\b[a-z][a-z0-9+.-]*://[^/\s:]*:([^\s"']+)@`
+		replace    = "[REDACTED-SECRET]"
+	}
+
+	// The same in Go's MySQL form, with no scheme: user:PASSWORD@tcp(host).
+	stage.replace {
+		expression = `(?i)[\w.-]*:([^\s"']+)@(?:tcp|unix)\(`
 		replace    = "[REDACTED-SECRET]"
 	}
 
