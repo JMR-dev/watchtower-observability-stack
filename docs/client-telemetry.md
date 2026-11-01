@@ -51,8 +51,8 @@ Alerts and a fleet dashboard (W4, here) come last, for verified hosts only.
 | State | Alloy's storage path on persistent disk (a named volume, or `StateDirectory=alloy`): the journal position and the remote-write WAL survive restarts |
 | WireGuard | Interface `wg-watchtower`, unit `wg-quick@wg-watchtower`, config `/etc/wireguard/wg-watchtower.conf`, root 0600 |
 | Peer config | From Secret Manager `projects/watchtower-observe/secrets/wireguard-<peer>-peer/versions/latest`, read cross-project by the one identity granted it (below). **Never printed**: no `set -x`, `no_log: true`, and nothing on boot output (the blog's and Gitea's reach Cloud Logging) |
-| Peer checks | watchtower's deploy resets each agent's hooks, DNS and routes on every run and refuses to publish a config that has any; check again on the host, since the config runs there as root. Refuse the config unless it has exactly one `[Peer]` with an `Endpoint` and `AllowedIPs` exactly `10.8.0.0/24`. Refuse any `PreUp`, `PostUp`, `PreDown`, `PostDown`, `Table`, `FwMark` or `SaveConfig`. Then drop any `DNS =` line, and set `PersistentKeepalive = 25` and `MTU = 1380` if missing (watchtower sets both). A full tunnel would send the metadata server's traffic to the proxy and break the VM's credentials, image pulls and DNS-01 |
-| No peer | A missing or empty secret is a warning, never a failed deploy: stop and disable the tunnel and Alloy and remove their config |
+| Peer checks | watchtower's deploy resets each agent's hooks, DNS and routes on every run and refuses to publish a config that has any; check again on the host, since the config runs there as root. Judge each line as wg reads it: cut any `#` comment, remove all whitespace, and take keys in any case, since wg and wg-quick accept `Allowed IPs` and `Fw Mark`. Refuse anything but printable ASCII, tabs and newlines. Allow-list the keys (`PrivateKey`, `Address`, `MTU`, `DNS`, `PublicKey`, `PresharedKey`, `AllowedIPs`, `PersistentKeepalive`, `Endpoint`) and refuse any other, so every hook, `Table`, `FwMark` and `SaveConfig` goes. Refuse the config unless it has exactly one `[Interface]` and one `[Peer]`, with an `Endpoint` and one `AllowedIPs`, exactly `10.8.0.0/24`. Then write the config afresh from the checked values, never the fetched text: no `DNS`, `PersistentKeepalive = 25`, `MTU = 1380` (watchtower sets both). A full tunnel would send the metadata server's traffic to the proxy and break the VM's credentials, image pulls and DNS-01 |
+| No peer | Only a missing or empty secret takes telemetry down: a warning, never a failed deploy, then stop and disable the tunnel and Alloy and remove their config. Any other fetch error (network, 5xx, token, `PERMISSION_DENIED`) warns and leaves the tunnel and Alloy running as they are. To revoke a peer, delete its client in wg-easy |
 | Labels | Everything: `service`, `host`, `env` (`production`, or `disposable`). Logs also `unit`, `container`, `level`. **Never** a label from an IP, user, email, URL path, UUID or pod name |
 | Metrics | `prometheus.exporter.unix` (`job="integrations/unix"`), `prometheus.exporter.self` (`job="alloy"`), Caddy's metrics (`job="caddy"`), a blackbox probe of the public health URL (`job="blackbox"`); every 60 s |
 | Caddy metrics | The global `metrics` option and a site `:2020 { metrics }` bound to loopback (`bind 127.0.0.1` with host networking, `PublishPort=127.0.0.1:2020:2020` in bridge mode). **Never publish the admin API (:2019)** |
@@ -74,26 +74,37 @@ Nothing on watchtower scrubs. What a host sends is stored.
   and is fixed in S1.
 - Copy the example's scrub block whole, then add the service's own rules
   inside the `// scrub: begin` and `// scrub: end` markers. Secrets are
-  caught by key name (anything containing password, secret, token, api key,
-  private key, session or credential, with any prefix), in JSON, `key=value`
-  and `key: value` forms, quoted or not; Authorization and cookie headers
-  whole; connection-string passwords; emails, also `%40`-encoded; IPv4,
-  IPv6 and MAC addresses; OS Login names; UUIDs; card numbers unbroken or
-  in dashed fours. Not caught: phone numbers, and card numbers typed with
-  spaces (a port list looks the same).
+  caught by key name (anything containing password, passphrase, secret,
+  token, api key, private or preshared key, session or credential, with any
+  prefix), in JSON, `key=value` and `key: value` forms, quoted or not; a
+  JSON value whole, as a string with escaped quotes, a number, an array or
+  an object, and the same in a JSON string quoted inside a line; a bare value
+  up to the next blank, `&` or closing quote; `pass`, `otp` and `auth` as a
+  whole key or its last part, in JSON or with `=`; Authorization and cookie
+  headers whole, under any name that holds one; connection-string passwords;
+  emails, also `%40`-encoded; IPv4, IPv6 and MAC addresses; OS Login names;
+  UUIDs; SSH key fingerprints; the lines wg's errors quote; card numbers
+  unbroken or in dashed fours. Not caught: phone numbers, card numbers typed
+  with spaces (a port list looks the same), and `pass:`, `otp:` or `auth:`
+  outside JSON (`auth: ok` looks the same). systemd's `session-N.scope:` and
+  sudo's `TTY=… ; PWD=/… ;` are left alone: a unit and a directory.
 - Drop conmon's split lines: every piece of a long line but the last has
   `__journal_container_partial_message="true"` (the example's relabel rule).
-  In a Caddy pipeline, also `stage.json` with `drop_malformed = true` on
-  `container="caddy"`, so the last piece of a split JSON line can't ship
-  either, and strip `[data "…"]` from the WAF rule-match lines you keep.
+  The block's first stage drops any line on `container="caddy"` that isn't
+  JSON, so the last piece of a split line can't ship either. It also strips
+  `[data "…"]` and `[msg_match_N …] [data_match_N …]` from WAF lines, and
+  drops a line where matched data survives.
 - IPs are replaced whole. Triage by IP stays on the host (journald,
   fail2ban).
 - **Fixture test:** `scripts/check-alloy-scrub.sh <config> <fixture>` runs the
   scrub block in Alloy over tagged lines (`keep:`, `same:`, `drop:`) and
-  fails on any line of `<fixture>.forbidden` in the output. Each service's
-  fixture holds its own real-shaped lines, made up: a Caddy access line, a
-  WAF line, a Coraza audit record over 8 KiB (dropped), an sshd and sudo
-  line with an OS Login name, and the service's own.
+  fails on any line of `<fixture>.forbidden` in the output. If there is a
+  `<fixture>.caddy.log`, it runs too, under `container="caddy"`, with each
+  line's tag inside it (`keep:c<n>`, `drop:c<n>`), so the JSON check is really
+  exercised. Each service's fixture holds its own real-shaped lines, made
+  up: a Caddy access line, a WAF line, a Coraza audit record over 8 KiB
+  (dropped), an sshd and sudo line with an OS Login name, and the service's
+  own.
 
 ### Per service
 
@@ -335,10 +346,17 @@ host `H`:
 {host="H"} |~ "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[a-z]{2,}"
 {host="H"} |= "eyJ"
 {host="H"} |= "\"transaction\""
-{host="H"} |~ "(?i)\"(cookie|authorization)\""
+{host="H"} |~ `(?i)\\*"[\w-]*(cookie|authorization)[\w-]*\\*"\s*:\s*\[?\s*\\*"`
 {host="H"} |~ "_(gmail|googlemail)_com"
-{service="silverbullet"} |~ "/\\.fs/[^<]"
+{host="H"} |~ "\\b(SHA256|MD5):[A-Za-z0-9+/]"
+{service="silverbullet"} |~ `/\.fs/[^<"\\]`
+{service="silverbullet"} |~ `"uri":"/([^.<"]|\.(fs|revisions|proxy)/[^<"])|\[uri \\"/([^.<\\]|\.(fs|revisions|proxy)/[^<\\])|[?&]from=[^<]|Proxying to [^<]`
 ```
+
+The cookie and authorization query looks for a value that survived: the scrub
+keeps the key and replaces all of its value, so the key alone is no hit. The
+`/.fs/` queries skip the listing route (`/.fs/` and nothing after it), which
+names no page.
 
 Vaultwarden, on disposable first: fail a login with a made-up email, and
 type a made-up "password" into the username field; neither appears, nor
