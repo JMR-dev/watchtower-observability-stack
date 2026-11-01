@@ -172,11 +172,11 @@ loki.process "scrub" {
 
 	// Secrets by key name (DB_PASSWORD, X-API-Key, "session", privateKey,
 	// "password hash", user[token], ...), quoted with " ' or a backtick. pass,
-	// otp, auth and sid are the whole name or its last part (db_pass, x-auth,
-	// dbPass, oauth2), never part of a word (bypass, authenticated), though
-	// byPass goes too.
+	// otp, auth, sid, ssn, cvv and cvc are the whole name or its last part
+	// (db_pass, x-auth, dbPass, oauth2), never part of a word (bypass,
+	// authenticated), though byPass goes too.
 	stage.replace {
-		expression = `(?i)["'\x60](?:[\w\s.\[\]-]*(?:password|passwd|passphrase|pwd|secret|token|bearer|api[\s._-]?key|private[\s._-]?key|preshared[_-]?key|session|credential|csrf|pass[_-]?(?:phrase|word|code|key|hash)|(?:t?otp|auth|mfa)[_-]?(?:code|key)|(?:access|signing|encryption|ssh)[_-]?key)[\w\s.\[\]-]*|(?:[\w\s.\[\]-]*[_.\s\[-])?(?:pass|t?otp|o?auth|sid)\d*\]?|[\w\s.\[\]-]*[a-z0-9](?-i:Pass|Otp|Totp|Auth|OAuth|Sid)\d*)["'\x60]\s*(?:=>|:=|==|[:=])\s*(?:(true|false|null|-?\d[\d.eE+-]*)(?:[,}\]\s]|$)|(\[(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"'\[\]])*\]|[^"'\[\]])*\]|\{(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\{(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"'{}])*\}|[^"'{}])*\}|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\w+\(.*|[^\s,}\]\[{"'\\](?:\\.|[^\s\\])*|.*))`
+		expression = `(?i)["'\x60](?:[\w\s.\[\]-]*(?:password|passwd|passphrase|pwd|secret|token|bearer|api[\s._-]?key|private[\s._-]?key|preshared[_-]?key|session|credential|csrf|pass[_-]?(?:phrase|word|code|key|hash)|(?:t?otp|auth|mfa)[_-]?(?:code|key)|(?:access|signing|encryption|ssh)[_-]?key)[\w\s.\[\]-]*|(?:[\w\s.\[\]-]*[_.\s\[-])?(?:pass|t?otp|o?auth|sid|ssn|cvv|cvc)\d*\]?|[\w\s.\[\]-]*[a-z0-9](?-i:Pass|Otp|Totp|Auth|OAuth|Sid)\d*)["'\x60]\s*(?:=>|:=|==|[:=])\s*(?:(true|false|null|-?\d[\d.eE+-]*)(?:[,}\]\s]|$)|(\[(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"'\[\]])*\]|[^"'\[\]])*\]|\{(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\{(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"'{}])*\}|[^"'{}])*\}|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\w+\(.*|[^\s,}\]\[{"'\\](?:\\.|[^\s\\])*|.*))`
 		replace    = "[REDACTED-SECRET]"
 	}
 
@@ -184,7 +184,7 @@ loki.process "scrub" {
 	// \" for its quotes (\' for Python's). Deeper quoting or nesting than that
 	// goes to the end of the line.
 	stage.replace {
-		expression = `(?i)\\+["'](?:[\w\s.\[\]-]*(?:password|passwd|passphrase|pwd|secret|token|bearer|api[\s._-]?key|private[\s._-]?key|preshared[_-]?key|session|credential|csrf|pass[_-]?(?:phrase|word|code|key|hash)|(?:t?otp|auth|mfa)[_-]?(?:code|key)|(?:access|signing|encryption|ssh)[_-]?key|authorization|cookie)[\w\s.\[\]-]*|(?:[\w\s.\[\]-]*[_.\s\[-])?(?:pass|t?otp|o?auth|sid)\d*\]?|[\w\s.\[\]-]*[a-z0-9](?-i:Pass|Otp|Totp|Auth|OAuth|Sid)\d*)\\+["']\s*(?:=>|:=|==|[:=])\s*(?:(true|false|null|-?\d[\d.eE+-]*)(?:[,}\]\s]|$)|(\[(?:\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|[^"\\\[\]])*\]|\{(?:\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|[^"\\{}])*\}|\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|\\'(?:\\\\\\'|\\\\|\\[^'\\]|[^'\\])*\\'|\w+\(.*|[^\s,}\]\[{"'\\](?:\\.|[^\s\\])*|.*))`
+		expression = `(?i)\\+["'](?:[\w\s.\[\]-]*(?:password|passwd|passphrase|pwd|secret|token|bearer|api[\s._-]?key|private[\s._-]?key|preshared[_-]?key|session|credential|csrf|pass[_-]?(?:phrase|word|code|key|hash)|(?:t?otp|auth|mfa)[_-]?(?:code|key)|(?:access|signing|encryption|ssh)[_-]?key|authorization|cookie)[\w\s.\[\]-]*|(?:[\w\s.\[\]-]*[_.\s\[-])?(?:pass|t?otp|o?auth|sid|ssn|cvv|cvc)\d*\]?|[\w\s.\[\]-]*[a-z0-9](?-i:Pass|Otp|Totp|Auth|OAuth|Sid)\d*)\\+["']\s*(?:=>|:=|==|[:=])\s*(?:(true|false|null|-?\d[\d.eE+-]*)(?:[,}\]\s]|$)|(\[(?:\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|[^"\\\[\]])*\]|\{(?:\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|[^"\\{}])*\}|\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|\\'(?:\\\\\\'|\\\\|\\[^'\\]|[^'\\])*\\'|\w+\(.*|[^\s,}\]\[{"'\\](?:\\.|[^\s\\])*|.*))`
 		replace    = "[REDACTED-SECRET]"
 	}
 
@@ -209,7 +209,8 @@ loki.process "scrub" {
 	// wrapper (password: Some("x"), token: [ "x" ]) goes to the end of the line.
 	//
 	// A name may have brackets on it (user[password]=x, %5D when encoded) or a
-	// word after it (Session ID:, Password Hash:).
+	// word after it (Session ID:, Password Hash:). ssn, cvv and cvc only as a
+	// whole name or its last part (card_cvc), never in processname=.
 	//
 	// The first five alternatives have no capture group, so they hide nothing:
 	// they match first and take these out of the rule's reach. systemd's
@@ -218,7 +219,7 @@ loki.process "scrub" {
 	// program and its pid, and an earlier rule's marker is no name. Any other
 	// PWD is a password's short name.
 	stage.replace {
-		expression = `(?i)session-\w+\.scope:|(?-i:\bTTY=[^\s;=:]+ ; PWD=/[^\s;=:]* ;)|(?-i:\bStarting session:)|\[REDACTED-[\w-]+\]|[\w.-]+\[\d+\]:|[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|bearer|api[\s._-]?key|private[\s._-]?key|preshared[_-]?key|session|credential|csrf|pass[_-]?(?:phrase|word|code|key|hash)|(?:t?otp|auth|mfa)[_-]?(?:code|key)|(?:access|signing|encryption|ssh)[_-]?key)(?:[\w.\[\]-]|%5[Dd])*(?:\s+(?:id|hash|key))?\s*(?:=>|:=|==|%(?:25)*3[Dd]|=|:)\s*("(?:[^"\\]|\\.)*"|".*|'(?:[^'\\]|\\.)*'|'.*|\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|\\".*|[\[{(].*|\w+\(.*|(?:\\.|[^\s&"'\\])(?:\\.|[^\s&"\\])*)`
+		expression = `(?i)session-\w+\.scope:|(?-i:\bTTY=[^\s;=:]+ ; PWD=/[^\s;=:]* ;)|(?-i:\bStarting session:)|\[REDACTED-[\w-]+\]|[\w.-]+\[\d+\]:|(?:[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|bearer|api[\s._-]?key|private[\s._-]?key|preshared[_-]?key|session|credential|csrf|pass[_-]?(?:phrase|word|code|key|hash)|(?:t?otp|auth|mfa)[_-]?(?:code|key)|(?:access|signing|encryption|ssh)[_-]?key)(?:[\w.\[\]-]|%5[Dd])*(?:\s+(?:id|hash|key))?|(?:^|[^a-z0-9])(?:ssn|cvv|cvc)\d*)\s*(?:=>|:=|==|%(?:25)*3[Dd]|=|:)\s*("(?:[^"\\]|\\.)*"|".*|'(?:[^'\\]|\\.)*'|'.*|\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|\\".*|[\[{(].*|\w+\(.*|(?:\\.|[^\s&"'\\])(?:\\.|[^\s&"\\])*)`
 		replace    = "[REDACTED-SECRET]"
 	}
 
@@ -340,7 +341,8 @@ loki.process "scrub" {
 
 	// Card numbers: 15 or 16 digits starting 2 to 6, unbroken or in dashed
 	// fours. Never an epoch time (they start with 1 until 2033) or a list of
-	// ports; a number typed with spaces gets through.
+	// ports; a number typed with spaces, another length or dashed Amex groups
+	// get through.
 	stage.replace {
 		expression = `\b([2-6]\d{14,15}|[2-6]\d{3}(?:-\d{4}){3})\b`
 		replace    = "[REDACTED-PAN]"
@@ -354,7 +356,7 @@ loki.process "scrub" {
 
 	// A secret in a shape none of the rules caught: drop the line.
 	stage.drop {
-		expression          = `(?i)[\w.-]*(?:password|passwd|secret|ssn|cvv|cvc)[\w.-]*\s*[:=]\s*[^\s\["'=>:]`
+		expression          = `(?i)[\w.-]*(?:password|passwd|secret)[\w.-]*\s*[:=]\s*[^\s\["'=>:]`
 		drop_counter_reason = "secret"
 	}
 }

@@ -14,7 +14,7 @@ keep:13 card 4111111111111111 and 5500-0000-0000-0004 and 378282246310005
 keep:14 cipher 3f2504e0-4f89-41d3-9a0c-0305e82c3301 for user 7c9e6679-7425-40de-944b-e07fc1f90ae7
 keep:15 jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl here # nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token
 drop:16 {"transaction":{"client_ip":"192.0.2.66","request":{"headers":{"cookie":["x"]}}}}
-drop:17 config dump: cvv=123 ssn: 078051120
+keep:17 config dump: cvv=123 ssn: 078051120
 keep:20 env DB_PASSWORD=fakeLEAK20 POSTGRES_PASSWORD=fakeLEAK21 SMTP_PASSWORD=fakeLEAK22
 keep:21 {"db_password":"fakeLEAK23","smtp_password":"fakeLEAK24"}
 keep:22 login password="fakeLEAK25" user=bob
@@ -196,4 +196,9 @@ same:139 systemd[1]: Started getty@tty1.service - Getty on tty1.
 same:140 systemd[1]: Finished backup@daily.timer.
 same:141 pnpm@9.15.4 and node@22.3.0 installed
 same:142 sshd[12]: Starting session: shell on pts/0 for root port 51515 id 0
+keep:220 {"ssn":"078051121","cvv":"fakeLEAK380","card_cvc":"fakeLEAK381"}
+keep:221 ssn="078051122" cvv='fakeLEAK382' SSN: "078051123"
+drop:222 form password=&fakeLEAK383
+same:143 app[1]: processname=alloy classname=Foo pid=3
+same:144 app[1]: successNumber: 3 accessNumber=4
 same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series
