@@ -262,7 +262,13 @@ podman exec patroni patronictl -c /etc/patroni/patroni.yml switchover --leader <
 A dead primary fails over in about 30 seconds: etcd's leader key expires
 and a replica no more than 1 MB behind takes over. The Grafanas reconnect to
 whichever node accepts writes (`target_session_attrs=read-write`). A member
-that comes back behind is rewound or recloned by Patroni.
+that comes back behind is rewound by Patroni (`pg_rewind`, as `postgres`). One
+it can't rewind stays in `start failed`, and every deploy stops at it, until
+you reclone it from the leader:
+
+```bash
+podman exec patroni patronictl -c /etc/patroni/patroni.yml reinit watchtower <node> --force
+```
 
 ## Grafana database backups
 

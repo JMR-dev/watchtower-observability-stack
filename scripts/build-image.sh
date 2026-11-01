@@ -103,6 +103,7 @@ case "$what" in
     # no build can; only those complaints are ignored, any other fails.
     out="$(docker run --rm -i --network none \
       -e PATRONI_RESTAPI_PASSWORD=x -e PATRONI_SUPERUSER_PASSWORD=x -e PATRONI_REPLICATION_PASSWORD=x \
+      -e PATRONI_REWIND_PASSWORD=x \
       --entrypoint sh "$ref" -c 'cat >/tmp/patroni.yml && exec patroni --validate-config /tmp/patroni.yml' \
       <"${render}/watchtower-1/patroni/patroni.yml" 2>&1)" || true
     problems="$(grep -v ' is not reachable$' <<<"$out" || true)"
