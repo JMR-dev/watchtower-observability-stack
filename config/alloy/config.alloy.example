@@ -211,13 +211,14 @@ loki.process "scrub" {
 	// A name may have brackets on it (user[password]=x, %5D when encoded) or a
 	// word after it (Session ID:, Password Hash:).
 	//
-	// The first four alternatives have no capture group, so they hide nothing:
+	// The first five alternatives have no capture group, so they hide nothing:
 	// they match first and take these out of the rule's reach. systemd's
 	// `session-3.scope: Deactivated` names a unit, sudo's `TTY=x ; PWD=/y ;` a
-	// directory, `sshd-session[12]: ` a program and its pid, and an earlier
-	// rule's marker is no name. Any other PWD is a password's short name.
+	// directory, `Starting session: shell` is sshd's, `sshd-session[12]: ` a
+	// program and its pid, and an earlier rule's marker is no name. Any other
+	// PWD is a password's short name.
 	stage.replace {
-		expression = `(?i)session-\w+\.scope:|(?-i:\bTTY=[^\s;=:]+ ; PWD=/[^\s;=:]* ;)|\[REDACTED-[\w-]+\]|[\w.-]+\[\d+\]:|[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|bearer|api[\s._-]?key|private[\s._-]?key|preshared[_-]?key|session|credential|csrf|pass[_-]?(?:phrase|word|code|key|hash)|(?:t?otp|auth|mfa)[_-]?(?:code|key)|(?:access|signing|encryption|ssh)[_-]?key)(?:[\w.\[\]-]|%5[Dd])*(?:\s+(?:id|hash|key))?\s*(?:=>|:=|==|%(?:25)*3[Dd]|=|:)\s*("(?:[^"\\]|\\.)*"|".*|'(?:[^'\\]|\\.)*'|'.*|\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|\\".*|[\[{(].*|\w+\(.*|(?:\\.|[^\s&"'\\])(?:\\.|[^\s&"\\])*)`
+		expression = `(?i)session-\w+\.scope:|(?-i:\bTTY=[^\s;=:]+ ; PWD=/[^\s;=:]* ;)|(?-i:\bStarting session:)|\[REDACTED-[\w-]+\]|[\w.-]+\[\d+\]:|[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|bearer|api[\s._-]?key|private[\s._-]?key|preshared[_-]?key|session|credential|csrf|pass[_-]?(?:phrase|word|code|key|hash)|(?:t?otp|auth|mfa)[_-]?(?:code|key)|(?:access|signing|encryption|ssh)[_-]?key)(?:[\w.\[\]-]|%5[Dd])*(?:\s+(?:id|hash|key))?\s*(?:=>|:=|==|%(?:25)*3[Dd]|=|:)\s*("(?:[^"\\]|\\.)*"|".*|'(?:[^'\\]|\\.)*'|'.*|\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|\\".*|[\[{(].*|\w+\(.*|(?:\\.|[^\s&"'\\])(?:\\.|[^\s&"\\])*)`
 		replace    = "[REDACTED-SECRET]"
 	}
 
@@ -272,9 +273,12 @@ loki.process "scrub" {
 		replace    = "[REDACTED-SECRET]"
 	}
 
-	// Email addresses, URL-encoded (%40) too.
+	// Email addresses, URL-encoded (%40, %2540) or \u-escaped too, with a
+	// local part in any alphabet or in quotes. An instantiated systemd unit
+	// (wg-quick@wg-watchtower.service) is no address: that first alternative
+	// has no capture group, so it hides nothing.
 	stage.replace {
-		expression = `\b([A-Za-z0-9._%+-]+(?:@|%40)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})\b`
+		expression = `[\w.:-]+@[\w.:\\-]*\.(?:service|socket|timer|target|mount|path|slice|scope)\.?(?:$|[^\w.-])|([\p{L}\p{N}._%+'!#$*^~-]+(?:@|%40|%2540|\\u0040)[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.[A-Za-z]{2,}|"[^"@]*"@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.[A-Za-z]{2,})`
 		replace    = "[REDACTED-EMAIL]"
 	}
 

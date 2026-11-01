@@ -185,4 +185,15 @@ keep:206 192.0.2.1,192.0.2.2 192.0.2.3;192.0.2.4 2001:db8::1,2001:db8::2 [2001:d
 same:134 app[1]: db::commit ok
 same:135 app[1]: db::begin in 3 ms
 same:136 app[1]: build 1.2.3.4567 up
+keep:210 josé@example.com and also
+keep:211 o'brien@example.com and a!b@example.com
+keep:212 "bob smith"@example.com and bob@example.com1 and bob@example.com_old and bob%2540example.com
+keep:213 {"to":"bob\u0040example.com"}
+keep:214 mail bob@digital.service.gov.uk now
+same:137 systemd[1]: Started wg-quick@wg-watchtower.service - WireGuard via wg-quick(8) for wg/watchtower.
+same:138 systemd[1]: user@1000.service: Consumed 1.234s CPU time.
+same:139 systemd[1]: Started getty@tty1.service - Getty on tty1.
+same:140 systemd[1]: Finished backup@daily.timer.
+same:141 pnpm@9.15.4 and node@22.3.0 installed
+same:142 sshd[12]: Starting session: shell on pts/0 for root port 51515 id 0
 same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series
