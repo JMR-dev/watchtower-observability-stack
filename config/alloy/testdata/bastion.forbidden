@@ -35,3 +35,31 @@ eyJhbGci
 "transaction"
 078051120
 00:1a:2b
+Matched Data
+10\.89\.10\.
+SHA256:[^[]
+MD5:[^[]
+fake\]LEAK
+8675309
+8675301
+31415926
+271828
+42424242
+"[A-Za-z_-]*([Cc]ookie|[Aa]uthorization)": *\[?"
+\\"[A-Za-z_-]*([Cc]ookie|[Pp]assword|[Tt]oken|[Ss]ession|[Kk]ey)\\": *(\[\\"|\\")
+2001:0db8
+2a01
+192-0-2-
+198-51-100-
+2001%3A
+josé
+o'\[
+a!\[
+bob smith
+%2540
+u0040
+service\.gov
+07805112[0-9]
+fakeCMDleak
+fakeNAMEleak
+bad words
