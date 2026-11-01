@@ -43,8 +43,7 @@ fi
 [[ "$host_key" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+={0,2}$ ]] || die "the host key isn't one ssh-ed25519 key"
 
 work="$(mktemp -d)"
-cleanup() { rm -rf "$work"; }
-trap cleanup EXIT
+trap 'rm -rf "$work"' EXIT
 umask 077
 printf '%s %s\n' "$BASTION" "$host_key" >"${work}/known_hosts"
 unset host_key

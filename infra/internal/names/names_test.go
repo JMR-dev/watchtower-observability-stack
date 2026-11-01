@@ -281,6 +281,35 @@ func TestBootstrapMakesTheBastion(t *testing.T) {
 	}
 }
 
+// scripts/bastion-confirm.sh logs in to the bastion the inventory names, and
+// leaves its file where the path unit in config/bastion/ruleset.sh watches: a
+// confirmation that goes elsewhere rolls the ruleset back.
+func TestBastionConfirmReachesTheBastion(t *testing.T) {
+	b, err := os.ReadFile("../../../scripts/bastion-confirm.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := os.ReadFile("../../../config/bastion/ruleset.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropbox := regexp.MustCompile(`(?m)^DROPBOX="([^"]*)"$`).FindSubmatch(r)
+	if dropbox == nil {
+		t.Fatal("ruleset.sh has no DROPBOX")
+	}
+	for v, want := range map[string]string{
+		"BASTION":      BastionName,
+		"BASTION_ZONE": BastionZone,
+		"GCP_PROJECT":  GCPProject,
+		"DROPBOX":      string(dropbox[1]),
+	} {
+		m := regexp.MustCompile(`(?m)^` + v + `="([^"]*)"$`).FindStringSubmatch(string(b))
+		if m == nil || m[1] != want {
+			t.Errorf("bastion-confirm.sh %s = %v, want %q", v, m, want)
+		}
+	}
+}
+
 // The bastion's startup script reads the bastion's own agent peer: the one
 // secret its service account may read.
 func TestBastionReadsItsOwnPeer(t *testing.T) {

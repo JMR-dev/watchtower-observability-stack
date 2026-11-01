@@ -32,7 +32,7 @@ reachable only through WireGuard at the private endpoint
 | `build/wg-easy/` | The client VPN and its UI, on Alpine with nftables-backed iptables |
 | `scripts/` | Bootstrap, secrets, Healthchecks.io checks, key rotation, image builds and checks, deploy verification, tenant onboarding, GDPR erasure |
 | `config/alloy/` | Client-side Alloy config with PII scrubbing; the bastion's own |
-| `config/bastion/` | The break-glass bastion's startup script and nftables ruleset, which bootstrap puts in its metadata |
+| `config/bastion/` | The break-glass bastion's startup script, its nftables ruleset and the rollback that guards it, which bootstrap puts in its metadata |
 | `docs/` | Architecture, runbook, secrets, multi-tenancy, client telemetry, GDPR |
 
 ## Quick start
@@ -74,8 +74,8 @@ scripts/check-alloy-scrub.sh config/alloy/bastion.alloy config/alloy/testdata/ba
 scripts/check-bastion-labels.sh
 ```
 
-test the bastion's peer checks and metadata guard in Debian 13, and its
-scrub rules with Alloy, as CI's `configs` and `alloy` jobs do.
+test the bastion's peer checks, metadata guard and ruleset rollback in Debian
+13, and its scrub rules with Alloy, as CI's `configs` and `alloy` jobs do.
 
 ## Documentation
 

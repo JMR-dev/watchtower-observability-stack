@@ -118,9 +118,10 @@ Nothing on watchtower scrubs. What a host sends is stored.
 - **Gitea CI:** the sink excludes `cloudaudit` (it carries the owner's
   email); scrub `httpRequest.remoteIp`, `userAgent`, and the login in
   webhook "author … is not allowed" lines.
-- **Bastion:** OS Login user names (the example's rule); SSH key
-  fingerprints, certificate key IDs and OS Login uids, also out of the
-  `unit` label (`user@.service`, `session.scope`).
+- **Bastion:** OS Login user names (the example's rule); certificate key IDs
+  and OS Login uids, also out of the `unit` label (`user@.service`,
+  `session.scope`); sudo's `COMMAND=` to the end of the line ("someone ran
+  sudo" still ships), and whatever follows `invalid user`.
 
 ## Agent peers
 
@@ -281,17 +282,32 @@ As built: the account is made with the others (step 4) and granted through
 `agent_readers`. Step 7 gives `watchtower-deployer`
 `roles/iam.serviceAccountUser` on it, because OS Login admits a user to a VM
 that runs as a service account only then (the owner's decision, 2026-11-01).
-It attaches the account only after a boot that loaded the guard: two restarts
-the first time, so no user is on a VM with an unguarded token. The startup
-script, the ruleset and the Alloy config are files (`config/bastion/`, `config/alloy/bastion.alloy`) that
-bootstrap puts in the VM's metadata. The guard leaves DNS (53) and NTP
-(123) open to every uid, since Alloy, apt and chrony need them and they
-carry no credential, and refuses the rest at once (reject, not drop), so a
-lookup that hits it fails fast instead of hanging. `scripts/check-bastion.sh`
-tests it and the peer checks in Debian 13 (CI's `configs` job). The peer
-checks go past the contract's: the host reads a line as `wg` does and admits
-only the settings an agent needs, in their shape, so a config with a stray
-character in a key is refused here rather than echoed by `wg` into the journal.
+It attaches the account only after the guard's ruleset is confirmed: two
+restarts the first time.
+
+A new ruleset goes on under a 10-minute rollback (the owner's decision,
+2026-11-01; `config/bastion/ruleset.sh`, and the runbook's "A new ruleset"). A
+login cancels it, and bootstrap dispatches `bastion-confirm.yml` to log in as
+the deployer. sshd runs only with the guard in the kernel, or on a VM with no
+account. So a user may be on a VM with no guard, after a first install rolled
+back, but never on one with a token and no guard: an account goes on only over a
+confirmed ruleset, and sshd won't start on a VM with an account and no guard.
+
+The startup script, the ruleset, its tool and the Alloy config are files
+(`config/bastion/`, `config/alloy/bastion.alloy`) that bootstrap puts in the
+VM's metadata. The guard leaves DNS (53), DHCP (67) and NTP (123) open to every
+uid, since Alloy, apt, systemd-networkd and chrony need them and they carry no
+credential, and refuses the rest at once (reject, not drop), so a lookup that
+hits it fails fast instead of hanging. A drop-in clears `nftables.service`'s
+`ExecStop`, so a package upgrade's restart reloads rather than flushes.
+`scripts/check-bastion.sh` tests the guard, the rollback and the peer checks in
+Debian 13 (CI's `configs` job), and says what only the VM can show. Only a
+missing or empty secret takes the tunnel and Alloy down; any other failure to
+read it warns and leaves them running, and so does a config that fails the
+checks. The peer checks go past the contract's: the host reads a line as `wg`
+does and admits only the settings an agent needs, in their shape, so a config
+with a stray character in a key is refused here rather than echoed by `wg` into
+the journal.
 
 ### G2: gitea, the VM (after the Ansible cutover)
 

@@ -101,8 +101,9 @@ jobs:
         run: ansible-playbook -i inventory/hosts.sample.yml playbooks/render.yml >/dev/null
       - name: quadlet, Loki, Mimir, Tempo and Fluent Bit check them
         run: scripts/check-configs.sh
-      # The bastion's peer checks and metadata guard, in Debian 13 as on the
-      # VM: root reaches the metadata server, no other uid does.
+      # The bastion's peer checks, metadata guard and ruleset rollback, in
+      # Debian 13 as on the VM: root reaches the metadata server, no other uid
+      # does, and a ruleset nobody confirms goes back.
       - name: The bastion's startup pieces hold
         run: scripts/check-bastion.sh
 
