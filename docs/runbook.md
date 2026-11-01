@@ -142,8 +142,8 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
   - It runs as `watchtower-bastion@`, which may read its own agent peer
     (`wireguard-bastion-peer`) and nothing else, and ships its journal and
     metrics to watchtower through `wg-watchtower` (docs/client-telemetry.md).
-    Until `watchtower-deployer` may act as that account (below), it runs as
-    no one and ships nothing.
+    Until a boot has loaded the guard (below), it runs as no one and ships
+    nothing.
   - Only root may reach the metadata server, and with it the VM's token:
     nftables (`config/bastion/nftables.conf`) refuses every other uid but
     for DNS and NTP. `nft list chain inet metadata_guard metadata` counts
