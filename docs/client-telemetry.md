@@ -278,11 +278,12 @@ reads a secret's value or SSHes anywhere.
 - `config/alloy/bastion.alloy`, validated and fixture-tested in CI.
 
 As built: the account is made with the others (step 4) and granted through
-`agent_readers`; step 7 attaches it only once `watchtower-deployer` holds
-`roles/iam.serviceAccountUser` on it, because OS Login admits a user to a
-VM that runs as a service account only then. Granting that is the owner's
-call; bootstrap never does. The startup script, the ruleset and the Alloy
-config are files (`config/bastion/`, `config/alloy/bastion.alloy`) that
+`agent_readers`. Step 7 gives `watchtower-deployer`
+`roles/iam.serviceAccountUser` on it, because OS Login admits a user to a VM
+that runs as a service account only then (the owner's decision, 2026-11-01).
+It attaches the account only after a boot that loaded the guard: two restarts
+the first time, so no user is on a VM with an unguarded token. The startup
+script, the ruleset and the Alloy config are files (`config/bastion/`, `config/alloy/bastion.alloy`) that
 bootstrap puts in the VM's metadata. The guard leaves DNS (53) and NTP
 (123) open to every uid, since Alloy, apt and chrony need them and they
 carry no credential, and refuses the rest at once (reject, not drop), so a

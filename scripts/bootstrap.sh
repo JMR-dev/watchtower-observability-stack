@@ -57,11 +57,11 @@
 #      reads its peer with the VM's token, as watchtower-bastion, and keeps
 #      every other user from the metadata server. OS Login lets a user onto
 #      a VM that runs as a service account only if they may act as it, so
-#      the account is attached only once watchtower-deployer holds
-#      roles/iam.serviceAccountUser on it; this script never grants that.
-#      An existing bastion is updated in place (stop, its account and
-#      metadata, start), keeping its boot disk and with it its SSH host
-#      key; anyone on it then is cut off.
+#      watchtower-deployer gets roles/iam.serviceAccountUser on it.
+#      An existing bastion is updated in place, keeping its boot disk and
+#      with it its SSH host key; anyone on it then is cut off. The account
+#      goes on only after a boot that loaded the guard: two restarts the
+#      first time, so no user is ever on a VM with an unguarded token.
 #      Writes the NAT address and the bastion's SSH host key into
 #      infra/cloud/Pulumi.prod.yaml (breakGlassCidrs, bastionHostKey), never
 #      to the terminal; commit the change and deploy.
@@ -393,48 +393,58 @@ bastion_alloy="${repo_root}/config/alloy/bastion.alloy"
 bastion_files="startup-script=${bastion_dir}/startup.sh,watchtower-nftables=${bastion_dir}/nftables.conf,watchtower-alloy=${bastion_alloy}"
 BASTION_SA="$(sa_email "$BASTION")"
 # OS Login lets a user onto a VM that runs as a service account only if they
-# may act as that account (roles/iam.serviceAccountUser on it): attached
-# without that, the account would lock watchtower-deployer out of break
-# glass. Granting it is the owner's call (docs/client-telemetry.md, W3);
-# until then the bastion runs as no one and ships nothing.
-if gcloud iam service-accounts get-iam-policy "$BASTION_SA" --project "$GCP_PROJECT" --format json 2>/dev/null |
-  jq -e --arg m "serviceAccount:${DEPLOYER}" \
-    'any(.bindings[]?; .role == "roles/iam.serviceAccountUser" and any(.members[]; . == $m))' >/dev/null; then
-  bastion_sa=(--service-account "$BASTION_SA" --scopes cloud-platform)
-  create_as=("${bastion_sa[@]}")
-else
-  bastion_sa=()
-  create_as=(--no-service-account --no-scopes)
-  echo "note: ${DEPLOYER} may not act as ${BASTION_SA}, so the bastion keeps running as no one (docs/client-telemetry.md, W3)"
-fi
+# may act as that account: without this, attaching it would lock
+# watchtower-deployer out of break glass. Only the guard then keeps the
+# deployer from the VM's token.
+retry_iam gcloud iam service-accounts add-iam-policy-binding "$BASTION_SA" --project "$GCP_PROJECT" \
+  --member "serviceAccount:${DEPLOYER}" --role roles/iam.serviceAccountUser
 if ! exists instances describe "$BASTION" --zone "$BASTION_ZONE"; then
   compute instances create "$BASTION" --zone "$BASTION_ZONE" --machine-type e2-micro \
     --network-interface "subnet=${BASTION},private-network-ip=${BASTION_IP},no-address" \
     --image-family debian-13 --image-project debian-cloud \
     --boot-disk-size 10GB --boot-disk-type pd-standard \
     --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
-    "${create_as[@]}" --tags "$BASTION" \
+    --no-service-account --no-scopes --tags "$BASTION" \
     --metadata enable-oslogin=TRUE,block-project-ssh-keys=TRUE,enable-guest-attributes=TRUE \
     --metadata-from-file "$bastion_files"
-elif [[ "${#bastion_sa[@]}" -gt 0 ]]; then
-  # In place, and only when something differs: its account and scope, and
-  # the three files. Stop and start keep the boot disk, so the SSH host key
-  # the stack pins stays; Secret Manager has no narrower scope than
-  # cloud-platform, so IAM (one secret, read only) is the fence.
-  current="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format json | jq -cS '{
-    sa: (.serviceAccounts[0].email // ""), scopes: (.serviceAccounts[0].scopes // []),
-    meta: ([.metadata.items[]? | select(.key | IN("startup-script", "watchtower-nftables", "watchtower-alloy"))] | from_entries)}')"
-  want="$(jq -ncS --arg sa "$BASTION_SA" --rawfile s "${bastion_dir}/startup.sh" \
-    --rawfile n "${bastion_dir}/nftables.conf" --rawfile a "$bastion_alloy" '{
-    sa: $sa, scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-    meta: {"startup-script": $s, "watchtower-nftables": $n, "watchtower-alloy": $a}}')"
-  if [[ "$current" != "$want" ]]; then
-    log "  updating ${BASTION} in place: stop, its account and metadata, start"
-    compute instances stop "$BASTION" --zone "$BASTION_ZONE"
-    compute instances set-service-account "$BASTION" --zone "$BASTION_ZONE" "${bastion_sa[@]}"
-    compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata-from-file "$bastion_files"
-    compute instances start "$BASTION" --zone "$BASTION_ZONE"
-  fi
+fi
+# In place, and only when something differs. Stop and start keep the boot
+# disk, so the SSH host key the stack pins stays; Secret Manager has no
+# narrower scope than cloud-platform, so IAM (one secret, read only) is the
+# fence.
+current="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format json | jq -cS '{
+  sa: (.serviceAccounts[0].email // ""), scopes: (.serviceAccounts[0].scopes // []),
+  meta: ([.metadata.items[]? | select(.key | IN("startup-script", "watchtower-nftables", "watchtower-alloy"))] | from_entries)}')"
+want="$(jq -ncS --arg sa "$BASTION_SA" --rawfile s "${bastion_dir}/startup.sh" \
+  --rawfile n "${bastion_dir}/nftables.conf" --rawfile a "$bastion_alloy" '{
+  sa: $sa, scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+  meta: {"startup-script": $s, "watchtower-nftables": $n, "watchtower-alloy": $a}}')"
+if [[ "$(jq -c .meta <<<"$current")" != "$(jq -c .meta <<<"$want")" ]]; then
+  log "  updating ${BASTION} in place: stop, its metadata, start"
+  compute instances stop "$BASTION" --zone "$BASTION_ZONE"
+  compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata-from-file "$bastion_files"
+  compute instances start "$BASTION" --zone "$BASTION_ZONE"
+fi
+if [[ "$(jq -c 'del(.meta)' <<<"$current")" != "$(jq -c 'del(.meta)' <<<"$want")" ]]; then
+  # Never on a VM that hasn't loaded the guard: its startup script does that
+  # only after sshd is up, so on a first boot with the account a user could
+  # reach the token for about a minute. Once it has, nftables.service loads
+  # the guard before the network at every boot, so a line left in the serial
+  # output from an earlier boot says as much as a new one.
+  log "  waiting for ${BASTION} to load its metadata guard"
+  guarded=""
+  for _ in $(seq 90); do
+    if compute instances get-serial-port-output "$BASTION" --zone "$BASTION_ZONE" 2>/dev/null |
+      grep -cF 'bastion: metadata guard loaded' >/dev/null; then
+      guarded=1; break
+    fi
+    sleep 10
+  done
+  [[ -n "$guarded" ]] || die "${BASTION} didn't report its metadata guard within 15 minutes, so it still runs as no one: see its serial output, gcloud compute instances reset it and rerun"
+  log "  attaching ${BASTION}'s account: stop, its account, start"
+  compute instances stop "$BASTION" --zone "$BASTION_ZONE"
+  compute instances set-service-account "$BASTION" --zone "$BASTION_ZONE" --service-account "$BASTION_SA" --scopes cloud-platform
+  compute instances start "$BASTION" --zone "$BASTION_ZONE"
 fi
 
 # The deployer: OS Login on this VM (which includes looking it up), and an
@@ -481,7 +491,7 @@ Done.
                  which may add to the ${#deploy_written[@]} peer secrets and read back ${deploy_read_back[*]};
                  ${#agent_readers[@]} agent peers readable by their own service's identity
   Bastion      : ${BASTION} (${BASTION_ZONE}), SSH through IAP only; its traffic leaves from ${nat_ip}.
-                 It runs as ${bastion_as:-no one, so it ships no telemetry}.
+                 It runs as ${bastion_as}.
                  Its address and host key are in infra/cloud/Pulumi.prod.yaml
                  (breakGlassCidrs, bastionHostKey): commit any change and deploy.
 

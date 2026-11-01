@@ -156,17 +156,19 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
   The deploy uses it when dispatched with `ssh_via=bastion`: when wg-easy
   is down, the proxy is being rebuilt, or the environment is new. OS Login
   admits a user to a VM that runs as a service account only if they may act
-  as it (`roles/iam.serviceAccountUser` on it), so bootstrap attaches
-  `watchtower-bastion@` only once the deployer holds that; it never grants
-  it.
+  as it, so bootstrap gives the deployer `roles/iam.serviceAccountUser` on
+  `watchtower-bastion@`. The guard is what keeps it from the VM's token.
 - **Rebuilding it:**
   - `scripts/bootstrap.sh` (step 7) makes the bastion, and writes its NAT
     address and SSH host key into `infra/cloud/Pulumi.prod.yaml`
     (`breakGlassCidrs`, `bastionHostKey`).
   - A change to `config/bastion/` or `config/alloy/bastion.alloy` reaches
-    it when you rerun bootstrap: it stops the bastion, sets its account and
-    metadata, and starts it again. The boot disk, and with it the host key,
-    stays; anyone on the bastion then is cut off.
+    it when you rerun bootstrap: it stops the bastion, sets its metadata,
+    and starts it again. The boot disk, and with it the host key, stays;
+    anyone on the bastion then is cut off.
+  - The first time, or on a new bastion, that takes two restarts: bootstrap
+    attaches the account only once the serial output shows a boot that
+    loaded the guard, so don't run it during a deploy with `ssh_via=bastion`.
   - To replace it: `gcloud compute instances delete watchtower-bastion
     --zone us-east1-b`, rerun bootstrap, commit `Pulumi.prod.yaml`, and
     deploy. The NAT address is reserved and stays; the host key changes.
