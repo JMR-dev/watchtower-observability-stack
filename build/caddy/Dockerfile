@@ -33,7 +33,9 @@ ARG GOOGLECLOUDDNS_VERSION=v1.1.0
 # that version or newer, since a replace also blocks upgrades.
 #   golang.org/x/net: CVE-2026-78669, fixed in v0.60.0; Caddy v2.11.7 and
 #   coraza-caddy v2.6.2 still require older releases.
-ARG GO_MODULE_PINS="golang.org/x/net@v0.61.0"
+#   github.com/go-jose/go-jose/v4: CVE-2026-116587, fixed in v4.1.6; Caddy
+#   v2.11.7 still requires v4.1.5.
+ARG GO_MODULE_PINS="golang.org/x/net@v0.61.0 github.com/go-jose/go-jose/v4@v4.1.7"
 
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath GOTOOLCHAIN=local
 
@@ -55,7 +57,7 @@ RUN /usr/local/bin/caddy list-modules | grep -qx 'http.handlers.waf' \
 # ── Runtime image: Alpine, CA certificates and the static binary ────────────
 FROM ${ALPINE}
 LABEL org.opencontainers.image.version="2.11.7"
-LABEL watchtower.image.revision="2"
+LABEL watchtower.image.revision="3"
 
 # Every package upgraded to the build day's (IMAGE_DATE, set by
 # scripts/build-image.sh): a new day misses the build cache from here, so the
