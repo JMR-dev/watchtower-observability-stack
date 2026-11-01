@@ -71,6 +71,7 @@ shellcheck for the host scripts), as CI's `configs` job does. `scripts/build-ima
 ```bash
 CONTAINER_RUNTIME=podman scripts/check-bastion.sh
 scripts/check-alloy-scrub.sh config/alloy/bastion.alloy config/alloy/testdata/bastion.log
+scripts/check-bastion-labels.sh
 ```
 
 test the bastion's peer checks and metadata guard in Debian 13, and its

@@ -198,3 +198,5 @@ jobs:
           alloy validate config/alloy/bastion.alloy
       - name: The bastion's scrub rules hold back the PII in its fixture, and only that
         run: scripts/check-alloy-scrub.sh config/alloy/bastion.alloy config/alloy/testdata/bastion.log
+      - name: The bastion's labels hold no user or login
+        run: scripts/check-bastion-labels.sh
