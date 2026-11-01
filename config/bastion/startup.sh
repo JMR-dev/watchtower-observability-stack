@@ -1,28 +1,33 @@
 #!/bin/bash
 # The break-glass bastion's startup script. GCE runs it as root at every
 # boot; scripts/bootstrap.sh (step 7) puts it in the VM's metadata with the
-# two files it reads from there, watchtower-nftables (nftables.conf here) and
-# watchtower-alloy (config/alloy/bastion.alloy). Idempotent, and it never
-# prints the peer config or the VM's token: its output goes to the serial
-# console and the journal, which Alloy ships.
+# three files it reads from there, watchtower-nftables (nftables.conf here),
+# watchtower-ruleset (ruleset.sh here) and watchtower-alloy
+# (config/alloy/bastion.alloy). Idempotent, and it never prints the peer config
+# or the VM's token: its output goes to the serial console and the journal,
+# which Alloy ships.
 #
-#   1. Security updates every day, rebooting at 04:00 UTC when one needs it.
-#   2. The metadata guard (nftables.conf): only root reaches the metadata
-#      server, so only root can use the VM's token. Nothing else runs if it
-#      doesn't load.
-#   3. Prints "bastion: settled" once the guard is on and apt is done:
-#      scripts/bootstrap.sh stops the VM for its account only after that.
+#   1. The metadata guard (nftables.conf): only root reaches the metadata
+#      server, so only root can use the VM's token. First, since sshd waits
+#      on it. A new ruleset goes on under a 10-minute rollback that a login
+#      cancels, and sshd runs only with the guard loaded or on a VM with no
+#      token (ruleset.sh). Nothing else runs if sshd may not.
+#   2. Security updates every day, rebooting at 04:00 UTC when one needs it.
+#   3. Prints "bastion: settled" once apt is done: scripts/bootstrap.sh stops
+#      the VM for its account only after that.
 #   4. Its agent peer (docs/client-telemetry.md), read from Secret Manager
-#      with that token, checked and normalised, as wg-quick@wg-watchtower.
-#      None to read (no service account, no version or an empty one): the
-#      tunnel and Alloy are stopped and disabled, and their config removed.
-#      A config that fails the checks goes the same way, as an error.
+#      with that token, checked and normalised, as wg-quick@wg-watchtower. A
+#      missing or empty secret, and nothing else, takes the tunnel and Alloy
+#      down: stopped and disabled, and their config removed. Any other failure
+#      to read it, or a config that fails the checks, warns and leaves them
+#      running as they are. Revoking a peer is done by deleting its client in
+#      wg-easy.
 #   5. Grafana Alloy from the release's .deb, pinned by sha256, run with the
 #      config from metadata, capped at 192 MiB, and only with the tunnel.
 #   6. Warns, never fails, when Alloy isn't ready or the tunnel has no
 #      handshake within 2 minutes.
 #
-# scripts/check-bastion.sh tests the peer checks and the guard.
+# scripts/check-bastion.sh tests the peer checks, the guard and the rollback.
 
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -39,6 +44,9 @@ ALLOY_VERSION="1.21.2"
 ALLOY_DEB_SHA256="80750b6740147ee6d9d860988989dd28bdb048ab0b27b7c02da7876ea5015dad"
 ALLOY_CONFIG="/etc/alloy/bastion.alloy"
 ALLOY_DROPIN="/etc/systemd/system/alloy.service.d/watchtower.conf"
+RULESET_TOOL="/usr/local/sbin/watchtower-ruleset"
+# ruleset.sh's exit status when it rolled back and is rebooting.
+RULESET_REBOOTING=75
 
 log() { printf 'bastion: %s\n' "$*"; }
 warn() { printf 'bastion: warning: %s\n' "$*" >&2; }
@@ -109,14 +117,33 @@ CONF
   put "${work}/52watchtower-bastion" /etc/apt/apt.conf.d/52watchtower-bastion 0644 root || true
 }
 
+guard_loaded() { nft list chain inet metadata_guard metadata >/dev/null 2>&1; }
+
+# Whatever metadata does or doesn't answer, this ends with sshd up or with a
+# reason it isn't: what's on disk from an earlier boot still applies.
 guard() {
+  local rc=0 retry=""
   installed nftables || apt_install --no-install-recommends nftables
-  mds instance/attributes/watchtower-nftables >"${work}/nftables.conf"
-  nft --check --file "${work}/nftables.conf"
-  put "${work}/nftables.conf" /etc/nftables.conf 0644 root || true
-  systemctl enable --quiet nftables.service
-  systemctl reload-or-restart nftables.service
-  nft list chain inet metadata_guard metadata >/dev/null || die "the metadata guard did not load"
+  if mds instance/attributes/watchtower-ruleset >"${work}/ruleset.sh" && [[ -s "${work}/ruleset.sh" ]] && bash -n "${work}/ruleset.sh"; then
+    put "${work}/ruleset.sh" "$RULESET_TOOL" 0755 root || true
+  else
+    warn "no usable watchtower-ruleset in metadata; using the one on disk"
+  fi
+  [[ -x "$RULESET_TOOL" ]] || die "no ${RULESET_TOOL}, so no way to load the guard"
+  # Without its timer no trial starts, so a failure here costs only that.
+  "$RULESET_TOOL" setup || warn "could not set up ${RULESET_TOOL}'s units"
+  retry="$(mds instance/attributes/watchtower-nftables-retry 2>/dev/null || true)"
+  if mds instance/attributes/watchtower-nftables >"${work}/nftables.conf" && [[ -s "${work}/nftables.conf" ]]; then
+    "$RULESET_TOOL" apply "${work}/nftables.conf" "$retry" || rc=$?
+  else
+    warn "no watchtower-nftables in metadata; the ruleset on disk stays"
+    "$RULESET_TOOL" apply || rc=$?
+  fi
+  case "$rc" in
+    0) ;;
+    "$RULESET_REBOOTING") log "rolling back: rebooting"; exit 0 ;;
+    *) die "sshd may not run (see above), so nothing else does" ;;
+  esac
 }
 
 # check_peer <in> <out>: writes the config wg-quick may run, or fails saying
@@ -190,35 +217,46 @@ check_peer() {
     }' "$1" >"$2"
 }
 
-# fetch_peer <out>: the peer config into out, and have_peer set; have_peer
-# empty when there is none to have. Dies, leaving the tunnel as it is, when
-# Google didn't answer.
+# fetch_peer <out>: the peer config into out, and peer_state says what came of
+# it: have, none (the secret is missing or empty, the one thing that takes
+# telemetry down) or unknown (anything else, which leaves it as it is: the
+# network, a 5xx, the token, PERMISSION_DENIED, or a VM with no account yet).
 fetch_peer() {
   local out=$1 code
-  have_peer=""
+  peer_state=unknown
   code="$(get "${MDS}/instance/service-accounts/default/email" "${work}/email" -H 'Metadata-Flavor: Google')"
   case "$code" in
     200) ;;
-    404) warn "the VM has no service account"; return 0 ;;
-    *) die "the metadata server answered ${code}; the tunnel stays as it was" ;;
+    404) warn "the VM has no service account; the tunnel stays as it is"; return 0 ;;
+    *) warn "the metadata server answered ${code}; the tunnel stays as it is"; return 0 ;;
   esac
-  mds instance/service-accounts/default/token >"${work}/token.json"
+  code="$(get "${MDS}/instance/service-accounts/default/token" "${work}/token.json" -H 'Metadata-Flavor: Google')"
+  if [[ "$code" != 200 ]]; then
+    rm -f "${work}/token.json"
+    warn "the metadata server answered ${code} for the token; the tunnel stays as it is"
+    return 0
+  fi
   # The token goes to curl on stdin, never on its command line: any user
   # here may read any process's arguments.
   code="$(jq -r '"header = \"Authorization: Bearer \(.access_token)\""' "${work}/token.json" |
-    get "${SECRETS_API}/${PEER_SECRET}/versions/latest:access" "${work}/peer.json" -K -)"
+    get "${SECRETS_API}/${PEER_SECRET}/versions/latest:access" "${work}/peer.json" -K -)" || code=000
   rm -f "${work}/token.json"
   case "$code" in
     200) ;;
-    404) warn "${PEER_SECRET} has no version"; return 0 ;;
-    *) die "Secret Manager answered ${code}; the tunnel stays as it was" ;;
+    404) warn "${PEER_SECRET} has no version"; peer_state=none; return 0 ;;
+    *) warn "Secret Manager answered ${code}; the tunnel stays as it is"; return 0 ;;
   esac
-  jq -r '.payload.data // empty' "${work}/peer.json" | base64 -d >"$out"
+  if ! jq -r '.payload.data // empty' "${work}/peer.json" | base64 -d >"$out"; then
+    rm -f "${work}/peer.json" "$out"
+    warn "Secret Manager's answer doesn't parse; the tunnel stays as it is"
+    return 0
+  fi
   rm -f "${work}/peer.json"
   if [[ -s "$out" ]]; then
-    have_peer=1
+    peer_state=have
   else
     warn "${PEER_SECRET}'s latest version is empty"
+    peer_state=none
   fi
 }
 
@@ -281,22 +319,30 @@ main() {
   work="$(mktemp -d)"
   trap 'rm -rf "$work"' EXIT
 
-  updates
   guard
-  log "metadata guard loaded"
+  if guard_loaded; then
+    log "metadata guard loaded"
+  else
+    warn "no metadata guard: this VM has no account, so no token to guard"
+  fi
 
+  updates
   installed wireguard-tools jq || apt_install --no-install-recommends wireguard-tools jq
   # What scripts/bootstrap.sh waits for: from here a stop can't break apt.
   log "settled"
   fetch_peer "${work}/peer.in"
-  if [[ -z "$have_peer" ]]; then
-    teardown
-    warn "no agent peer: the tunnel and Alloy are off"
-    return 0
-  fi
+  case "$peer_state" in
+    have) ;;
+    none)
+      teardown
+      warn "no agent peer: the tunnel and Alloy are off"
+      return 0
+      ;;
+    *) return 0 ;;
+  esac
   if ! check_peer "${work}/peer.in" "${work}/peer.conf"; then
-    teardown
-    die "the agent peer failed its checks: the tunnel and Alloy are off"
+    rm -f "${work}/peer.in" "${work}/peer.conf"
+    die "the agent peer failed its checks: the tunnel and Alloy stay as they are"
   fi
   rm -f "${work}/peer.in"
   put "${work}/peer.conf" "$WG_CONF" 0600 root && peer_changed=1
