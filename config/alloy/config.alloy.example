@@ -290,23 +290,41 @@ loki.process "scrub" {
 		replace    = "[REDACTED-USER]"
 	}
 
-	// IPv4 addresses, whole. A four-part version number goes too.
+	// IPv4 addresses, whole, next to a letter or _ too (ip_192.0.2.1). A
+	// four-part version number goes too. The edge is a character of its own,
+	// since RE2 has no lookahead; only on the left, so two addresses a comma
+	// apart both go. A last part over three digits (1.2.3.4567) is no address:
+	// that alternative has no capture group, so it hides nothing.
 	stage.replace {
-		expression = `\b((?:\d{1,3}\.){3}\d{1,3})\b`
+		expression = `(?:^|[^0-9])(?:(?:\d{1,3}\.){3}\d{4,}|((?:\d{1,3}\.){3}\d{1,3}))`
+		replace    = "[REDACTED-IP]"
+	}
+
+	// IPv4 inside a hostname, dashed: ec2-192-0-2-1.compute-1.amazonaws.com.
+	stage.replace {
+		expression = `(?:^|[^0-9])(\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3})\.[A-Za-z]`
 		replace    = "[REDACTED-IP]"
 	}
 
 	// IPv6 addresses: eight groups, or compressed with "::" and a group after
-	// it or two before it, so never a clock time or a Rust path (db::query).
-	// Then the same after a colon (client:2001:db8::1), with three groups or
-	// more.
+	// it or two before it, or a lone prefix with a digit in it (2a01::). Never
+	// a clock time or a Rust path (db::query, db::commit: that first
+	// alternative has no capture group, so it hides nothing). A path of all
+	// hex words (dead::beef) is a valid address, so it goes. Then the same
+	// after a colon, _ or dot (client:2001:db8::1, ip_2001:db8::1), where one
+	// group needs a digit in it (client:2a01::7). Then percent-encoded.
 	stage.replace {
-		expression = `(?:^|[^\w:.])((?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?::[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6}|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){1,6}::)`
+		expression = `(?:^|[^\w:.])(?:[0-9A-Fa-f]{0,4}::[a-fA-F]{0,3}[g-zG-Z_]|((?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?::[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6}|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){1,6}::|[0-9A-Fa-f]{0,3}\d[0-9A-Fa-f]{0,3}::))`
 		replace    = "[REDACTED-IP6]"
 	}
 
 	stage.replace {
-		expression = `:((?:[0-9A-Fa-f]{1,4}:){2,6}:(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,5})?|(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){1,5})`
+		expression = `[:_.]((?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){2,6}:(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,5})?|(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){1,5}|[0-9A-Fa-f]{0,3}\d[0-9A-Fa-f]{0,3}::[0-9A-Fa-f]{1,4})`
+		replace    = "[REDACTED-IP6]"
+	}
+
+	stage.replace {
+		expression = `(?:^|[^\w%])((?:[0-9A-Fa-f]{0,4}%3[Aa]){2,8}[0-9A-Fa-f]{0,4})`
 		replace    = "[REDACTED-IP6]"
 	}
 

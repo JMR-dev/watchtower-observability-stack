@@ -34,3 +34,8 @@ fake\]LEAK
 42424242
 "[A-Za-z_-]*([Cc]ookie|[Aa]uthorization)": *\[?"
 \\"[A-Za-z_-]*([Cc]ookie|[Pp]assword|[Tt]oken|[Ss]ession|[Kk]ey)\\": *(\[\\"|\\")
+2001:0db8
+2a01
+192-0-2-
+198-51-100-
+2001%3A

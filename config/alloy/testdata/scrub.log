@@ -175,4 +175,14 @@ keep:198 https://bob@example.com:fakeLEAK370@git.internal/x.git
 same:131 sysctl: net.ipv4.tcp_syncookies = 1
 same:132 sshd[12]: Basic authentication failed for user root
 same:133 {"uri":"http://localhost:8080/x","note":"a@b"}
+keep:200 client:2001:0db8:85a3:0000:0000:8a2e:0370:7399 connected
+keep:201 peer:2a01:4f8:c17:1234:5678:9abc:def0:1 connected
+keep:202 client:2a01::7 connected and ip_2001:db8::9 and from.2001:db8::a and 2a01:: too
+keep:203 ip_192.0.2.200 and 192.0.2.201_x and x192.0.2.202 and from.192.0.2.203
+keep:204 host-192-0-2-205.isp.example.org and ec2-198-51-100-206.compute-1.amazonaws.com
+keep:205 GET /a?ip=2001%3Adb8%3A%3A205 HTTP/1.1
+keep:206 192.0.2.1,192.0.2.2 192.0.2.3;192.0.2.4 2001:db8::1,2001:db8::2 [2001:db8::3]:1 2001:db8::4/64
+same:134 app[1]: db::commit ok
+same:135 app[1]: db::begin in 3 ms
+same:136 app[1]: build 1.2.3.4567 up
 same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series
