@@ -134,4 +134,29 @@ keep:154 GET /cb?a=1&amp;code=fakeLEAK245&amp;state=fakeLEAK246 HTTP/1.1
 keep:155 {"uri":"/cb?a=1\u0026code=fakeLEAK247\u0026state=fakeLEAK248\u0026page=2"}
 keep:156 GET /cb?next=%252Freset%253Fpassword%253DfakeLEAK249 HTTP/1.1
 keep:157 GET /cb?next=%2Fa%3Fpass%3DfakeLEAK250 HTTP/1.1
+keep:160 API Key: fakeLEAK260
+keep:161 Private Key: fakeLEAK261
+keep:162 Secret Key: fakeLEAK262
+keep:163 Session ID: fakeLEAK263
+keep:164 session id=fakeLEAK264
+keep:165 Password Hash: fakeLEAK265
+keep:166 api.key=fakeLEAK266 private.key=fakeLEAK267
+keep:167 POST /users user[password]=fakeLEAK268&user[token]=fakeLEAK269 user%5Bpassword%5D=fakeLEAK270 user[pass]=fakeLEAK271 user%5Botp%5D=fakeLEAK272
+keep:168 {"user password":"fakeLEAK273","password hash":"fakeLEAK274","password[confirm]":"fakeLEAK275","user pass":"fakeLEAK276","my cookie":"fakeLEAK277","my authorization":"fakeLEAK278"}
+keep:169 <password>fakeLEAK279</password> <Token a="b">fakeLEAK280</Token> <pass>fakeLEAK281</pass>
+keep:170 `password`='fakeLEAK282' `token`: fakeLEAK283 `cookie`: fakeLEAK284 `authorization`: fakeLEAK285
+keep:171 {"dbPass":"fakeLEAK286","smtpPass":"fakeLEAK287","basicAuth":"fakeLEAK288","userOtp":"fakeLEAK289","pass1":"fakeLEAK290"}
+keep:172 dbPass=fakeLEAK291 smtpPass=fakeLEAK292 basicAuth=fakeLEAK293 userOtp=fakeLEAK294
+keep:173 pass1=fakeLEAK295 otp1=fakeLEAK296 oauth2=fakeLEAK297 auth2=fakeLEAK298
+keep:174 {"msg":"bad {\"dbPass\":\"fakeLEAK299\",\"oauth2\":\"fakeLEAK300\"} x"}
+keep:175 pass_phrase=fakeLEAK301 pass_word=fakeLEAK302 pass-phrase=fakeLEAK303 passcode=fakeLEAK304 pass_key=fakeLEAK305 pass_hash=fakeLEAK306
+keep:176 otp_code=fakeLEAK307 totp_key=fakeLEAK308 auth_code=fakeLEAK309 auth_key=fakeLEAK310 mfa_code=fakeLEAK311 X-Auth-Key: fakeLEAK312
+keep:177 access_key=fakeLEAK313 ACCESS_KEY=fakeLEAK314 ssh_key=fakeLEAK315 signing_key=fakeLEAK316 encryption_key=fakeLEAK317
+keep:178 {"pass_phrase":"fakeLEAK318","passcode":"fakeLEAK319","otp_code":"fakeLEAK320","auth_code":"fakeLEAK321","auth_key":"fakeLEAK322","mfa_key":"fakeLEAK323"}
+keep:179 {"access_key":"fakeLEAK324","accessKey":"fakeLEAK325","signing_key":"fakeLEAK326","encryption_key":"fakeLEAK327","ssh_key":"fakeLEAK328"}
+keep:180 {"msg":"bad {\"access_key\":\"fakeLEAK329\",\"csrf\":\"fakeLEAK330\",\"otp_code\":\"fakeLEAK331\"} x"}
+keep:181 GET /user/logout?_csrf=fakeLEAK332&sid=fakeLEAK333&tok=fakeLEAK334&ticket=fakeLEAK335&nonce=fakeLEAK336 HTTP/1.1
+keep:182 {"_csrf":"fakeLEAK337","csrf":"fakeLEAK338","sid":"fakeLEAK339"}
+keep:183 bearer: fakeLEAK340abcdefgh bearer=fakeLEAK341abcdefgh {"bearer":"fakeLEAK342abcdefgh"}
+same:130 sshd-session[2345]: Connection closed by authenticating user
 same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series
