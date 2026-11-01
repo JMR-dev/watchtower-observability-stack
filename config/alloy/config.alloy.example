@@ -147,17 +147,19 @@ loki.process "scrub" {
 	// A JSON field whose name holds one of these goes whole, name kept, the
 	// value read the way it is written: an array of strings (Caddy logs every
 	// header as "Name":["value"]) or one more deeply nested, an object, a
-	// string with escaped quotes, a single-quoted string (Python's repr), a
-	// number or other bare word. What doesn't close, or nests deeper than
-	// these, goes to the end of the line, so a closing bracket in a value or a
-	// line cut short never ships the rest.
+	// string with escaped quotes, a single-quoted string (Python's repr), or
+	// a number, true, false or null up to its comma. Any other bare word runs
+	// to the next blank. A wrapper (Some("x")), what doesn't close, and what
+	// nests deeper than these go to the end of the line, so a closing bracket
+	// in a value or a line cut short never ships the rest. => := and == count
+	// as well as : and =.
 	stage.replace {
-		expression = `(?i)["'][\w.-]*authorization[\w.-]*["']\s*[:=]\s*(\[(?:"(?:[^"\\]|\\.)*"|\[(?:"(?:[^"\\]|\\.)*"|[^"\[\]])*\]|[^"\[\]])*\]|\{(?:"(?:[^"\\]|\\.)*"|\{(?:"(?:[^"\\]|\\.)*"|[^"{}])*\}|[^"{}])*\}|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,}\]\[{"'\\][^\s,}\]\\]*|.*)`
+		expression = `(?i)["'][\w.-]*authorization[\w.-]*["']\s*(?:=>|:=|==|[:=])\s*(?:(true|false|null|-?\d[\d.eE+-]*)(?:[,}\]\s]|$)|(\[(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"'\[\]])*\]|[^"'\[\]])*\]|\{(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\{(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"'{}])*\}|[^"'{}])*\}|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\w+\(.*|[^\s,}\]\[{"'\\](?:\\.|[^\s\\])*|.*))`
 		replace    = "[REDACTED-CREDENTIAL]"
 	}
 
 	stage.replace {
-		expression = `(?i)["'][\w.-]*cookie[\w.-]*["']\s*[:=]\s*(\[(?:"(?:[^"\\]|\\.)*"|\[(?:"(?:[^"\\]|\\.)*"|[^"\[\]])*\]|[^"\[\]])*\]|\{(?:"(?:[^"\\]|\\.)*"|\{(?:"(?:[^"\\]|\\.)*"|[^"{}])*\}|[^"{}])*\}|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,}\]\[{"'\\][^\s,}\]\\]*|.*)`
+		expression = `(?i)["'][\w.-]*cookie[\w.-]*["']\s*(?:=>|:=|==|[:=])\s*(?:(true|false|null|-?\d[\d.eE+-]*)(?:[,}\]\s]|$)|(\[(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"'\[\]])*\]|[^"'\[\]])*\]|\{(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\{(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"'{}])*\}|[^"'{}])*\}|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\w+\(.*|[^\s,}\]\[{"'\\](?:\\.|[^\s\\])*|.*))`
 		replace    = "[REDACTED-COOKIE]"
 	}
 
@@ -165,14 +167,15 @@ loki.process "scrub" {
 	// pass, otp and auth are the whole name or its last part (db_pass, x-auth),
 	// never part of a word (bypass, authenticated).
 	stage.replace {
-		expression = `(?i)["'](?:[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|private[_-]?key|preshared[_-]?key|session|credential)[\w.-]*|(?:[\w.-]*[_.-])?(?:pass|t?otp|o?auth))["']\s*[:=]\s*(\[(?:"(?:[^"\\]|\\.)*"|\[(?:"(?:[^"\\]|\\.)*"|[^"\[\]])*\]|[^"\[\]])*\]|\{(?:"(?:[^"\\]|\\.)*"|\{(?:"(?:[^"\\]|\\.)*"|[^"{}])*\}|[^"{}])*\}|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,}\]\[{"'\\][^\s,}\]\\]*|.*)`
+		expression = `(?i)["'](?:[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|private[_-]?key|preshared[_-]?key|session|credential)[\w.-]*|(?:[\w.-]*[_.-])?(?:pass|t?otp|o?auth))["']\s*(?:=>|:=|==|[:=])\s*(?:(true|false|null|-?\d[\d.eE+-]*)(?:[,}\]\s]|$)|(\[(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"'\[\]])*\]|[^"'\[\]])*\]|\{(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\{(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"'{}])*\}|[^"'{}])*\}|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\w+\(.*|[^\s,}\]\[{"'\\](?:\\.|[^\s\\])*|.*))`
 		replace    = "[REDACTED-SECRET]"
 	}
 
 	// The same inside a JSON string: a log line that quotes a JSON body, with
-	// \" for its quotes. Deeper quoting than that goes to the end of the line.
+	// \" for its quotes (\' for Python's). Deeper quoting or nesting than that
+	// goes to the end of the line.
 	stage.replace {
-		expression = `(?i)\\+"(?:[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|private[_-]?key|preshared[_-]?key|session|credential|authorization|cookie)[\w.-]*|(?:[\w.-]*[_.-])?(?:pass|t?otp|o?auth))\\+"\s*:\s*(\[(?:\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|[^"\\\]])*\]|\{(?:\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|[^"\\{}])*\}|\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|[^\s,}\]\[{"'\\][^\s,}\]\\]*|.*)`
+		expression = `(?i)\\+["'](?:[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|private[_-]?key|preshared[_-]?key|session|credential|authorization|cookie)[\w.-]*|(?:[\w.-]*[_.-])?(?:pass|t?otp|o?auth))\\+["']\s*(?:=>|:=|==|[:=])\s*(?:(true|false|null|-?\d[\d.eE+-]*)(?:[,}\]\s]|$)|(\[(?:\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|[^"\\\[\]])*\]|\{(?:\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|[^"\\{}])*\}|\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|\\'(?:\\\\\\'|\\\\|\\[^'\\]|[^'\\])*\\'|\w+\(.*|[^\s,}\]\[{"'\\](?:\\.|[^\s\\])*|.*))`
 		replace    = "[REDACTED-SECRET]"
 	}
 
@@ -188,24 +191,26 @@ loki.process "scrub" {
 		replace    = "[REDACTED-COOKIE]"
 	}
 
-	// key=value or key: value, quoted (quotes escaped inside it) or bare. A
-	// bare one goes up to the next blank, & or closing quote, so a comma or a
+	// key=value or key: value, or with => := or ==: quoted, with quotes
+	// escaped inside it or the whole value in \" (logfmt, a JSON msg), or bare.
+	// A bare one goes up to the next blank, & or closing quote, so a comma or a
 	// semicolon in it (?password=a,b;c in a uri) doesn't ship the rest; \" is
-	// part of the value, as in a JSON string.
+	// part of the value, as in a JSON string. One that opens a bracket or a
+	// wrapper (password: Some("x"), token: [ "x" ]) goes to the end of the line.
 	//
 	// The first two alternatives have no capture group, so they hide nothing:
 	// they match first and take these out of the rule's reach. systemd's
 	// `session-3.scope: Deactivated` names a unit, and sudo's `TTY=x ; PWD=/y ;`
 	// a directory. Any other PWD is a password's short name.
 	stage.replace {
-		expression = `(?i)session-\w+\.scope:|(?-i:\bTTY=[^\s;=:]+ ; PWD=/[^\s;=:]* ;)|[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|private[_-]?key|preshared[_-]?key|session|credential)[\w.-]*\s*[=:]\s*("(?:[^"\\]|\\.)*"|".*|'(?:[^'\\]|\\.)*'|'.*|(?:\\.|[^\s&"'\\])(?:\\.|[^\s&"\\])*)`
+		expression = `(?i)session-\w+\.scope:|(?-i:\bTTY=[^\s;=:]+ ; PWD=/[^\s;=:]* ;)|[\w.-]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|private[_-]?key|preshared[_-]?key|session|credential)[\w.-]*\s*(?:=>|:=|==|=|:)\s*("(?:[^"\\]|\\.)*"|".*|'(?:[^'\\]|\\.)*'|'.*|\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|\\".*|[\[{(].*|\w+\(.*|(?:\\.|[^\s&"'\\])(?:\\.|[^\s&"\\])*)`
 		replace    = "[REDACTED-SECRET]"
 	}
 
 	// Short names that are also ordinary words: only with an equals sign, so
 	// `auth: ok` and `tests pass: 5` stay. `otp: 123456` gets through.
 	stage.replace {
-		expression = `(?i)\b(?:[\w.-]*[_.-])?(?:pass|t?otp|o?auth)\s*=\s*("(?:[^"\\]|\\.)*"|".*|'(?:[^'\\]|\\.)*'|'.*|(?:\\.|[^\s&"'\\])(?:\\.|[^\s&"\\])*)`
+		expression = `(?i)\b(?:[\w.-]*[_.-])?(?:pass|t?otp|o?auth)\s*(?:=>|:=|==|=)\s*("(?:[^"\\]|\\.)*"|".*|'(?:[^'\\]|\\.)*'|'.*|\\"(?:\\\\\\"|\\\\|\\[^"\\]|[^"\\])*\\"|\\".*|[\[{(].*|\w+\(.*|(?:\\.|[^\s&"'\\])(?:\\.|[^\s&"\\])*)`
 		replace    = "[REDACTED-SECRET]"
 	}
 
@@ -281,7 +286,7 @@ loki.process "scrub" {
 
 	// A secret in a shape none of the rules caught: drop the line.
 	stage.drop {
-		expression          = `(?i)[\w.-]*(?:password|passwd|secret|ssn|cvv|cvc)[\w.-]*\s*[:=]\s*[^\s\["']`
+		expression          = `(?i)[\w.-]*(?:password|passwd|secret|ssn|cvv|cvc)[\w.-]*\s*[:=]\s*[^\s\["'=>:]`
 		drop_counter_reason = "secret"
 	}
 }

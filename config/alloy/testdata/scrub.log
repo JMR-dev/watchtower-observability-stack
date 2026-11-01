@@ -109,4 +109,21 @@ same:126 podman[3120]: container health_status 7d3f8a1b2c4e (image=docker.io/gra
 same:127 ts=2026-10-26T05:00:13.123Z level=info msg="finished node evaluation" controller_path=/ controller_id="" node_id=loki.write.watchtower duration=1.2ms
 same:128 wg-quick[812]: Configuration parsing error
 same:129 {"level":"info","logger":"http.log.access.log0","request":{"method":"GET","uri":"/?page=2&q=a,b;c(d","headers":{"Accept":["*/*"]}},"status":200}
+keep:130 {"level":"info","msg":"login password=\"correct fakeLEAK200 horse\" failed"}
+keep:131 ts=2026-11-01T00:00:00Z level=warn msg="retry with token=\"two fakeLEAK201\" and pass=\"three fakeLEAK202\" now"
+keep:132 {"msg":"retry password=\"ab\\\"fakeLEAK203 x\" and token=\"unclosed fakeLEAK204 x"}
+keep:133 User { name: "bob", password: Some("fakeLEAK205"), token: Some("fakeLEAK206") }
+keep:134 { token: [ "fakeLEAK207" ], session: { id: "fakeLEAK208" }, password: ["fakeLEAK209"], secret: ['fakeLEAK210'] }
+keep:135 "password" => "fakeLEAK211" :password => "fakeLEAK212"
+keep:136 password=>"fakeLEAK213" token=>'fakeLEAK214'
+keep:137 password := fakeLEAK215
+keep:138 token := "fakeLEAK216 fakeLEAK217" pass := fakeLEAK218
+keep:139 password == "fakeLEAK219" otp == 'fakeLEAK220'
+keep:140 "password"=ab,fakeLEAK221 "token": ab]fakeLEAK222 "secret": ab\"fakeLEAK223
+keep:141 {"msg":"bad {\"token\":[[\"fakeLEAK224\"],\"fakeLEAK225\"]} x"}
+keep:142 {"msg":"bad {\"token\":[\"a\",[\"b\"],\"fakeLEAK226\"]} x"}
+keep:143 {"msg":"bad {\"password\"=\"fakeLEAK227\"} x"}
+keep:144 {'cookies': {'sid': 'ab}fakeLEAK228'}, 'token': ['a]fakeLEAK229'], 'authorization': ['b]fakeLEAK230']}
+keep:145 {"msg":"body {\'password\': \'fakeLEAK231\'}"}
+keep:146 {"password": Some("a fakeLEAK232")}
 same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series
