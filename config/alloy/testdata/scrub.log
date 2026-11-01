@@ -210,4 +210,25 @@ keep:232 password=fakeLEAK428 passwd=fakeLEAK429 pwd=fakeLEAK430 secret=fakeLEAK
 keep:233 <password>fakeLEAK442</password> <passwd>fakeLEAK443</passwd> <pwd>fakeLEAK444</pwd> <secret>fakeLEAK445</secret> <token>fakeLEAK446</token> <bearer>fakeLEAK447</bearer> <api_key>fakeLEAK448</api_key> <private_key>fakeLEAK449</private_key> <preshared_key>fakeLEAK450</preshared_key> <session>fakeLEAK451</session> <credential>fakeLEAK452</credential> <csrf>fakeLEAK453</csrf> <otp_code>fakeLEAK454</otp_code> <access_key>fakeLEAK455</access_key>
 keep:234 --password fakeLEAK456 --passwd fakeLEAK457 --pwd fakeLEAK458 --secret fakeLEAK459 --token fakeLEAK460 --bearer fakeLEAK461 --api-key fakeLEAK462 --private-key fakeLEAK463 --preshared-key fakeLEAK464 --session fakeLEAK465 --credential fakeLEAK466 --csrf fakeLEAK467 --otp-code fakeLEAK468 --access-key fakeLEAK469
 keep:235 [('password', 'fakeLEAK470'), ('passwd', 'fakeLEAK471'), ('pwd', 'fakeLEAK472'), ('secret', 'fakeLEAK473'), ('token', 'fakeLEAK474'), ('bearer', 'fakeLEAK475'), ('api_key', 'fakeLEAK476'), ('private_key', 'fakeLEAK477'), ('preshared_key', 'fakeLEAK478'), ('session', 'fakeLEAK479'), ('credential', 'fakeLEAK480'), ('csrf', 'fakeLEAK481'), ('otp_code', 'fakeLEAK482'), ('access_key', 'fakeLEAK483')]
+keep:240 "authorization" => "fakeLEAK500"
+keep:241 "cookie" := "fakeLEAK501"
+keep:242 "x-authorization" == "fakeLEAK502"
+keep:243 "cookie" == "fakeLEAK503"
+keep:244 "cookie" => "fakeLEAK504"
+keep:245 "authorization" := "fakeLEAK505"
+keep:246 {"authorization": Some("a fakeLEAK506")}
+keep:247 {"cookie": Some("a fakeLEAK507")}
+keep:248 "password" := "fakeLEAK508"
+keep:249 "token" == "fakeLEAK509"
+keep:250 {"msg":"x {\"password\" => \"fakeLEAK510\"} y"}
+keep:251 {"msg":"x {\"password\" := \"fakeLEAK511\"} y"}
+keep:252 {"msg":"x {\"password\" == \"fakeLEAK512\"} y"}
+keep:253 {"msg":"x {\"password\": Some(\"a fakeLEAK513\")} y"}
+keep:254 {"msg":"x {\"sid\":\"fakeLEAK514\",\"ssn\":\"fakeLEAK515\",\"cvv\":\"fakeLEAK516\",\"cvc\":\"fakeLEAK517\"} y"}
+keep:255 cvc=fakeLEAK518 cvv2=fakeLEAK519
+keep:256 pass => "fakeLEAK520" otp=Some("a fakeLEAK521")
+keep:257 auth=[ "a fakeLEAK522" ]
+keep:258 {"msg":"x otp=\"unclosed fakeLEAK523 y"}
+keep:259 --token 'a fakeLEAK524' now
+keep:260 peer 2001:0db8:85a3:0000:0000:8a2e:0370:7334 up
 same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series
