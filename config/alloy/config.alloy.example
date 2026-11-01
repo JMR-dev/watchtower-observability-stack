@@ -238,6 +238,12 @@ loki.write "watchtower" {
 
 prometheus.exporter.unix "host" {
 	set_collectors = ["cpu", "diskstats", "filesystem", "loadavg", "meminfo", "netdev", "pressure", "stat", "time", "uname", "vmstat"]
+
+	// The exporter's own exclusions, and each login's /run/user/<uid>: a
+	// label with an OS Login uid in it otherwise.
+	filesystem {
+		mount_points_exclude = "^/(dev|proc|run/credentials/.+|run/user/.+|sys|var/lib/docker/.+|var/lib/containers/storage/.+)($|/)"
+	}
 }
 
 prometheus.exporter.self "alloy" { }
