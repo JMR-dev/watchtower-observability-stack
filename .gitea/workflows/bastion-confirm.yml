@@ -1,0 +1,47 @@
+# Cancels the bastion's ruleset rollback (config/bastion/ruleset.sh): when a
+# new metadata guard goes on, the bastion rolls it back after 10 minutes unless
+# someone has shown it is still reachable. scripts/bootstrap.sh dispatches this
+# through Gitea's API for the branch it's run from. It reaches the bastion the
+# way deploy.yml's ssh_via=bastion does, as watchtower-deployer@ over IAP, and
+# all it does there is log in and leave a file (scripts/bastion-confirm.sh).
+#
+# Nothing to deploy and no secret from Secret Manager: only GCP_DEPLOYER_KEY.
+# Dispatching it by hand is harmless: with nothing pending the file is ignored.
+name: bastion-confirm
+
+on:
+  workflow_dispatch:
+    inputs:
+      host_key:
+        description: The bastion's ssh-ed25519 host key, to pin (a new VM's isn't in the stack file yet)
+        type: string
+        default: ""
+
+# Not cancelled: a confirmation in progress is the one that counts.
+concurrency:
+  group: bastion-confirm
+  cancel-in-progress: false
+
+jobs:
+  confirm:
+    # A job pod of its own: the shared DinD runners' jobs can see each other's
+    # credentials.
+    runs-on: ubuntu-latest
+    # Under the rollback's 10 minutes: past that it has nothing left to cancel.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.gitea/actions/setup
+        with:
+          tools: gcloud
+          gcp-key: ${{ secrets.GCP_DEPLOYER_KEY }}
+      - name: Log in to the bastion as the deployer, and confirm
+        env:
+          HOST_KEY: ${{ inputs.host_key }}
+        run: |
+          set -euo pipefail
+          export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$GOOGLE_APPLICATION_CREDENTIALS"
+          scripts/bastion-confirm.sh
+      - name: Remove keys
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/gcp-deployer.json" "${RUNNER_TEMP}/gcloud"

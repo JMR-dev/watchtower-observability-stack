@@ -59,9 +59,15 @@
 #      a VM that runs as a service account only if they may act as it, so
 #      watchtower-deployer gets roles/iam.serviceAccountUser on it.
 #      An existing bastion is updated in place, keeping its boot disk and
-#      with it its SSH host key; anyone on it then is cut off. The account
-#      goes on only after a boot that loaded the guard: two restarts the
-#      first time, so no user is ever on a VM with an unguarded token.
+#      with it its SSH host key; anyone on it then is cut off. A new guard
+#      ruleset goes on under a 10-minute rollback (config/bastion/ruleset.sh):
+#      this dispatches bastion-confirm.yml, for the branch it's run from, to
+#      log in as the deployer and cancel it, and waits to see which came of
+#      it. Rolled back, it stops, and a rerun tries again: a fixed file has a
+#      new sha256, and the same file is asked for again. The account goes on
+#      only after that ruleset is confirmed: two restarts the first time. sshd
+#      runs only with the guard loaded or on a VM with no account, so no user
+#      is ever on a VM with a token and no guard.
 #      Writes the NAT address and the bastion's SSH host key into
 #      infra/cloud/Pulumi.prod.yaml (breakGlassCidrs, bastionHostKey), never
 #      to the terminal; commit the change and deploy.
@@ -71,8 +77,9 @@
 # Costs: the bastion is free-tier; Cloud NAT and its address about $4-5 a
 # month.
 #
-# Needs: gcloud (as the owner of both GCP projects), hcloud, aws, jq, and the
-# environment scripts/env.sh exports (HCLOUD_TOKEN, AWS_ACCESS_KEY_ID /
+# Needs: gcloud (as the owner of both GCP projects), hcloud, aws, jq, gopass and
+# curl (the Gitea token, for bastion-confirm.yml), and the environment
+# scripts/env.sh exports (HCLOUD_TOKEN, AWS_ACCESS_KEY_ID /
 # AWS_SECRET_ACCESS_KEY = the admin S3 key).
 
 set -euo pipefail
@@ -101,6 +108,7 @@ BASTION_ZONE="us-east1-b"
 BASTION_RANGE="10.90.0.0/28"
 BASTION_IP="10.90.0.2"
 IAP_RANGE="35.235.240.0/20"
+GITEA_API="https://gitea.jasonmross.dev/api/v1/repos/JMR-dev/watchtower-observability-stack"
 
 PREFIX="$(sed -n 's/^  watchtower:bucketPrefix: //p' "$stack_file")"
 PROJECT_ID="$(sed -n 's/^  watchtower:hetznerProjectId: "\{0,1\}\([0-9]*\)"\{0,1\}$/\1/p' "$stack_file")"
@@ -385,12 +393,14 @@ exists routers nats describe "$BASTION" --router "$BASTION" --region "$BASTION_R
   compute routers nats create "$BASTION" --router "$BASTION" --region "$BASTION_REGION" \
     --nat-external-ip-pool "${BASTION}-nat" --nat-all-subnet-ip-ranges
 
-# What it runs (config/bastion/startup.sh): security updates every day,
-# rebooting at 04:00 UTC when one needs it; the metadata guard; its agent
-# peer and Alloy. The other two files it reads from its metadata at boot.
+# What it runs (config/bastion/startup.sh): the metadata guard, under its
+# rollback (ruleset.sh); security updates every day, rebooting at 04:00 UTC
+# when one needs it; its agent peer and Alloy. The other three files it reads
+# from its metadata at boot.
 bastion_dir="${repo_root}/config/bastion"
 bastion_alloy="${repo_root}/config/alloy/bastion.alloy"
-bastion_files="startup-script=${bastion_dir}/startup.sh,watchtower-nftables=${bastion_dir}/nftables.conf,watchtower-alloy=${bastion_alloy}"
+bastion_files="startup-script=${bastion_dir}/startup.sh,watchtower-nftables=${bastion_dir}/nftables.conf,watchtower-ruleset=${bastion_dir}/ruleset.sh,watchtower-alloy=${bastion_alloy}"
+ruleset_sha="$(sha256sum "${bastion_dir}/nftables.conf" | cut -d' ' -f1)"
 BASTION_SA="$(sa_email "$BASTION")"
 # OS Login lets a user onto a VM that runs as a service account only if they
 # may act as that account: without this, attaching it would lock
@@ -420,7 +430,85 @@ bastion_up() {
   done
   die "${BASTION} stayed ${state} for 5 minutes, so break glass is down"
 }
+# ruleset_state <sha> <since>: the serial output on stdin; prints what last came
+# of that ruleset (pending, confirmed, rolled back or refused), going by lines
+# no older than since, an epoch. Nothing when there is none: serial output may
+# outlast a stop, so a line alone says nothing about this boot. scripts/
+# check-bastion.sh tests it.
+ruleset_state() {
+  { grep -oE 'bastion: ruleset (pending|confirmed|rolled back|refused) [0-9a-f]{64} at [0-9]+' || true; } |
+    awk -v sha="$1" -v since="$2" '
+      $(NF - 2) == sha && $NF + 0 >= since + 0 {
+        state = $3
+        if (NF == 7) state = $3 " " $4
+      }
+      END { print state }'
+}
+bastion_serial() {
+  compute instances get-serial-port-output "$BASTION" --zone "$BASTION_ZONE" 2>/dev/null || true
+}
+# The way to cancel a rollback by hand, as any account with OS Login on it.
+confirm_by_hand="gcloud compute ssh ${BASTION} --zone ${BASTION_ZONE} --project ${GCP_PROJECT} --tunnel-through-iap --command 'touch /run/watchtower-ruleset/confirm'"
+# The guest agent publishes the host keys once the VM has booted.
+bastion_host_key() {
+  compute instances get-guest-attributes "$BASTION" --zone "$BASTION_ZONE" \
+    --query-path hostkeys/ssh-ed25519 --format 'value(value)' 2>/dev/null || true
+}
+# Dispatches bastion-confirm.yml through Gitea's API, for this branch: it logs
+# in as the deployer and cancels the rollback. Says plainly if it can't, and
+# never fails: then the rollback is what happens. The token goes through a
+# pipe, never into a variable or an argument. The job pins the host key sent
+# here: a new VM's isn't in the stack file yet.
+bastion_dispatch() {
+  local branch payload key
+  branch="$(git -C "$repo_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  key="$(bastion_host_key)"
+  payload="$(mktemp)"
+  jq -n --arg ref "$branch" --arg key "${key:+ssh-ed25519 ${key}}" '{ref: $ref, inputs: {host_key: $key}}' >"$payload"
+  unset key
+  if gopass show -o api/gitea >/dev/null &&
+    gopass show -o api/gitea | sed 's/.*/header = "Authorization: token &"/' |
+    curl -fsS -K - -H 'Content-Type: application/json' -X POST --data @"$payload" -o /dev/null \
+      "${GITEA_API}/actions/workflows/bastion-confirm.yml/dispatches"; then
+    log "  dispatched bastion-confirm.yml on ${branch}"
+  else
+    printf 'warning: could not dispatch bastion-confirm.yml on %s: Gitea is down, gopass is locked, or the branch is not pushed.\n' "${branch:-this checkout}" >&2
+    printf 'warning: unless someone logs in, the bastion rolls this ruleset back in 10 minutes. To confirm by hand:\n  %s\n' "$confirm_by_hand" >&2
+  fi
+  rm -f "$payload"
+}
+# Waits for what comes of the ruleset at this boot, dispatching the job when it
+# goes pending. A rollback takes 10 minutes and a reboot, so this outlasts it.
+bastion_ruleset_wait() {
+  local since=$1 state="" dispatched=""
+  log "  waiting for ${BASTION}'s ruleset ${ruleset_sha:0:12}: it rolls back after 10 minutes unless confirmed"
+  for _ in $(seq 100); do
+    state="$(bastion_serial | ruleset_state "$ruleset_sha" "$since")"
+    case "$state" in
+      confirmed)
+        log "  ruleset confirmed"
+        return 0
+        ;;
+      "rolled back")
+        die "${BASTION} rolled ruleset ${ruleset_sha:0:12} back: it runs on its old ruleset, and as no one if it has no account yet. Rerun this: with a fixed config/bastion/nftables.conf, or with the same file to try it again (once Gitea can run bastion-confirm.yml; or confirm by hand: ${confirm_by_hand})"
+        ;;
+      refused)
+        die "${BASTION} refused ruleset ${ruleset_sha:0:12} (see its serial output): it fails nft --check or has no guard, so what it ran stays. Fix config/bastion/nftables.conf and rerun"
+        ;;
+      pending)
+        if [[ -z "$dispatched" ]]; then
+          dispatched=1
+          bastion_dispatch
+        fi
+        ;;
+      *) ;;
+    esac
+    sleep 10
+  done
+  die "${BASTION} reported nothing final for ruleset ${ruleset_sha:0:12} within 15 minutes, so it still runs as it did: see its serial output, and rerun"
+}
 if ! exists instances describe "$BASTION" --zone "$BASTION_ZONE"; then
+  bastion_new=1
   compute instances create "$BASTION" --zone "$BASTION_ZONE" --machine-type e2-micro \
     --network-interface "subnet=${BASTION},private-network-ip=${BASTION_IP},no-address" \
     --image-family debian-13 --image-project debian-cloud \
@@ -435,28 +523,56 @@ fi
 # narrower scope than cloud-platform, so IAM (one secret, read only) is the
 # fence.
 bastion_up
+# The deployer: OS Login on this VM (which includes looking it up), and an IAP
+# tunnel to its port 22 only. Before anything below, which waits on its logging
+# in.
+retry_iam compute instances add-iam-policy-binding "$BASTION" --zone "$BASTION_ZONE" \
+  --member "serviceAccount:${DEPLOYER}" --role roles/compute.osLogin
+retry_iam gcloud projects add-iam-policy-binding "$GCP_PROJECT" \
+  --member "serviceAccount:${DEPLOYER}" --role roles/iap.tunnelResourceAccessor \
+  --condition "expression=destination.ip == \"${BASTION_IP}\" && destination.port == 22,title=${BASTION}-ssh,description=IAP to the bastion's SSH and nothing else"
+
 current="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format json | jq -cS '{
   sa: (.serviceAccounts[0].email // ""), scopes: (.serviceAccounts[0].scopes // []),
-  meta: ([.metadata.items[]? | select(.key | IN("startup-script", "watchtower-nftables", "watchtower-alloy"))] | from_entries)}')"
+  meta: ([.metadata.items[]? | select(.key | IN("startup-script", "watchtower-nftables", "watchtower-ruleset", "watchtower-alloy"))] | from_entries)}')"
 want="$(jq -ncS --arg sa "$BASTION_SA" --rawfile s "${bastion_dir}/startup.sh" \
-  --rawfile n "${bastion_dir}/nftables.conf" --rawfile a "$bastion_alloy" '{
+  --rawfile n "${bastion_dir}/nftables.conf" --rawfile r "${bastion_dir}/ruleset.sh" --rawfile a "$bastion_alloy" '{
   sa: $sa, scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-  meta: {"startup-script": $s, "watchtower-nftables": $n, "watchtower-alloy": $a}}')"
-if [[ "$(jq -c .meta <<<"$current")" != "$(jq -c .meta <<<"$want")" ]]; then
+  meta: {"startup-script": $s, "watchtower-nftables": $n, "watchtower-ruleset": $r, "watchtower-alloy": $a}}')"
+account_differs=""
+[[ "$(jq -c 'del(.meta)' <<<"$current")" == "$(jq -c 'del(.meta)' <<<"$want")" ]] || account_differs=1
+ruleset_before="$(bastion_serial | ruleset_state "$ruleset_sha" 0)"
+# A rerun after a rollback: this file again, even unchanged, since nothing need
+# be wrong with it (Gitea was down). The VM takes a new value here to mean so,
+# once.
+retry_args=()
+if [[ "$ruleset_before" == "rolled back" ]]; then
+  log "  ${BASTION} rolled this ruleset back before: trying it again"
+  retry_args=(--metadata "watchtower-nftables-retry=$(date -u +%s)")
+fi
+# From before the stop: serial output may outlast one, and an earlier line is
+# no news of this boot.
+ruleset_since=0
+restarted=""
+if [[ "$(jq -c .meta <<<"$current")" != "$(jq -c .meta <<<"$want")" || "${#retry_args[@]}" -gt 0 ]]; then
   log "  updating ${BASTION} in place: stop, its metadata, start"
+  ruleset_since="$(date +%s)"
+  restarted=1
   compute instances stop "$BASTION" --zone "$BASTION_ZONE"
-  compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata-from-file "$bastion_files"
+  compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata-from-file "$bastion_files" "${retry_args[@]}"
   bastion_start
 fi
-if [[ "$(jq -c 'del(.meta)' <<<"$current")" != "$(jq -c 'del(.meta)' <<<"$want")" ]]; then
-  # Never on a VM that hasn't loaded the guard: its startup script does that
-  # only after sshd is up, so on a first boot with the account a user could
-  # reach the token for about a minute. Once it has, nftables.service loads
-  # the guard before the network at every boot, so a line left in the serial
-  # output from an earlier boot says as much as a new one. And not during its
-  # first apt install, which the line comes after: a stop there can leave
-  # dpkg half done.
-  log "  waiting for ${BASTION} to load its metadata guard and finish apt"
+# Only when the answer matters: a rerun with nothing to do has nothing to wait
+# for, and serial output ages out.
+if [[ -n "${bastion_new:-}" || -n "$restarted" || -n "$account_differs" || "$ruleset_before" == pending ]]; then
+  bastion_ruleset_wait "$ruleset_since"
+fi
+if [[ -n "$account_differs" ]]; then
+  # Never on a VM whose ruleset isn't confirmed (above): sshd's gate would keep
+  # everyone out of a VM with a token and no guard, and with a bad ruleset that
+  # means no way in at all. And not during its first apt install, which this
+  # line comes after: a stop there can leave dpkg half done.
+  log "  waiting for ${BASTION} to finish apt"
   guarded=""
   for _ in $(seq 90); do
     if compute instances get-serial-port-output "$BASTION" --zone "$BASTION_ZONE" 2>/dev/null |
@@ -472,22 +588,12 @@ if [[ "$(jq -c 'del(.meta)' <<<"$current")" != "$(jq -c 'del(.meta)' <<<"$want")
   bastion_start
 fi
 
-# The deployer: OS Login on this VM (which includes looking it up), and an
-# IAP tunnel to its port 22 only.
-retry_iam compute instances add-iam-policy-binding "$BASTION" --zone "$BASTION_ZONE" \
-  --member "serviceAccount:${DEPLOYER}" --role roles/compute.osLogin
-retry_iam gcloud projects add-iam-policy-binding "$GCP_PROJECT" \
-  --member "serviceAccount:${DEPLOYER}" --role roles/iap.tunnelResourceAccessor \
-  --condition "expression=destination.ip == \"${BASTION_IP}\" && destination.port == 22,title=${BASTION}-ssh,description=IAP to the bastion's SSH and nothing else"
-
 nat_ip="$(compute addresses describe "${BASTION}-nat" --region "$BASTION_REGION" --format 'value(address)')"
 # Never "Done" with break glass down.
 bastion_up
-# The guest agent publishes the host keys once the VM has booted.
 host_key=""
 for _ in $(seq 1 36); do
-  host_key="$(compute instances get-guest-attributes "$BASTION" --zone "$BASTION_ZONE" \
-    --query-path hostkeys/ssh-ed25519 --format 'value(value)' 2>/dev/null || true)"
+  host_key="$(bastion_host_key)"
   [[ -n "$host_key" ]] && break
   sleep 5
 done
