@@ -126,4 +126,12 @@ keep:143 {"msg":"bad {\"password\"=\"fakeLEAK227\"} x"}
 keep:144 {'cookies': {'sid': 'ab}fakeLEAK228'}, 'token': ['a]fakeLEAK229'], 'authorization': ['b]fakeLEAK230']}
 keep:145 {"msg":"body {\'password\': \'fakeLEAK231\'}"}
 keep:146 {"password": Some("a fakeLEAK232")}
+keep:150 GET /user/login?redirect_to=%2Freset%3Ftoken%3DfakeLEAK240%26code%3DfakeLEAK241 HTTP/1.1
+keep:151 GET /cb?next=https%3A%2F%2Fapp.example.org%2F%3Fpassword%3DfakeLEAK242 HTTP/1.1
+keep:152 GET /cb?next=%2Fa%3Fcode%3DfakeLEAK243 HTTP/1.1
+keep:153 GET /cb?next=%2Fa%3Fx%3D1%26state%3DfakeLEAK244 HTTP/1.1
+keep:154 GET /cb?a=1&amp;code=fakeLEAK245&amp;state=fakeLEAK246 HTTP/1.1
+keep:155 {"uri":"/cb?a=1\u0026code=fakeLEAK247\u0026state=fakeLEAK248\u0026page=2"}
+keep:156 GET /cb?next=%252Freset%253Fpassword%253DfakeLEAK249 HTTP/1.1
+keep:157 GET /cb?next=%2Fa%3Fpass%3DfakeLEAK250 HTTP/1.1
 same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series

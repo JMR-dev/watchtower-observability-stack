@@ -5,4 +5,5 @@ drop:c02 the rest of a long header fakeLEAK902\",\"Accept\":[\"*/*\"]},\"status\
 ["drop:c05","fakeLEAK905"]
 "drop:c06 fakeLEAK906"
 12345 drop:c07
+{"fixture":"keep:c09","logger":"http.log.access.log0","request":{"method":"GET","uri":"/login?redirect_to=%2Freset%3Ftoken%3DfakeLEAK910%26code%3DfakeLEAK911","headers":{"Referer":["https://app.example.org/reset?token=fakeLEAK912&next=/a"]}},"status":200,"resp_headers":{"Location":["https://app.example.org/cb?code=fakeLEAK913&state=fakeLEAK914"]}}
 {"fixture":"keep:c08","level":"info","ts":1793018979.2,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance"}
