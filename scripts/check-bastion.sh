@@ -25,7 +25,8 @@
 #          that won't take a restore, the floor, what a non-root user can do,
 #          and the guest attribute bootstrap.sh reads, through its own
 #          ruleset_state and bastion_ruleset_wait. Its units are checked by
-#          systemd-analyze verify.
+#          systemd-analyze verify. Cron refuses a user, and a crontab left from
+#          before is gone.
 #
 #   scripts/check-bastion.sh            # docker; CONTAINER_RUNTIME=podman locally
 #
@@ -161,7 +162,7 @@ chmod 0644 /check/*
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
 # systemd and openssh-server for their units: neither runs here.
-apt-get install -y -qq --no-install-recommends nftables python3 iproute2 systemd openssh-server >/dev/null
+apt-get install -y -qq --no-install-recommends nftables python3 iproute2 systemd openssh-server cron >/dev/null
 
 fail=0
 pass() { echo "ok    $*"; }
@@ -1123,6 +1124,7 @@ check "units: setup" tool setup
 verify="$(systemd-analyze verify --man=no \
   watchtower-ruleset-rollback.timer watchtower-ruleset-rollback.service \
   watchtower-ruleset-confirm.path watchtower-ruleset-confirm.service \
+  watchtower-ruleset-floor.service 'run-watchtower\x2druleset.mount' \
   ssh.service nftables.service 2>&1)"
 vrc=$?
 if [[ "$vrc" == 0 && -z "$(grep -E 'watchtower|ssh\.service|nftables\.service' <<<"$verify")" ]]; then
@@ -1136,9 +1138,47 @@ check "units: sshd asks the gate" grep -qx 'ExecStartPre=/usr/local/sbin/watchto
 refute "units: a restart of the guard doesn't take sshd down" grep -qE '^(Requires|BindsTo|PartOf|Requisite)=' /etc/systemd/system/ssh.service.d/watchtower-guard.conf
 check "units: the timer comes back only with a trial" grep -qx 'ConditionPathExists=/var/lib/watchtower-bastion/pending' /etc/systemd/system/${timer}
 check "units: 10 minutes" grep -qx 'OnActiveSec=10min' /etc/systemd/system/${timer}
-check "units: the directory is sticky and open to all" grep -qx 'DirectoryMode=1777' /etc/systemd/system/watchtower-ruleset-confirm.path
+mount_unit='/etc/systemd/system/run-watchtower\x2druleset.mount'
+check "units: the directory is sticky, open to all and tiny" grep -qx 'Options=mode=1777,size=64k,nr_inodes=1024,nosuid,nodev,noexec' "$mount_unit"
+check "units: the path unit waits for it" grep -qx 'RequiresMountsFor=/run/watchtower-ruleset' /etc/systemd/system/watchtower-ruleset-confirm.path
 check "units: serial output from the rollback" grep -qx 'StandardOutput=journal+console' /etc/systemd/system/watchtower-ruleset-rollback.service
 check "units: serial output from the confirmation" grep -qx 'StandardOutput=journal+console' /etc/systemd/system/watchtower-ruleset-confirm.service
+check "units: the rollback retries" grep -qx 'Restart=on-failure' /etc/systemd/system/watchtower-ruleset-rollback.service
+check "units: for as long as it takes" grep -qx 'StartLimitIntervalSec=0' /etc/systemd/system/watchtower-ruleset-rollback.service
+check "units: a ruleset that fails to load brings the floor" grep -qx 'OnFailure=watchtower-ruleset-floor.service' /etc/systemd/system/nftables.service.d/watchtower.conf
+check "units: the floor goes on before the network" grep -qx 'Before=network-pre.target' /etc/systemd/system/watchtower-ruleset-floor.service
+# Nothing of a user's runs without a login. Cron itself says what setup changed:
+# with its allow file gone a user may add a crontab, and then may not.
+rm -f /etc/cron.allow
+printf '@reboot touch /tmp/a-users-job\n' | as_user crontab -
+check "units, cron: a user can add a crontab without it" test "$?" = 0
+check "units, cron: there it is" test -n "$(find /var/spool/cron/crontabs -mindepth 1 -print -quit)"
+mkdir -p /var/lib/systemd/linger
+touch /var/lib/systemd/linger/nobody
+check "units, cron: setup again" tool setup
+check "units, cron: the one from before is gone" test -z "$(find /var/spool/cron/crontabs -mindepth 1 -print -quit)"
+check "units, linger: the one from before is gone" no_file /var/lib/systemd/linger/nobody
+printf '@reboot touch /tmp/a-users-job\n' | as_user crontab - 2>/dev/null
+refute "units, cron: a user can't add one now" test "$?" = 0
+check "units, cron: nor did it stay" test -z "$(find /var/spool/cron/crontabs -mindepth 1 -print -quit)"
+check "units, cron: root only" grep -qx root /etc/cron.allow
+check "units, at: root only" grep -qx root /etc/at.allow
+check "units, linger: asked for by anyone, refused" grep -q 'set-self-linger' /etc/polkit-1/rules.d/10-watchtower-ruleset.rules
+# The floor: the same guard as the file, and it holds.
+nft flush ruleset
+nft --file nftables.conf
+file_guard="$(nft list table inet metadata_guard)"
+check "floor: loads" tool floor
+floor_guard="$(nft list table inet metadata_guard)"
+if [[ "$file_guard" == "$floor_guard" ]]; then pass "ruleset: floor: the same guard as nftables.conf"; else flunk "ruleset: floor: not the same guard as nftables.conf"; fi
+probe 0 "$meta" tcp 80 open
+probe 65534 "$meta" tcp 80 refused
+probe 65534 "$meta" udp 9999 refused
+probe 65534 "$meta" udp 53 open
+probe 65534 "$meta" udp 67 open
+probe 65534 "$meta" udp 123 open
+# The lock: a user can't open it, so can't hold up a rollback by holding it.
+if as_user bash -c 'exec 9</run/watchtower-ruleset.lock' 2>/dev/null; then flunk "ruleset: a user can open the lock"; else pass "ruleset: a user can't open the lock"; fi
 # The login's own part: it asks, and a shell without the directory doesn't care.
 mkdir -p "$dropbox"
 chmod 1777 "$dropbox"

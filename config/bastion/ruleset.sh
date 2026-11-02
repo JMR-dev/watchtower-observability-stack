@@ -38,11 +38,13 @@
 # retried, and can't become a reboot loop.
 #
 # Confirming takes a login and no privileges: anyone may put a file in
-# /run/watchtower-ruleset, sticky and world-writable, and the path unit runs
-# `confirm` as root. It never reads what the file holds and its only effect is
-# to cancel. A user can't reach `rollback` or a reboot through it, and flooding
-# the directory confirms at the first file. A trial empties the directory once
-# it's loaded, so a login from before the load confirms nothing.
+# /run/watchtower-ruleset, a tiny tmpfs, sticky and world-writable, and the path
+# unit runs `confirm` as root. It never reads what the file holds and its only
+# effect is to cancel. A user can't reach `rollback` or a reboot through it, and
+# flooding the directory confirms at the first file. A trial empties the
+# directory once it's loaded, so a login from before the load confirms nothing.
+# And nothing of a user's runs without a login (setup), so nothing confirms
+# without one.
 #
 # The first install has no old ruleset. The VM has no account yet, so no token
 # to guard: rollback puts back what was there, the package's empty ruleset, and
@@ -73,6 +75,8 @@ RETRY_SEEN="${STATE}/retry-seen"
 # ruleset.
 LOCK="/run/watchtower-ruleset.lock"
 DROPBOX="/run/watchtower-ruleset"
+# systemd's own name for a mount there.
+DROPBOX_MOUNT='run-watchtower\x2druleset.mount'
 TOOL="/usr/local/sbin/watchtower-ruleset"
 TIMER="watchtower-ruleset-rollback.timer"
 ROLLBACK="watchtower-ruleset-rollback.service"
@@ -400,9 +404,10 @@ cmd_rollback() {
   roll_back
 }
 
-# put <path> on stdin: the file, 0644 and root's.
+# put <path> on stdin: the file, 0644 and root's. A directory that's there keeps
+# its own mode: polkit's is its own.
 put() {
-  install -d -m 0755 "$(dirname "$1")"
+  [[ -d "$(dirname "$1")" ]] || install -d -m 0755 "$(dirname "$1")"
   cat >"${1}.tmp"
   chmod 0644 "${1}.tmp"
   mv -f "${1}.tmp" "$1"
@@ -412,12 +417,49 @@ cmd_setup() {
   # Decision 8: Debian's unit flushes the whole ruleset on a stop, so a
   # package upgrade's restart would open the guard for as long as the start
   # takes, or for good if the start failed. Without it a restart only loads
-  # the file, which replaces the guard's table in one transaction.
+  # the file, which replaces the guard's table in one transaction. A file that
+  # won't load, at a boot, leaves the kernel with no rules: the floor goes on
+  # before the network comes up, so that's never the metadata server open.
   put /etc/systemd/system/nftables.service.d/watchtower.conf <<'UNIT'
 # config/bastion/ruleset.sh: a restart reloads, and never flushes the guard.
+[Unit]
+OnFailure=watchtower-ruleset-floor.service
+
 [Service]
 ExecStop=
 UNIT
+
+  put /etc/systemd/system/watchtower-ruleset-floor.service <<UNIT
+# config/bastion/ruleset.sh: as early as nftables.service, which this follows.
+[Unit]
+Description=Load the metadata guard's floor, as its ruleset did not load
+DefaultDependencies=no
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=${TOOL} floor
+StandardOutput=journal+console
+StandardError=journal+console
+UNIT
+
+  # What a user leaves behind runs at a boot with no sshd and no gate: on a VM
+  # with no guard it would reach the token, and on any VM it would confirm a
+  # trial with no one logged in. So nothing of a user's runs without a login: no
+  # crontab, no at job and no lingering, and any left from before go.
+  printf 'root\n' | put /etc/cron.allow
+  printf 'root\n' | put /etc/at.allow
+  find /var/spool/cron/crontabs -mindepth 1 ! -name root -delete 2>/dev/null || true
+  rm -f /var/lib/systemd/linger/*
+  put /etc/polkit-1/rules.d/10-watchtower-ruleset.rules <<'RULES'
+// config/bastion/ruleset.sh: no user's units run without a login. Root isn't asked.
+polkit.addRule(function (action, subject) {
+  if (action.id == "org.freedesktop.login1.set-self-linger" ||
+      action.id == "org.freedesktop.login1.set-user-linger") {
+    return polkit.Result.NO;
+  }
+});
+RULES
 
   # Not Requires=: a restart of nftables.service would restart sshd with it,
   # and one that failed (a bad file, in a package upgrade) would leave sshd
@@ -464,15 +506,29 @@ StandardOutput=journal+console
 StandardError=journal+console
 UNIT
 
+  # On a tmpfs of its own and a very small one: open to every user, it would
+  # otherwise be room for them to fill /run, which refuses systemd a reload when
+  # full. An empty file takes none of its pages, so filling it stops no one asking.
+  put "/etc/systemd/system/${DROPBOX_MOUNT}" <<UNIT
+# config/bastion/ruleset.sh: sticky, open to all, and room for nothing but names.
+[Unit]
+Description=The directory a login confirms the metadata guard's ruleset in
+
+[Mount]
+What=tmpfs
+Where=${DROPBOX}
+Type=tmpfs
+Options=mode=1777,size=64k,nr_inodes=1024,nosuid,nodev,noexec
+UNIT
+
   put /etc/systemd/system/watchtower-ruleset-confirm.path <<UNIT
 # config/bastion/ruleset.sh: any user may ask, so no limit may stop the asking.
 [Unit]
 Description=Watch for a login confirming the metadata guard's ruleset
+RequiresMountsFor=${DROPBOX}
 
 [Path]
 DirectoryNotEmpty=${DROPBOX}
-MakeDirectory=yes
-DirectoryMode=1777
 TriggerLimitIntervalSec=0
 
 [Install]
