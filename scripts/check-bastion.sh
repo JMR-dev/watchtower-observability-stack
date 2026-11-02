@@ -493,6 +493,9 @@ cat >"${stubs}/systemctl" <<'STUB'
 echo "$*" >>/stubs/calls
 case "$*" in
   "reload-or-restart nftables.service")
+    # What a flag makes happen at the moment of the load.
+    [[ ! -e /stubs/at-load-disk-fails ]] || touch /stubs/install-broken
+    [[ ! -e /stubs/at-load-a-login ]] || touch /run/watchtower-ruleset/an-early-login
     [[ ! -e /stubs/load-broken ]] && nft --file /etc/nftables.conf 2>/dev/null ;;
   "restart watchtower-ruleset-rollback.timer")
     [[ ! -e /stubs/timer-broken ]] ;;
@@ -502,7 +505,19 @@ cat >"${stubs}/curl" <<'STUB'
 #!/bin/bash
 cat /stubs/account-code
 STUB
-chmod 0755 "${stubs}/systemctl" "${stubs}/curl"
+# A disk that won't take the ruleset: what ENOSPC or a read-only root does to it.
+cat >"${stubs}/install" <<'STUB'
+#!/bin/bash
+[[ -e /stubs/install-broken && "$*" == *"/etc/nftables.conf.tmp"* ]] && exit 1
+exec /usr/bin/install "$@"
+STUB
+# nft that loads nothing at all, not even the floor.
+cat >"${stubs}/nft" <<'STUB'
+#!/bin/bash
+[[ -e /stubs/nft-broken && "$1" != list ]] && exit 1
+exec /usr/sbin/nft "$@"
+STUB
+chmod 0755 "${stubs}/systemctl" "${stubs}/curl" "${stubs}/install" "${stubs}/nft"
 
 tool() { PATH="${stubs}:${PATH}" bash /check/ruleset.sh "$@"; }
 guard_on() { nft list chain inet metadata_guard metadata >/dev/null 2>&1; }
@@ -531,20 +546,27 @@ cp nftables.conf "${rules}/a"
 { cat nftables.conf; echo '# c'; } >"${rules}/c"
 printf 'table inet metadata_guard {\n  this is not a ruleset\n}\n' >"${rules}/broken"
 printf 'table inet other {\n}\n' >"${rules}/no-guard"
-# Names the guard, so it passes the file's check, and doesn't define it.
+# Names the guard in its comments, and doesn't define it.
 printf '# chain metadata\ntable inet metadata_guard\ndelete table inet metadata_guard\ntable inet other {\n}\n' >"${rules}/fake-guard"
+# Has the guard's chain, and nothing leads there.
+printf 'table inet metadata_guard {\n  chain metadata {\n    meta skuid != 0 counter reject\n  }\n}\n' >"${rules}/unhooked"
+# A good guard with a table the others lack, to tell which is in the kernel.
+{ cat nftables.conf; printf 'table inet marked {\n}\n'; } >"${rules}/marked"
 # What the package ships.
 printf 'flush ruleset\ntable inet filter {\n  chain output {\n    type filter hook output priority filter;\n  }\n}\n' >"${rules}/package"
 sha_a="$(sha256sum "${rules}/a" | cut -d' ' -f1)"
 sha_b="$(sha256sum "${rules}/b" | cut -d' ' -f1)"
 sha_c="$(sha256sum "${rules}/c" | cut -d' ' -f1)"
 sha_fake="$(sha256sum "${rules}/fake-guard" | cut -d' ' -f1)"
+sha_unhooked="$(sha256sum "${rules}/unhooked" | cut -d' ' -f1)"
 sha_broken="$(sha256sum "${rules}/broken" | cut -d' ' -f1)"
+sha_marked="$(sha256sum "${rules}/marked" | cut -d' ' -f1)"
 
 # A bastion that has only ever had the package's ruleset, and no account.
 fresh() {
   rm -rf "$state_dir" "$dropbox"
-  rm -f "${stubs}/load-broken" "${stubs}/timer-broken"
+  rm -f "${stubs}/load-broken" "${stubs}/timer-broken" "${stubs}/install-broken" \
+    "${stubs}/nft-broken" "${stubs}/at-load-disk-fails" "${stubs}/at-load-a-login"
   mkdir -p "$dropbox"
   chmod 1777 "$dropbox"
   cp "${rules}/package" /etc/nftables.conf
@@ -568,7 +590,9 @@ apply_ruleset() {
   rc=$?
 }
 fire() { out="$(tool rollback 2>&1)"; rc=$?; }
-confirm() { out="$(tool confirm 2>&1)"; rc=$?; }
+# A login's file, then what the path unit starts.
+confirm() { touch "${dropbox}/a-login"; out="$(tool confirm 2>&1)"; rc=$?; }
+marked_on() { nft list table inet marked >/dev/null 2>&1; }
 
 # A first install: no ruleset to go back to, and no account.
 fresh
@@ -600,23 +624,27 @@ check "first install, rejected: not installed again" same_file "${rules}/package
 check "first install, rejected: nothing pending" no_file "${state_dir}/pending"
 refute "first install, rejected: no timer" called "restart ${timer}"
 refute "first install, rejected: no reboot, so no loop" called "--no-block reboot"
-check "first install, rejected: sshd runs, as there's no token" called "start ssh.service"
+check "first install, rejected: sshd runs" called "start ssh.service"
+check "first install, rejected: the package's has no guard, so on the floor" guard_on
 check "first install, rejected: applied" reason_is 0
 
-# Nothing runs with a token and no guard.
+# Nothing runs with a token and no guard: gate, whatever else there is.
 : >"${stubs}/calls"
 echo 200 >"${stubs}/account-code"
+nft flush ruleset
 out="$(tool gate 2>&1)"; rc=$?
 refute "gate: refuses a VM with an account and no guard" reason_is 0
 echo 000 >"${stubs}/account-code"
 out="$(tool gate 2>&1)"; rc=$?
 refute "gate: refuses when the metadata server doesn't answer" reason_is 0
 echo 200 >"${stubs}/account-code"
+touch "${stubs}/nft-broken"
 apply_ruleset a
 check "gate: apply exits 1 when sshd may not run" reason_is 1
 check "gate: apply stops sshd" called "stop ssh.service"
 refute "gate: apply doesn't start sshd" called "start ssh.service"
 if grep -q 'serial console' <<<"$out"; then pass "ruleset: gate: says the way back"; else flunk "ruleset: gate: doesn't say the way back"; fi
+rm -f "${stubs}/nft-broken"
 echo 404 >"${stubs}/account-code"
 
 # Confirming.
@@ -642,6 +670,26 @@ check "confirm: the guard is on at the next boot" guard_on
 : >"${stubs}/calls"
 confirm
 refute "confirm: with nothing pending, nothing" called "stop ${timer}"
+
+# A login from before the load shows nothing about the new ruleset, even when it
+# was queued behind apply's lock: the load takes its file with it.
+apply_ruleset b
+confirm
+reboot_vm
+touch "${stubs}/at-load-a-login"
+apply_ruleset c
+rm -f "${stubs}/at-load-a-login"
+check "an early login: says pending" state_is "$sha_c" pending
+check "an early login: its file went with the load" test -z "$(find "$dropbox" -mindepth 1 -print -quit)"
+out="$(tool confirm 2>&1)"; rc=$?
+check "an early login: still pending" test -e "${state_dir}/pending"
+refute "an early login: the timer stays" called "stop ${timer}"
+confirm
+check "an early login: a later one confirms" no_file "${state_dir}/pending"
+fresh
+apply_ruleset a
+confirm
+reboot_vm
 
 # A second ruleset, with an old one to go back to.
 apply_ruleset b
@@ -701,13 +749,140 @@ check "broken: sshd runs" called "start ssh.service"
 apply_ruleset no-guard
 check "no guard: refused" reason_is 0
 check "no guard: not installed" same_file "${rules}/c" /etc/nftables.conf
+# ... and one that only names the guard, or has it with nothing leading there,
+# never reaches the live kernel: it's tried where nothing can see it.
+for sneaky in fake-guard unhooked; do
+  reboot_vm
+  apply_ruleset "$sneaky"
+  sneaky_sha="$sha_fake"
+  [[ "$sneaky" == fake-guard ]] || sneaky_sha="$sha_unhooked"
+  check "${sneaky}: refused" state_is "$sneaky_sha" refused
+  check "${sneaky}: not installed" same_file "${rules}/c" /etc/nftables.conf
+  check "${sneaky}: nothing pending" no_file "${state_dir}/pending"
+  check "${sneaky}: never loaded, so the live guard stays" guard_on
+  refute "${sneaky}: never loaded, so no reboot" called "--no-block reboot"
+done
 reboot_vm
-apply_ruleset fake-guard
+# A file that passes that and still won't load live, or leaves no guard there.
+touch "${stubs}/load-broken"
+apply_ruleset b 7
+rm -f "${stubs}/load-broken"
 check "gone after the load: exit says it is rebooting" reason_is 75
-check "gone after the load: says rolled back" state_is "$sha_fake" "rolled back"
+check "gone after the load: says rolled back" state_is "$sha_b" "rolled back"
 check "gone after the load: the old one back" same_file "${rules}/c" /etc/nftables.conf
-check "gone after the load: rejected" test -e "${state_dir}/rejected/${sha_fake}"
+check "gone after the load: rejected" test -e "${state_dir}/rejected/${sha_b}"
 check "gone after the load: reboots" called "--no-block reboot"
+reboot_vm
+
+# The disk won't take the old ruleset back when the timer fires.
+apply_ruleset marked
+confirm
+reboot_vm
+apply_ruleset a 8
+check "restore fails: a on trial, over marked" state_is "$sha_a" pending
+nft delete table inet marked
+touch "${stubs}/install-broken"
+: >"${stubs}/calls"
+fire
+refute "restore fails: the service fails, so it retries" reason_is 0
+check "restore fails: says failed" state_is "$sha_a" failed
+if grep -q 'rolled back' <<<"$out"; then flunk "ruleset: restore fails: says rolled back"; else pass "ruleset: restore fails: doesn't say rolled back"; fi
+check "restore fails: the old one is in the kernel anyway" marked_on
+check "restore fails: the record stays" test -e "${state_dir}/pending"
+check "restore fails: rejected, so no login brings it back" test -e "${state_dir}/rejected/${sha_a}"
+check "restore fails: a is still on disk" same_file "${rules}/a" /etc/nftables.conf
+refute "restore fails: no reboot, so no reboot loop" called "--no-block reboot"
+# ... a login in the meantime changes nothing.
+confirm
+check "restore fails: a login can't confirm it" test -e "${state_dir}/pending"
+refute "restore fails: a login leaves the retries" called "stop ${timer}"
+# ... the next boot brings sshd up on what it can, and keeps trying.
+reboot_vm
+nft delete table inet marked 2>/dev/null
+apply_ruleset b 9
+check "restore fails, next boot: exit 0, as sshd may run" reason_is 0
+check "restore fails, next boot: the old one in the kernel" marked_on
+check "restore fails, next boot: sshd runs" called "start ssh.service"
+check "restore fails, next boot: the retries go on" called "--no-block start watchtower-ruleset-rollback.service"
+check "restore fails, next boot: says failed" state_is "$sha_a" failed
+if grep -q "ruleset [a-z]* ${sha_b}" <<<"$out"; then flunk "ruleset: restore fails, next boot: took a new file first"; else pass "ruleset: restore fails, next boot: finishes the rollback first"; fi
+check "restore fails, next boot: the record stays" test -e "${state_dir}/pending"
+# ... and once the disk takes it, it finishes.
+rm -f "${stubs}/install-broken"
+: >"${stubs}/calls"
+fire
+check "restore works at last: exit 0" reason_is 0
+check "restore works at last: says rolled back" state_is "$sha_a" "rolled back"
+check "restore works at last: the old one on disk" same_file "${rules}/marked" /etc/nftables.conf
+check "restore works at last: nothing pending" no_file "${state_dir}/pending"
+check "restore works at last: reboots" called "--no-block reboot"
+reboot_vm
+
+# A file that won't load, and then the disk won't take the old one back either.
+touch "${stubs}/load-broken" "${stubs}/at-load-disk-fails"
+: >"${stubs}/calls"
+apply_ruleset b 10
+rm -f "${stubs}/load-broken" "${stubs}/at-load-disk-fails"
+check "won't load, can't restore: no rollback claimed, so no 75" reason_is 0
+check "won't load, can't restore: says failed" state_is "$sha_b" failed
+if grep -q 'rolled back' <<<"$out"; then flunk "ruleset: won't load, can't restore: says rolled back"; else pass "ruleset: won't load, can't restore: doesn't say rolled back"; fi
+check "won't load, can't restore: the record stays" test -e "${state_dir}/pending"
+refute "won't load, can't restore: no reboot" called "--no-block reboot"
+check "won't load, can't restore: retries" called "--no-block start watchtower-ruleset-rollback.service"
+# ... and the rerun that used to read it as confirmed finishes the rollback.
+rm -f "${stubs}/install-broken"
+apply_ruleset b 11
+check "won't load, can't restore, rerun: finishes it" reason_is 75
+check "won't load, can't restore, rerun: says rolled back" state_is "$sha_b" "rolled back"
+check "won't load, can't restore, rerun: the old one back" same_file "${rules}/marked" /etc/nftables.conf
+if grep -qx "$sha_b" "${state_dir}/confirmed"; then flunk "ruleset: won't load, can't restore, rerun: recorded as confirmed"; else pass "ruleset: won't load, can't restore, rerun: never recorded as confirmed"; fi
+reboot_vm
+
+# Reverting to the confirmed file in the middle of a trial, with a disk that
+# won't take it: the trial's rollback is all there is, so it stays.
+apply_ruleset b 12
+touch "${stubs}/install-broken"
+: >"${stubs}/calls"
+apply_ruleset marked
+rm -f "${stubs}/install-broken"
+check "revert can't install: says failed" state_is "$sha_marked" failed
+refute "revert can't install: not confirmed" state_is "$sha_marked" confirmed
+check "revert can't install: the trial stands" grep -qx "$sha_b" "${state_dir}/pending"
+refute "revert can't install: the timer stands" called "stop ${timer}"
+check "revert can't install: the trial's file is still there" same_file "${rules}/b" /etc/nftables.conf
+apply_ruleset marked
+check "revert can install: says confirmed" state_is "$sha_marked" confirmed
+check "revert can install: nothing pending" no_file "${state_dir}/pending"
+reboot_vm
+
+# A file that has stopped loading is no way back: the last that loaded stays.
+cp "${rules}/marked" "${state_dir}/nftables.old"
+cp /etc/nftables.conf "${rules}/kept"
+cp "${rules}/broken" /etc/nftables.conf
+reboot_vm
+apply_ruleset b 13
+check "stopped loading: b on trial" state_is "$sha_b" pending
+check "stopped loading: the old one stays the old one" same_file "${rules}/marked" "${state_dir}/nftables.old"
+fire
+check "stopped loading, fired: back to one that loads" same_file "${rules}/marked" /etc/nftables.conf
+reboot_vm
+check "stopped loading, fired: the guard is on at the next boot" guard_on
+apply_ruleset marked
+check "stopped loading, fired: says confirmed" state_is "$sha_marked" confirmed
+
+# A file rejected here and still on disk with no record, which no path above
+# leaves but a lost state file could: asked for again, it's a trial. It never
+# reads as no change, so as confirmed with no login.
+cp "${rules}/b" /etc/nftables.conf
+: >"${state_dir}/rejected/${sha_b}"
+reboot_vm
+apply_ruleset b 14
+check "rejected and on disk: a retry is a trial" state_is "$sha_b" pending
+check "rejected and on disk: not its own way back" same_file "${rules}/marked" "${state_dir}/nftables.old"
+fire
+reboot_vm
+apply_ruleset c 15
+confirm
 reboot_vm
 
 # The power goes between rejecting it and putting the old one back.
@@ -721,7 +896,7 @@ reboot_vm
 # No timer, no trial.
 touch "${stubs}/timer-broken"
 : >"${stubs}/calls"
-apply_ruleset a
+apply_ruleset a 16
 check "no timer: not installed" same_file "${rules}/c" /etc/nftables.conf
 check "no timer: nothing pending" no_file "${state_dir}/pending"
 check "no timer: sshd still runs" called "start ssh.service"
@@ -740,7 +915,7 @@ check "no timer, mid-trial: reboots" called "--no-block reboot"
 rm -f "${stubs}/timer-broken"
 reboot_vm
 # ... nor a third over it: the one on disk ends, and the third hasn't started.
-apply_ruleset a
+apply_ruleset a 17
 check "no timer, a third over a trial: a on trial" state_is "$sha_a" pending
 touch "${stubs}/timer-broken"
 reboot_vm
@@ -756,20 +931,33 @@ reboot_vm
 touch "${stubs}/load-broken"
 reboot_vm
 refute "boot, no change, no load: no guard yet" guard_on
+rm -f "${state_dir}/confirmed"
 apply_ruleset c
 check "boot, no change, no load: applied" reason_is 0
+check "boot, no change, no load: says failed, for bootstrap to stop on" state_is "$sha_c" failed
+refute "boot, no change, no load: doesn't say confirmed" state_is "$sha_c" confirmed
+check "boot, no change, no load: no record of it" no_file "${state_dir}/confirmed"
 check "boot, no change, no load: the old one in the kernel" guard_on
 check "boot, no change, no load: the file stays" same_file "${rules}/c" /etc/nftables.conf
 check "boot, no change, no load: sshd runs" called "start ssh.service"
-# ... and the old one won't load either.
+# ... and the old one won't load either: the floor.
 cp "${rules}/broken" "${state_dir}/nftables.old"
 reboot_vm
 echo 200 >"${stubs}/account-code"
 apply_ruleset c
-check "boot, neither loads, an account: exit 1" reason_is 1
-refute "boot, neither loads, an account: no guard" guard_on
-refute "boot, neither loads, an account: sshd stays down" called "start ssh.service"
-check "boot, neither loads, an account: sshd stopped" called "stop ssh.service"
+check "boot, neither loads, an account: the floor is on" guard_on
+check "boot, neither loads, an account: says failed" state_is "$sha_c" failed
+check "boot, neither loads, an account: applied" reason_is 0
+check "boot, neither loads, an account: sshd runs, guarded" called "start ssh.service"
+# ... and not even that: nft itself.
+touch "${stubs}/nft-broken"
+reboot_vm
+apply_ruleset c
+check "nft loads nothing, an account: exit 1" reason_is 1
+refute "nft loads nothing, an account: no guard" guard_on
+refute "nft loads nothing, an account: sshd stays down" called "start ssh.service"
+check "nft loads nothing, an account: sshd stopped" called "stop ssh.service"
+rm -f "${stubs}/nft-broken"
 # ... and on new metadata, the way back.
 rm -f "${stubs}/load-broken"
 apply_ruleset a 6
@@ -870,6 +1058,8 @@ check "units: a login with no directory is unharmed" test "$?" = 0
 exit "$fail"
 RUN
 
-cid="$("$rt" create --memory 3g --cap-add NET_ADMIN "$DEBIAN_IMAGE" bash /check/run.sh)"
+# SYS_ADMIN for the throwaway network namespace ruleset.sh tries a file in, which
+# real root on the VM has anyway.
+cid="$("$rt" create --memory 3g --cap-add NET_ADMIN --cap-add SYS_ADMIN "$DEBIAN_IMAGE" bash /check/run.sh)"
 "$rt" cp "${work}/." "${cid}:/check"
 "$rt" start -a "$cid"

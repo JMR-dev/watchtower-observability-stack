@@ -436,7 +436,7 @@ bastion_up() {
 # outlast a stop, so a line alone says nothing about this boot. scripts/
 # check-bastion.sh tests it.
 ruleset_state() {
-  { grep -oE 'bastion: ruleset (pending|confirmed|rolled back|refused) [0-9a-f]{64} at [0-9]+' || true; } |
+  { grep -oE 'bastion: ruleset (pending|confirmed|rolled back|refused|failed) [0-9a-f]{64} at [0-9]+' || true; } |
     awk -v sha="$1" -v since="$2" '
       $(NF - 2) == sha && $NF + 0 >= since + 0 {
         state = $3
@@ -493,7 +493,10 @@ bastion_ruleset_wait() {
         die "${BASTION} rolled ruleset ${ruleset_sha:0:12} back: it runs on its old ruleset, and as no one if it has no account yet. Rerun this: with a fixed config/bastion/nftables.conf, or with the same file to try it again (once Gitea can run bastion-confirm.yml; or confirm by hand: ${confirm_by_hand})"
         ;;
       refused)
-        die "${BASTION} refused ruleset ${ruleset_sha:0:12} (see its serial output): it fails nft --check or has no guard, so what it ran stays. Fix config/bastion/nftables.conf and rerun"
+        die "${BASTION} refused ruleset ${ruleset_sha:0:12} (see its serial output): it won't load or gives no guard, so what it ran stays. Fix config/bastion/nftables.conf and rerun"
+        ;;
+      failed)
+        die "${BASTION} could not load ruleset ${ruleset_sha:0:12}, or could not put its old one back on disk (see its serial output, and \"A new ruleset\" in docs/runbook.md): it runs on the old ruleset or the floor from the kernel"
         ;;
       pending)
         if [[ -z "$dispatched" ]]; then

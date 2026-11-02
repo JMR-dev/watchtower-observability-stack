@@ -16,33 +16,45 @@
 #                    it before every start.
 #   confirm          Cancels the rollback. What a login triggers.
 #   rollback         What the timer fires: the old ruleset back, the new one
-#                    rejected, a reboot.
+#                    rejected, a reboot. Retried until the disk takes it.
+#   floor            Loads the guard at its smallest, from this file: what's
+#                    left when no ruleset on disk will do.
 #
 # apply, on a ruleset that differs from /etc/nftables.conf:
 #
-#   1. Keeps the old file, unless a trial is already running: an unconfirmed
-#      ruleset is nobody's way back.
-#   2. Records it as pending, on disk, and arms the 10-minute timer. The timer
+#   1. Loads it in a network namespace of its own, where nothing can see it, and
+#      refuses it unless that gives a hooked guard.
+#   2. Keeps the old file, unless a trial is already running (an unconfirmed
+#      ruleset is nobody's way back) or the old file no longer loads.
+#   3. Records it as pending, on disk, and arms the 10-minute timer. The timer
 #      is enabled and conditional on the record, so a reboot while pending
 #      re-arms it even if the startup script never gets this far.
-#   3. Installs it and loads it. One that won't load, or that has no guard
+#   4. Installs it and loads it. One that won't load, or that has no guard
 #      after all, rolls back at once.
+#
+# A rollback loads the old ruleset into the kernel first, which takes no disk,
+# then puts it back on disk. Only then does it clear the record and reboot: a
+# restore that fails (a full or read-only disk) stays on the record and is
+# retried, and can't become a reboot loop.
 #
 # Confirming takes a login and no privileges: anyone may put a file in
 # /run/watchtower-ruleset, sticky and world-writable, and the path unit runs
 # `confirm` as root. It never reads what the file holds and its only effect is
 # to cancel. A user can't reach `rollback` or a reboot through it, and flooding
-# the directory confirms at the first file.
+# the directory confirms at the first file. A trial empties the directory once
+# it's loaded, so a login from before the load confirms nothing.
 #
 # The first install has no old ruleset. The VM has no account yet, so no token
 # to guard: rollback puts back what was there, the package's empty ruleset, and
-# sshd still runs, since gate lets it on a VM with no account. Step 7 then
-# stops, with the VM running as no one.
+# sshd still runs, on the floor. Step 7 then stops, with the VM running as no
+# one.
 #
 # Each outcome prints one line, which reaches the serial console, and at every
 # boot again, for scripts/bootstrap.sh:
 #
-#   bastion: ruleset pending|confirmed|rolled back|refused <sha256> at <epoch>
+#   bastion: ruleset pending|confirmed|rolled back|refused|failed <sha256> at <epoch>
+#
+# failed: it should be on and isn't, or a rollback's restore hasn't worked yet.
 #
 # scripts/check-bastion.sh tests all of it with systemctl stubbed.
 
@@ -55,9 +67,13 @@ PENDING="${STATE}/pending"
 CONFIRMED="${STATE}/confirmed"
 REJECTED="${STATE}/rejected"
 RETRY_SEEN="${STATE}/retry-seen"
+# On /run, so a read-only disk can't keep a rollback from loading the old
+# ruleset.
+LOCK="/run/watchtower-ruleset.lock"
 DROPBOX="/run/watchtower-ruleset"
 TOOL="/usr/local/sbin/watchtower-ruleset"
 TIMER="watchtower-ruleset-rollback.timer"
+ROLLBACK="watchtower-ruleset-rollback.service"
 ACCOUNT_URL="http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/email"
 # apply's exit status when it rolled back and is rebooting.
 REBOOTING=75
@@ -94,55 +110,127 @@ sha_of() { sha256sum "$1" | cut -d' ' -f1; }
 
 read_state() { if [[ -f "$1" ]]; then cat "$1"; fi; }
 
+# Everything below that changes the state or the disk is called under `||` or
+# `if`, where set -e is off, so each step says when it failed and the next
+# doesn't run.
+
 # write_state <file> <value>: whole or not at all, even if the power goes.
 write_state() {
-  printf '%s\n' "$2" >"${1}.tmp"
-  mv -f "${1}.tmp" "$1"
+  if ! { printf '%s\n' "$2" >"${1}.tmp" && mv -f "${1}.tmp" "$1"; }; then
+    rm -f "${1}.tmp"
+    return 1
+  fi
 }
 
 # install_ruleset <file>: the same way, as root's and world-readable, as the
 # package's is.
 install_ruleset() {
-  install -m 0644 -o root -g root "$1" "${RULESET}.tmp"
-  mv -f "${RULESET}.tmp" "$RULESET"
+  if ! { install -m 0644 -o root -g root "$1" "${RULESET}.tmp" && mv -f "${RULESET}.tmp" "$RULESET"; }; then
+    rm -f "${RULESET}.tmp"
+    return 1
+  fi
 }
 
-# Everything that changes the state holds this. Non-root can't open it.
+# Everything that changes the state holds this. Non-root can't open it, so
+# can't hold it either.
 lock() {
-  install -d -m 0700 "$STATE" "$REJECTED"
-  exec 9>"${STATE}/lock"
+  [[ -d "$REJECTED" ]] || install -d -m 0700 "$STATE" "$REJECTED"
+  (umask 077 && : >>"$LOCK")
+  exec 9>"$LOCK"
   flock 9
 }
 
 load_ruleset() { systemctl reload-or-restart nftables.service && guard_loaded; }
 
-# With the lock held and a ruleset pending.
+# The kernel's own answer, without touching what runs: a network namespace of
+# its own has its own rules, and is gone when nft exits.
+
+# loads <file>: this file loads.
+loads() { unshare --net nft --file "$1"; }
+
+# guards <file>: this file loads, and gives a guard that is hooked, whatever its
+# comments say.
+guards() {
+  local listed
+  # shellcheck disable=SC2016 # for the inner shell
+  listed="$(unshare --net bash -c 'nft --file "$1" && nft list table inet metadata_guard' bash "$1")" || return 1
+  [[ "$listed" == *"hook output"* &&
+    "$listed" == *"ip daddr 169.254.169.254 jump metadata"* &&
+    "$listed" == *"ip6 daddr fd20:ce::254 jump metadata"* &&
+    "$listed" == *"meta skuid != 0"* ]]
+}
+
+# The guard at its smallest (config/bastion/nftables.conf's rules, and
+# scripts/check-bastion.sh keeps them equal), for when no file will do. It can't
+# lock anyone out, since it only ever touches the way to the metadata server,
+# and it needs nothing on disk.
+floor() {
+  nft --file - <<'NFT'
+flush ruleset
+
+table inet metadata_guard {
+	chain output {
+		type filter hook output priority filter; policy accept;
+		ip daddr 169.254.169.254 jump metadata
+		ip6 daddr fd20:ce::254 jump metadata
+	}
+
+	chain metadata {
+		udp dport { 53, 67, 123 } accept
+		tcp dport 53 accept
+		meta skuid != 0 counter reject with icmpx admin-prohibited
+	}
+}
+NFT
+}
+
+# The old ruleset into the kernel alone, if it has a guard, else the floor. Takes
+# no disk. True when the guard is on.
+old_into_kernel() {
+  if [[ -f "$OLD" ]] && guards "$OLD" && nft --file "$OLD" && guard_loaded; then
+    return 0
+  fi
+  warn "no old ruleset with a guard: loading the floor"
+  floor && guard_loaded
+}
+
+# restore_old <sha>: the disk, the rejection first, the record last, so a power
+# cut anywhere in it leaves a rollback that the next boot finishes.
+restore_old() {
+  : >"${REJECTED}/${1}" || return 1
+  if [[ -f "$OLD" ]]; then
+    install_ruleset "$OLD" || return 1
+  else
+    rm -f "$RULESET" || return 1
+  fi
+  rm -f "$PENDING" || return 1
+  sync
+}
+
+# With the lock held and a ruleset pending. False when the disk wouldn't take the
+# old ruleset: the record stays, and what's in the kernel is the way in meanwhile.
 roll_back() {
   local sha
   sha="$(read_state "$PENDING")"
-  : >"${REJECTED}/${sha}"
-  if [[ -f "$OLD" ]]; then
-    install_ruleset "$OLD"
-  else
-    rm -f "$RULESET"
+  old_into_kernel || warn "neither the old ruleset nor the floor would load"
+  if ! restore_old "$sha"; then
+    warn "could not put the old ruleset back on disk: it runs from the kernel, and this retries (docs/runbook.md)"
+    status failed "$sha"
+    return 1
   fi
-  rm -f "$PENDING"
-  sync
   status "rolled back" "$sha"
   # The reboot loads what's on disk, and clears whatever the rejected one did.
   systemctl --no-block reboot
 }
 
-# The ruleset on disk, as it is, into the kernel, when the boot didn't get it
-# there: else the old one, into the kernel alone, so the next boot tries the
-# current one again. True when the guard is on.
-load_current() {
-  systemctl reload-or-restart nftables.service || warn "nftables.service did not load ${RULESET}"
-  guard_loaded && return 0
-  if [[ -f "$OLD" ]] && nft --file "$OLD" && guard_loaded; then
-    warn "${RULESET} did not load: running on the old ruleset"
-    return 0
+# With the lock held and a ruleset pending. Returns $REBOOTING when it rolled
+# back, else 1, with the timer's service left to keep trying: it waits for this
+# lock, fails, and comes back by its Restart=.
+end_trial() {
+  if roll_back; then
+    return "$REBOOTING"
   fi
+  systemctl --no-block start "$ROLLBACK" || warn "could not start ${ROLLBACK}"
   return 1
 }
 
@@ -153,9 +241,9 @@ load_current() {
 abandon() {
   if [[ -n "$2" ]]; then
     warn "$1: the trial can't go on, so rolling back now"
-    write_state "$PENDING" "$2"
-    roll_back
-    return "$REBOOTING"
+    write_state "$PENDING" "$2" || warn "could not record which trial that is"
+    end_trial
+    return
   fi
   warn "$1: the ruleset on disk stays"
   rm -f "$PENDING"
@@ -167,11 +255,12 @@ abandon() {
 try() {
   local new=$1 sha=$2 running
   running="$(read_state "$PENDING")"
-  if [[ -z "$running" ]]; then
-    if [[ -f "$RULESET" ]]; then
+  if [[ -z "$running" && -f "$RULESET" ]] && ! cmp -s "$new" "$RULESET"; then
+    # What has stopped loading is no way back: the last one that loaded stays.
+    if loads "$RULESET"; then
       { cp -f "$RULESET" "${OLD}.tmp" && mv -f "${OLD}.tmp" "$OLD"; } || abandon "could not keep the old ruleset" "" || return
     else
-      rm -f "$OLD"
+      warn "${RULESET} no longer loads, so ${OLD} stays the way back"
     fi
   fi
   write_state "$PENDING" "$sha" || abandon "could not record the trial" "$running" || return
@@ -185,15 +274,18 @@ try() {
   sync
   if ! load_ruleset; then
     warn "the new ruleset did not load or has no guard: rolling back now"
-    roll_back
-    return "$REBOOTING"
+    end_trial
+    return
   fi
+  # sshd was already up on the old ruleset: a login from then shows nothing about
+  # this one, and may be queued behind this lock.
+  find "$DROPBOX" -mindepth 1 -delete 2>/dev/null || true
   status pending "$sha"
 }
 
 # apply_new <file>: what the ruleset in metadata means for this boot.
 apply_new() {
-  local new=$1 retry=${2:-} sha pending current="" confirmed
+  local new=$1 retry=${2:-} sha pending current="" confirmed retried=""
   sha="$(sha_of "$new")"
   pending="$(read_state "$PENDING")"
   confirmed="$(read_state "$CONFIRMED")"
@@ -202,31 +294,49 @@ apply_new() {
   # scripts/bootstrap.sh asks for a rejected file again with a new value here,
   # once: the same value again can't make a rollback loop.
   if [[ -n "$retry" && "$retry" != "$(read_state "$RETRY_SEEN")" ]]; then
-    write_state "$RETRY_SEEN" "$retry"
-    rm -f "${REJECTED}/${sha}"
+    if write_state "$RETRY_SEEN" "$retry"; then
+      [[ ! -e "${REJECTED}/${sha}" ]] || retried=1
+      rm -f "${REJECTED}/${sha}"
+    else
+      warn "could not record the retry, so it waits for a boot that can"
+    fi
   fi
 
   if [[ -e "${REJECTED}/${sha}" ]]; then
     status "rolled back" "$sha"
-  elif ! nft --check --file "$new" || ! grep -q 'table inet metadata_guard' "$new" || ! grep -q 'chain metadata' "$new"; then
+  elif ! guards "$new"; then
     # Never installed, so nothing to roll back. What runs now stays.
-    warn "the ruleset in metadata fails nft --check or has no guard"
+    warn "the ruleset in metadata doesn't load or gives no guard"
     status refused "$sha"
   elif [[ "$sha" == "$pending" ]]; then
     try "$new" "$sha" || return
-  elif [[ -z "$pending" && "$sha" == "$current" ]]; then
+  elif [[ -z "$pending" && "$sha" == "$current" && -z "$retried" ]]; then
     # No change. A file with no record has been running through a boot, which
-    # nothing but a lost state directory leaves.
-    write_state "$CONFIRMED" "$sha"
-    status confirmed "$sha"
+    # nothing but a lost state directory leaves. Confirmed only if it's what
+    # the guard came from: the kernel may hold the old one or the floor.
+    if load_ruleset; then
+      write_state "$CONFIRMED" "$sha" || warn "could not record it as confirmed"
+      status confirmed "$sha"
+    else
+      warn "${RULESET} did not load, or has no guard"
+      status failed "$sha"
+    fi
   elif [[ -n "$pending" && "$sha" == "$confirmed" ]]; then
-    # Back to what was confirmed, in the middle of a trial.
-    install_ruleset "$new"
-    rm -f "$PENDING"
+    # Back to what was confirmed, in the middle of a trial. The trial and its
+    # timer stand until that's on disk.
+    if ! install_ruleset "$new" || ! rm -f "$PENDING"; then
+      warn "could not put the confirmed ruleset back, so the trial stands"
+      status failed "$sha"
+      return 1
+    fi
     sync
     systemctl stop "$TIMER" || true
-    load_ruleset || warn "the confirmed ruleset did not load"
-    status confirmed "$sha"
+    if load_ruleset; then
+      status confirmed "$sha"
+    else
+      warn "the confirmed ruleset did not load"
+      status failed "$sha"
+    fi
   else
     try "$new" "$sha" || return
   fi
@@ -235,18 +345,17 @@ apply_new() {
 cmd_apply() {
   local new=${1:-} retry=${2:-} rc=0 pending
   lock
-  # The power went in the middle of a rollback.
   pending="$(read_state "$PENDING")"
   if [[ -n "$pending" && -e "${REJECTED}/${pending}" ]]; then
-    roll_back
-    exit "$REBOOTING"
-  fi
-  if [[ -n "$new" ]]; then
+    # A rollback the power cut short or the disk refused. It finishes before
+    # anything new goes on.
+    end_trial || rc=$?
+  elif [[ -n "$new" ]]; then
     apply_new "$new" "$retry" || rc=$?
-    [[ "$rc" -ne "$REBOOTING" ]] || exit "$REBOOTING"
-    [[ "$rc" -eq 0 ]] || warn "the ruleset could not be applied"
   fi
-  guard_loaded || load_current || true
+  [[ "$rc" -ne "$REBOOTING" ]] || exit "$REBOOTING"
+  [[ "$rc" -eq 0 ]] || warn "the ruleset could not be applied"
+  guard_loaded || load_ruleset || old_into_kernel || warn "nothing would load, not even the floor"
   if gate; then
     systemctl reset-failed ssh.service 2>/dev/null || true
     systemctl start ssh.service
@@ -260,10 +369,14 @@ cmd_apply() {
 cmd_confirm() {
   local pending
   lock
+  # A file from before the load went with the load (try).
+  [[ -n "$(find "$DROPBOX" -mindepth 1 -print -quit 2>/dev/null)" ]] || return 0
   # By name, never following anything a user left here.
   find "$DROPBOX" -mindepth 1 -delete 2>/dev/null || true
   pending="$(read_state "$PENDING")"
   [[ -n "$pending" ]] || return 0
+  # Rejected already, with its rollback still trying to reach the disk.
+  [[ ! -e "${REJECTED}/${pending}" ]] || return 0
   write_state "$CONFIRMED" "$pending"
   rm -f "$PENDING"
   sync
@@ -326,13 +439,17 @@ WantedBy=timers.target
 UNIT
 
   put /etc/systemd/system/watchtower-ruleset-rollback.service <<UNIT
-# config/bastion/ruleset.sh
+# config/bastion/ruleset.sh: fails only when the disk won't take the old ruleset,
+# with the old one already in the kernel, so it may retry for as long as that lasts.
 [Unit]
 Description=Put the metadata guard's old ruleset back and reboot
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 ExecStart=${TOOL} rollback
+Restart=on-failure
+RestartSec=60
 StandardOutput=journal+console
 StandardError=journal+console
 UNIT
@@ -387,7 +504,8 @@ main() {
     gate) gate ;;
     confirm) cmd_confirm ;;
     rollback) cmd_rollback ;;
-    *) echo "usage: watchtower-ruleset setup|apply|gate|confirm|rollback" >&2; exit 2 ;;
+    floor) floor ;;
+    *) echo "usage: watchtower-ruleset setup|apply|gate|confirm|rollback|floor" >&2; exit 2 ;;
   esac
 }
 
