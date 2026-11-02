@@ -51,9 +51,9 @@ Alerts and a fleet dashboard (W4, here) come last, for verified hosts only.
 | State | Alloy's storage path on persistent disk (a named volume, or `StateDirectory=alloy`): the journal position and the remote-write WAL survive restarts |
 | WireGuard | Interface `wg-watchtower`, unit `wg-quick@wg-watchtower`, config `/etc/wireguard/wg-watchtower.conf`, root 0600 |
 | Peer config | From Secret Manager `projects/watchtower-observe/secrets/wireguard-<peer>-peer/versions/latest`, read cross-project by the one identity granted it (below). **Never printed**: no `set -x`, `no_log: true`, and nothing on boot output (the blog's and Gitea's reach Cloud Logging) |
-| Peer checks | watchtower's deploy resets each agent's hooks, DNS and routes on every run and refuses to publish a config that has any; check again on the host, since the config runs there as root. Refuse the config unless it has exactly one `[Peer]` with an `Endpoint` and `AllowedIPs` exactly `10.8.0.0/24`. Refuse any `PreUp`, `PostUp`, `PreDown`, `PostDown`, `Table`, `FwMark` or `SaveConfig`. Then drop any `DNS =` line, and set `PersistentKeepalive = 25` and `MTU = 1380` if missing (watchtower sets both). A full tunnel would send the metadata server's traffic to the proxy and break the VM's credentials, image pulls and DNS-01 |
-| No peer | A missing or empty secret is a warning, never a failed deploy: stop and disable the tunnel and Alloy and remove their config |
-| Labels | Everything: `service`, `host`, `env` (`production`, or `disposable`). Logs also `unit`, `container`, `level`. **Never** a label from an IP, user, email, URL path, UUID or pod name |
+| Peer checks | watchtower's deploy resets each agent's hooks, DNS and routes on every run and refuses to publish a config that has any; check again on the host, since the config runs there as root. Judge each line as wg reads it: cut any `#` comment, remove all whitespace, and take keys in any case, since wg and wg-quick accept `Allowed IPs` and `Fw Mark`. Refuse anything but printable ASCII, tabs and newlines. Allow-list the keys (`PrivateKey`, `Address`, `MTU`, `DNS`, `PublicKey`, `PresharedKey`, `AllowedIPs`, `PersistentKeepalive`, `Endpoint`) and refuse any other, so every hook, `Table`, `FwMark` and `SaveConfig` goes. Refuse the config unless it has exactly one `[Interface]` and one `[Peer]`, with an `Endpoint` and one `AllowedIPs`, exactly `10.8.0.0/24`. Then write the config afresh from the checked values, never the fetched text: no `DNS`, `PersistentKeepalive = 25`, `MTU = 1380` (watchtower sets both). A full tunnel would send the metadata server's traffic to the proxy and break the VM's credentials, image pulls and DNS-01 |
+| No peer | Only a missing or empty secret takes telemetry down: a warning, never a failed deploy, then stop and disable the tunnel and Alloy and remove their config. Any other fetch error (network, 5xx, token, `PERMISSION_DENIED`) warns and leaves the tunnel and Alloy running as they are. To revoke a peer, delete its client in wg-easy |
+| Labels | Everything: `service`, `host`, `env` (`production`, or `disposable`). Logs also `unit`, `container`, `level`. **Never** a label from an IP, user, email, URL path, UUID or pod name. The scrub block rewrites `unit` from `user@<uid>.service` to `user@.service`, and `user-runtime-dir@<uid>.service` to `user-runtime-dir@.service` |
 | Metrics | `prometheus.exporter.unix` (`job="integrations/unix"`), `prometheus.exporter.self` (`job="alloy"`), Caddy's metrics (`job="caddy"`), a blackbox probe of the public health URL (`job="blackbox"`); every 60 s |
 | Caddy metrics | The global `metrics` option and a site `:2020 { metrics }` bound to loopback (`bind 127.0.0.1` with host networking, `PublishPort=127.0.0.1:2020:2020` in bridge mode). **Never publish the admin API (:2019)** |
 | Coraza | Its audit log goes to a **local rotated file** (`SecAuditLog /var/log/caddy/coraza-audit.log` or the like), never the journal: a record holds whole requests, cookies and bodies |
@@ -74,26 +74,76 @@ Nothing on watchtower scrubs. What a host sends is stored.
   and is fixed in S1.
 - Copy the example's scrub block whole, then add the service's own rules
   inside the `// scrub: begin` and `// scrub: end` markers. Secrets are
-  caught by key name (anything containing password, secret, token, api key,
-  private key, session or credential, with any prefix), in JSON, `key=value`
-  and `key: value` forms, quoted or not; Authorization and cookie headers
-  whole; connection-string passwords; emails, also `%40`-encoded; IPv4,
-  IPv6 and MAC addresses; OS Login names; UUIDs; card numbers unbroken or
-  in dashed fours. Not caught: phone numbers, and card numbers typed with
-  spaces (a port list looks the same).
+  caught by key name (anything containing password, passphrase, passcode,
+  secret, token, bearer, api key, private, preshared, access, signing,
+  encryption, ssh, auth or otp key, otp or auth code, session, credential or
+  csrf, with any prefix), with a word after it (`Session ID:`) or brackets on
+  it (`user[password]=`), in JSON, XML, `key=value` and `key: value` forms,
+  with `=>`, `:=` or `==` too, quoted or not, or percent-encoded in a URL; a
+  flag and its value (`--password x`), and a name and value side by side as
+  strings (an argument array, a Python header tuple); a JSON value whole, as a
+  string with escaped quotes, a number, an array or an object, and the same in
+  a JSON string quoted inside a line; a wrapper or an opening bracket
+  (`Some("x")`, `[ "x" ]`) to the end of the line; a value in `\"` whole; any
+  other bare value up to the next blank, `&` or closing quote; `pass`, `otp`
+  and `auth` as a whole key or its last part, in camelCase or with a number
+  too, in JSON or with `=`; `sid`, `ssn`, `cvv` and `cvc` the same way, `ssn`,
+  `cvv` and `cvc` with `:` too; Authorization and cookie headers whole, under
+  any name that holds one; Basic credentials; other credentials in a query
+  string, nested and encoded too; connection-string passwords, Go's MySQL form
+  too; emails, in any alphabet, in quotes, `%40` or `%2540`-encoded or
+  `\u`-escaped; IPv4, IPv6 and MAC addresses, next to a letter or `_`, an IPv4
+  dashed in a hostname and an IPv6 percent-encoded; OS Login names; OS Login
+  uids of 10 digits or more after `uid=` (`auid=` and `euid=` too) or `UID `,
+  or in `user-<uid>.slice`, `user@<uid>.service`,
+  `user-runtime-dir@<uid>.service` and `/run/user/<uid>`; those two units in the
+  `unit` label, whatever the uid; sudo's command and environment, on any unit
+  (`ENV=` after sudo's ` ; ` and `COMMAND=` to the end of the line, and
+  `(command continued)`, so who ran it and as whom stay); tokens by their shape
+  (`ghp_`, `ya29.`, `AKIA`); SSH public keys (`ssh-ed25519`, `ssh-rsa`,
+  `ecdsa-sha2-*`, the key itself); JWTs of two, three or five parts; UUIDs; SSH
+  key fingerprints (`SHA256:`, `SHA-256:`, `SHA1:`, `MD5:`); the lines wg's
+  errors quote; card numbers of 15 or 16 digits, unbroken or in dashed fours.
+  Not caught: phone numbers; card numbers typed with spaces (a port list looks
+  the same), of another length or in dashed Amex groups; `pass:`, `otp:` or
+  `auth:` outside JSON (`auth: ok` looks the same); outside sudo's `COMMAND=`, a
+  short flag joined to its value (`-pX`) and curl's user and password flag with
+  a separate value; a secret in prose (`password is x`); a Basic value of letters
+  only (`basic authentication` looks the same); a bare value with a quote inside
+  it; a uid under 10 digits in a line, or in any other context (`UID:`, `UID=`,
+  `_UID=`); an SSH key's comment (`pat@laptop`); an SSH certificate
+  (`ssh-ed25519-cert-v01@openssh.com AAAA…`); a fingerprint after a blank
+  (`SHA-256: AB:CD`) or under another name (`SHA-1:`, `SHA512:`). systemd's
+  `session-N.scope:` and instantiated units (`wg-quick@wg0.service`), sudo's
+  `TTY=… ; PWD=/… ;`, sshd's `Starting session:`, a program's `name[pid]:`, an
+  app's own `ENV=production`, a key type named alone (`key type ssh-rsa`), a bare
+  hash or git sha, a `sha256:` digest, and a hash in lower-case hex after `SHA1:`
+  (40 digits) or `SHA-256:` (64) are left alone; so are root and small uids.
+  Some ordinary lines lose a word, and that is the safe way round: `byPass=1`,
+  `isAuth=true`, `?state=open`, an all-hex `dead::beef`, `/etc/passwd: No such
+  file`, an app's own `COMMAND=x`, and a `SHA256:` before a hash.
 - Drop conmon's split lines: every piece of a long line but the last has
   `__journal_container_partial_message="true"` (the example's relabel rule).
-  In a Caddy pipeline, also `stage.json` with `drop_malformed = true` on
-  `container="caddy"`, so the last piece of a split JSON line can't ship
-  either, and strip `[data "…"]` from the WAF rule-match lines you keep.
+  The block's first stage drops any line on `container="caddy"` that isn't
+  JSON, so the last piece of a split line can't ship either. It also strips
+  `[data "…"]` and `[msg_match_N …] [data_match_N …]` from WAF lines, and
+  drops a line where matched data survives.
 - IPs are replaced whole. Triage by IP stays on the host (journald,
   fail2ban).
 - **Fixture test:** `scripts/check-alloy-scrub.sh <config> <fixture>` runs the
   scrub block in Alloy over tagged lines (`keep:`, `same:`, `drop:`) and
-  fails on any line of `<fixture>.forbidden` in the output. Each service's
-  fixture holds its own real-shaped lines, made up: a Caddy access line, a
-  WAF line, a Coraza audit record over 8 KiB (dropped), an sshd and sudo
-  line with an OS Login name, and the service's own.
+  fails on any line of `<fixture>.forbidden` in the output. If there is a
+  `<fixture>.caddy.log`, it runs too, under `container="caddy"`, with each
+  line's tag inside it (`keep:c<n>`, `drop:c<n>`), so the JSON check is really
+  exercised. `<fixture>.expect`, if there is one, holds whole lines exactly as
+  they must come out, for what stays readable on a line that changes.
+  `<fixture>.units`, if there is one, holds `<unit in> <unit out>` pairs, each
+  run under that `unit` label, and fails on any other label coming out; the
+  harness reads the block alone, so this tests the block's rewrite, not the
+  relabel rule that sets the label. Each service's fixture holds its own real-shaped lines, made
+  up: a Caddy access line, a WAF line, a Coraza audit record over 8 KiB
+  (dropped), an sshd and sudo line with an OS Login name, and the service's
+  own.
 
 ### Per service
 
@@ -369,14 +419,33 @@ host `H`:
 **PII, over the first hour of real traffic; any hit blocks the next merge:**
 
 ```
-{host="H"} |~ "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b"
-{host="H"} |~ "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[a-z]{2,}"
+{host="H"} |~ "(?:^|[^0-9])(?:\\d{1,3}\\.){3}\\d{1,3}(?:$|[^0-9])"
+{host="H"} |~ `[\p{L}\p{N}._%+'!#$*^~-]+(?:@|%40|%2540|\\u0040)[\p{L}\p{N}.-]+\.[A-Za-z]{2,}` !~ `@[\w.:\\-]+\.(?:service|socket|timer|target|mount|path|slice|scope)\.?(?:$|[^\w.-])`
 {host="H"} |= "eyJ"
 {host="H"} |= "\"transaction\""
-{host="H"} |~ "(?i)\"(cookie|authorization)\""
+{host="H"} |~ `(?i)\\*"[\w-]*(cookie|authorization)[\w-]*\\*"\s*:\s*\[?\s*\\*"`
 {host="H"} |~ "_(gmail|googlemail)_com"
-{service="silverbullet"} |~ "/\\.fs/[^<]"
+{host="H"} |~ "\\b(SHA256|SHA-256|SHA1|MD5):[A-Za-z0-9+/]"
+{host="H"} |~ `uid=\d{10}|\bUID \d{10}|\buser-\d{10,}\.slice|\buser(-runtime-dir)?@\d{10}|/run/user/\d{10}`
+{host="H", unit=~"(user|user-runtime-dir)@[0-9]+\\.service"}
+{host="H"} |~ `\bCOMMAND=[^\[]|;\s*ENV=[^\[]|\(command continued\)[^\[]`
+{host="H"} |~ `ghp_[A-Za-z0-9]{16}|ya29\.[A-Za-z0-9._-]{16}|AKIA[0-9A-Z]{16}`
+{host="H"} |~ `(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9-]+)\s+AAAA`
+{service="silverbullet"} |~ `/\.fs/[^<"\\]`
+{service="silverbullet"} |~ `"uri":"/([^.<"]|\.(fs|revisions|proxy)/[^<"])|\[uri \\"/([^.<\\]|\.(fs|revisions|proxy)/[^<\\])|[?&]from=[^<]|Proxying to [^<]`
 ```
+
+The email query skips a line that names an instantiated systemd unit
+(`wg-quick@wg-watchtower.service`), so an address on the same line as one goes
+unseen.
+
+The fingerprint query also hits a hash in lower-case hex after `SHA1:` or
+`SHA-256:`, which the scrub leaves alone; a hit in that shape is no leak.
+
+The cookie and authorization query looks for a value that survived: the scrub
+keeps the key and replaces all of its value, so the key alone is no hit. The
+`/.fs/` queries skip the listing route (`/.fs/` and nothing after it), which
+names no page.
 
 Vaultwarden, on disposable first: fail a login with a made-up email, and
 type a made-up "password" into the username field; neither appears, nor

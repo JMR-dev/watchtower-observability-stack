@@ -1,0 +1,126 @@
+---
+# The publish check on an agent's config (roles/edge/tasks/peer_check.yml) over
+# made-up configs, for CI's ansible job. The config runs on someone else's
+# server as root, so each shape it must refuse is here, the ones wg reads
+# differently from how they are written above all. Touches no cloud and no VM.
+#
+#   ansible-playbook -i inventory/hosts.sample.yml playbooks/test-peer-check.yml
+#
+# Each refusal prints as a failed task, then "rescued": only the playbook's exit
+# code counts.
+
+- name: The publish check refuses what it must
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    watchtower_tunnel_cidr: 10.8.0.0/24
+    edge_agent_mtu: 1380
+    edge_agent_keepalive: 25
+    edge_peer: {name: test-peer, address: 10.8.0.133}
+    iface: "[Interface]\nPrivateKey = dummy\nAddress = 10.8.0.133/32\nMTU = 1380\n"
+    peer: "[Peer]\nPublicKey = dummy\nPresharedKey = dummy\nAllowedIPs = 10.8.0.0/24\nPersistentKeepalive = 25\nEndpoint = vpn.example.org:51820"
+    peer_cases:
+      - name: wg-easy's config, as its template writes it
+        config: "{{ iface }}\n{{ peer }}"
+      - name: section and key names in another case
+        config: "{{ iface | lower }}\n{{ peer | lower }}"
+      - name: the pinned keys split or tight, as wg reads them
+        config: "{{ iface | replace('MTU = ', 'M T U=') }}\n{{ peer | replace('AllowedIPs = ', 'Allowed IPs=') }}"
+      - name: comments
+        config: "# made by wg-easy\n{{ iface }}# PostUp = touch /tmp/pwned\n\n{{ peer | replace('10.8.0.0/24', '10.8.0.0/24 # the tunnel') }}"
+      - name: a hook
+        config: "{{ iface }}PostUp = touch /tmp/pwned\n\n{{ peer }}"
+        refused: true
+      - name: a hook in lower case
+        config: "{{ iface }}preup = touch /tmp/pwned\n\n{{ peer }}"
+        refused: true
+      - name: a hook split by a blank
+        config: "{{ iface }}Post Down = touch /tmp/pwned\n\n{{ peer }}"
+        refused: true
+      - name: a hook behind a carriage return
+        config: "[Interface]\nAddress = 10.8.0.133/32\rPostUp = touch /tmp/pwned\nMTU = 1380\n\n{{ peer }}"
+        refused: true
+      - name: a hook behind a vertical tab
+        config: "[Interface]\nAddress = 10.8.0.133/32\x0bPostUp = touch /tmp/pwned\nMTU = 1380\n\n{{ peer }}"
+        refused: true
+      - name: a hook behind a Unicode line separator
+        config: "[Interface]\nAddress = 10.8.0.133/32 PostUp = touch /tmp/pwned\nMTU = 1380\n\n{{ peer }}"
+        refused: true
+      - name: a control character in a value
+        config: "{{ iface }}\n{{ peer }}\x01"
+        refused: true
+      - name: a Unicode blank in a key
+        config: "{{ iface }}\n{{ peer | replace('AllowedIPs', 'Allowed IPs') }}"
+        refused: true
+      - name: DNS
+        config: "{{ iface }}DNS = 1.1.1.1\n\n{{ peer }}"
+        refused: true
+      - name: Table
+        config: "{{ iface }}Table = off\n\n{{ peer }}"
+        refused: true
+      - name: SaveConfig
+        config: "{{ iface }}SaveConfig = true\n\n{{ peer }}"
+        refused: true
+      - name: FwMark
+        config: "{{ iface }}FwMark = 51820\n\n{{ peer }}"
+        refused: true
+      - name: FwMark split by a blank
+        config: "{{ iface }}Fw Mark = 51820\n\n{{ peer }}"
+        refused: true
+      - name: a key wg-easy doesn't write
+        config: "{{ iface }}ListenPort = 51820\n\n{{ peer }}"
+        refused: true
+      - name: a line with no key
+        config: "{{ iface }}garbage\n\n{{ peer }}"
+        refused: true
+      - name: a full tunnel
+        config: "{{ iface }}\n{{ peer | replace('10.8.0.0/24', '0.0.0.0/0') }}"
+        refused: true
+      - name: a full tunnel split by a blank
+        config: "{{ iface }}\n{{ peer | replace('AllowedIPs = 10.8.0.0/24', 'Allowed IPs = 0.0.0.0/0') }}"
+        refused: true
+      - name: a full tunnel beside the tunnel, on one line
+        config: "{{ iface }}\n{{ peer | replace('10.8.0.0/24', '10.8.0.0/24, 0.0.0.0/0') }}"
+        refused: true
+      - name: a second AllowedIPs
+        config: "{{ iface }}\n{{ peer }}\nAllowedIPs = 0.0.0.0/0"
+        refused: true
+      - name: a second AllowedIPs, split by a blank
+        config: "{{ iface }}\n{{ peer }}\nAllowed IPs = 0.0.0.0/0"
+        refused: true
+      - name: a second AllowedIPs, in lower case
+        config: "{{ iface }}\n{{ peer }}\nallowedips=0.0.0.0/0"
+        refused: true
+      - name: a second peer
+        config: "{{ iface }}\n{{ peer }}\n{{ peer }}"
+        refused: true
+      - name: a second peer, its name split by a blank
+        config: "{{ iface }}\n{{ peer }}\n[ Peer ]\nPublicKey = dummy"
+        refused: true
+      - name: a second Interface
+        config: "{{ iface }}\n[Interface]\n{{ peer }}"
+        refused: true
+      - name: no Endpoint
+        config: "{{ iface }}\n{{ peer | replace('Endpoint = vpn.example.org:51820', '') }}"
+        refused: true
+      - name: another address
+        config: "{{ iface | replace('10.8.0.133', '10.8.0.2') }}\n{{ peer }}"
+        refused: true
+      - name: a second address
+        config: "{{ iface }}Address = 10.8.0.2/32\n\n{{ peer }}"
+        refused: true
+      - name: another MTU
+        config: "{{ iface | replace('1380', '1420') }}\n{{ peer }}"
+        refused: true
+      - name: no keepalive
+        config: "{{ iface }}\n{{ peer | replace('PersistentKeepalive = 25', '') }}"
+        refused: true
+  tasks:
+    - name: Each case
+      ansible.builtin.include_tasks: ../roles/edge/testdata/peer-case.yml
+      loop: "{{ peer_cases }}"
+      loop_control:
+        loop_var: peer_case
+        label: "{{ peer_case.name }}"

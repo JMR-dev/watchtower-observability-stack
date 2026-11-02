@@ -22,6 +22,16 @@
 #   drop:c<n>  doesn't come out
 # The same rule holds for its last line.
 #
+# keep: says a line came out, not what is left of it. <fixture minus .log>.expect,
+# if there is one, holds whole lines exactly as they must come out, to prove
+# what stays readable beside what goes.
+#
+# stage.replace only touches the line, so the forbidden list can't see a label.
+# <fixture minus .log>.units, if there is one, holds a line per unit label:
+#   <unit going in> <unit that must come out>
+# Each gets a one-line log file of its own, read under that label as the journal
+# source would set it.
+#
 # SCRUB_SHOW=1 prints what came out. Needs alloy and jq. Service repos copy
 # it with the example config.
 
@@ -32,6 +42,8 @@ config="${1:-${repo_root}/config/alloy/config.alloy.example}"
 fixture="${2:-${repo_root}/config/alloy/testdata/scrub.log}"
 forbidden="${fixture%.log}.forbidden"
 caddy="${fixture%.log}.caddy.log"
+expect="${fixture%.log}.expect"
+units="${fixture%.log}.units"
 port="${ALLOY_TEST_PORT:-12398}"
 
 fail() { echo "scrub check: $*" >&2; exit 1; }
@@ -39,7 +51,14 @@ fail() { echo "scrub check: $*" >&2; exit 1; }
 
 work="$(mktemp -d)"
 pid=
-cleanup() { [[ -n "$pid" ]] && kill "$pid" 2>/dev/null; rm -rf "$work"; }
+# wait: Alloy still writing as it exits would make rm fail, and with it the check.
+cleanup() {
+  if [[ -n "$pid" ]]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  rm -rf "$work"
+}
 trap cleanup EXIT
 
 block="$(sed -n '/^\/\/ scrub: begin/,/^\/\/ scrub: end/p' "$config")"
@@ -58,6 +77,11 @@ if [[ -f "$caddy" ]]; then
   [[ -n "$caddy_last" ]] || fail "the last line of $(basename "$caddy") must be a keep:c<n>"
   total=$((total + $(wc -l <"$caddy")))
 fi
+unit_count=0
+if [[ -f "$units" ]]; then
+  unit_count="$(wc -l <"$units")"
+  total=$((total + unit_count))
+fi
 {
   printf 'logging {\n\tlevel  = "info"\n\tformat = "json"\n}\n\n'
   printf 'loki.source.file "fixture" {\n\ttargets    = [{"__path__" = "%s", "service" = "fixture", "job" = "fixture"}]\n' "${work}/in.log"
@@ -65,6 +89,15 @@ fi
   if [[ -n "$caddy_last" ]]; then
     printf 'loki.source.file "caddy" {\n\ttargets    = [{"__path__" = "%s", "service" = "fixture", "job" = "fixture", "container" = "caddy"}]\n' "${work}/caddy.log"
     printf '\tforward_to = [loki.process.%s.receiver]\n}\n\n' "$name"
+  fi
+  if [[ "$unit_count" -gt 0 ]]; then
+    n=0
+    while read -r unit_in _; do
+      n=$((n + 1))
+      echo "unit:${n}" >"${work}/unit-${n}.log"
+      printf 'loki.source.file "unit_%s" {\n\ttargets    = [{"__path__" = "%s", "service" = "fixture", "job" = "fixture", "unit" = "%s"}]\n' "$n" "${work}/unit-${n}.log" "$unit_in"
+      printf '\tforward_to = [loki.process.%s.receiver]\n}\n\n' "$name"
+    done <"$units"
   fi
   sed -E 's/^([[:space:]]*forward_to[[:space:]]*=[[:space:]]*)\[.*\]$/\1[loki.echo.out.receiver]/' <<<"$block"
   printf '\nloki.echo "out" { }\n'
@@ -77,7 +110,8 @@ pid=$!
 out="${work}/out.txt"
 for _ in $(seq 60); do
   jq -r 'select(.component_id == "loki.echo.out") | .entry' "${work}/alloy.log" 2>/dev/null >"$out" || true
-  grep -q "^${last} " "$out" && { [[ -z "$caddy_last" ]] || grep -qF "$caddy_last" "$out"; } && break
+  grep -q "^${last} " "$out" && { [[ -z "$caddy_last" ]] || grep -qF "$caddy_last" "$out"; } &&
+    [[ "$(grep -c '^unit:[0-9]*$' "$out")" -eq "$unit_count" ]] && break
   kill -0 "$pid" 2>/dev/null || { tail -20 "${work}/alloy.log" >&2; fail "alloy exited"; }
   sleep 0.5
 done
@@ -104,6 +138,19 @@ if [[ -n "$caddy_last" ]]; then
       *) fail "untagged line in ${caddy_name}: ${line}" ;;
     esac
   done <"$caddy"
+fi
+if [[ -f "$expect" ]]; then
+  while IFS= read -r line; do
+    grep -qxF -- "$line" "$out" || { echo "not as expected: ${line%% *} -> $(grep "^${line%% *} " "$out" || echo '(missing)')"; bad=1; }
+  done <"$expect"
+fi
+if [[ "$unit_count" -gt 0 ]]; then
+  n=0
+  while read -r unit_in unit_want; do
+    n=$((n + 1))
+    got="$(jq -r --arg entry "unit:${n}" 'select(.component_id == "loki.echo.out" and .entry == $entry) | .labels' "${work}/alloy.log" 2>/dev/null || true)"
+    grep -qF "unit=\"${unit_want}\"" <<<"$got" || { echo "label: ${unit_in} should come out as ${unit_want}, got ${got:-(missing)}"; bad=1; }
+  done <"$units"
 fi
 while IFS= read -r pattern; do
   [[ -z "$pattern" ]] && continue
