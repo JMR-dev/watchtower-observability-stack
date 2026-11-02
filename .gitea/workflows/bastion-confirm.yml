@@ -1,12 +1,15 @@
-# Cancels the bastion's ruleset rollback (config/bastion/ruleset.sh): when a
-# new metadata guard goes on, the bastion rolls it back after 10 minutes unless
-# someone has shown it is still reachable. scripts/bootstrap.sh dispatches this
-# through Gitea's API for the branch it's run from. It reaches the bastion the
-# way deploy.yml's ssh_via=bastion does, as watchtower-deployer@ over IAP, and
-# all it does there is log in and leave a file (scripts/bastion-confirm.sh).
+# Cancels the bastion's ruleset rollback (config/bastion/ruleset.sh), and shows
+# that a login works: when a new metadata guard goes on, the bastion rolls it back
+# after 10 minutes unless someone has shown it is still reachable, and every run of
+# scripts/bootstrap.sh ends by asking for a login to the boot it leaves running.
+# Bootstrap dispatches this through Gitea's API for the branch it's run from. It
+# reaches the bastion the way deploy.yml's ssh_via=bastion does, as
+# watchtower-deployer@ over IAP, and all it does there is log in and leave a file
+# (scripts/bastion-confirm.sh).
 #
 # Nothing to deploy and no secret from Secret Manager: only GCP_DEPLOYER_KEY.
-# Dispatching it by hand is harmless: with nothing pending the file is ignored.
+# Dispatching it by hand is harmless: with nothing pending the file only says a
+# login happened.
 name: bastion-confirm
 
 on:

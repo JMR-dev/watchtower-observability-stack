@@ -25,15 +25,21 @@
 #          on its IPv6 address, fd20:ce::254, where the container has IPv6.
 #   ruleset  ruleset.sh's dead man's switch, on real nft with systemctl and the
 #          metadata server stubbed: arm, confirm, fire, rejected, re-arm after
-#          a reboot, first install, a retry, a guard that won't load, a disk
-#          that won't take a restore, the floor, what a non-root user can do,
-#          and the guest attribute bootstrap.sh reads, through its own
-#          ruleset_state and bastion_ruleset_wait. Its units are checked by
-#          systemd-analyze verify. Cron refuses a user, and a crontab left from
-#          before is gone.
+#          a reboot, first install, a retry, a guard that won't load or lets a user
+#          through, a process from before the load, a disk that won't take a
+#          restore (a full tmpfs too), the floor, what a non-root user can do,
+#          and the guest attributes bootstrap.sh reads, through its own
+#          ruleset_state, login_seen and waits. Its units are checked by
+#          systemd-analyze verify. Cron refuses a user, a crontab or at job left
+#          from before is gone, and polkit's rule runs under its own JavaScript
+#          engine.
+#   bootstrap  bootstrap.sh's bastion_update in order, with gcloud stubbed: metadata
+#          before a stop, the VM started again by its exit trap if a stop is left
+#          in flight, a login last, and the final check.
 #   recovery  recovery.sh, the one-off startup script for when SSH is gone: it
 #          changes nothing on a healthy bastion, frees a full disk without touching
-#          a user's files, and a rollback the disk held up then finishes.
+#          a user's files, a rollback the disk held up then finishes, and a tool cut
+#          short comes back from metadata. It never gets sshd past the gate.
 #
 #   scripts/check-bastion.sh            # docker; CONTAINER_RUNTIME=podman locally
 #
@@ -81,23 +87,24 @@ if grep -q 'get-serial-port-output' "${repo_root}/scripts/bootstrap.sh"; then
   echo "FAIL  bootstrap.sh reads the serial output"
   exit 1
 fi
-# Every run asks, and asks again after the account goes on: the last wait comes
-# after the last thing that changes the VM.
-last_wait="$(grep -n '^ *bastion_ruleset_wait "' "${repo_root}/scripts/bootstrap.sh" | tail -1 | cut -d: -f1)"
-last_change="$(grep -n 'compute instances set-service-account' "${repo_root}/scripts/bootstrap.sh" | tail -1 | cut -d: -f1)"
-[[ -n "$last_wait" && -n "$last_change" && "$last_wait" -gt "$last_change" ]] || {
-  echo "FAIL  bootstrap.sh doesn't ask again after attaching the account"
-  exit 1
-}
-# How bootstrap.sh reads the ruleset's attribute and waits on it, which run.sh
-# checks against what ruleset.sh sends.
-sed -n '/^ruleset_state() {$/,/^}$/p; /^bastion_ruleset_wait() {$/,/^}$/p' "${repo_root}/scripts/bootstrap.sh" >"${work}/ruleset_state.sh"
-for fn in ruleset_state bastion_ruleset_wait; do
+# How bootstrap.sh reads the attributes, waits on them and changes the VM, which
+# run.sh checks against what ruleset.sh sends.
+: >"${work}/ruleset_state.sh"
+for fn in ruleset_state login_seen guest_attribute attribute_refusal bastion_attribute bastion_ruleset_wait \
+  bastion_login_wait bastion_update bastion_final_check bastion_on_exit bastion_stop bastion_start; do
+  sed -n "/^${fn}() {\$/,/^}\$/p" "${repo_root}/scripts/bootstrap.sh" >>"${work}/ruleset_state.sh"
   grep -q "^${fn}() {\$" "${work}/ruleset_state.sh" || {
     echo "FAIL  bootstrap.sh has no ${fn}"
     exit 1
   }
 done
+# bastion_final_check has to be what comes before "Done".
+last_check="$(grep -n '^bastion_final_check$' "${repo_root}/scripts/bootstrap.sh" | cut -d: -f1)"
+done_line="$(grep -n '^Done\.$' "${repo_root}/scripts/bootstrap.sh" | cut -d: -f1)"
+[[ -n "$last_check" && -n "$done_line" && "$last_check" -lt "$done_line" ]] || {
+  echo "FAIL  bootstrap.sh can print Done without its final check"
+  exit 1
+}
 
 cat >"${work}/probe.py" <<'PY'
 """serve [v6]: answers "ok" on the guard's ports, and with v6 on its IPv6
@@ -174,7 +181,8 @@ chmod 0644 /check/*
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
 # systemd and openssh-server for their units: neither runs here.
-apt-get install -y -qq --no-install-recommends nftables python3 iproute2 systemd openssh-server cron >/dev/null
+# duktape for polkit's rule, under the engine polkit itself uses here.
+apt-get install -y -qq --no-install-recommends nftables python3 iproute2 systemd openssh-server cron duktape >/dev/null
 
 fail=0
 pass() { echo "ok    $*"; }
@@ -477,6 +485,7 @@ ping_case() {
   out="$(
     work="$(mktemp -d)"
     guard_loaded() { [[ "$guard_state" == up ]]; }
+    guard_refuses_users() { [[ "$guard_state" == up ]]; }
     systemctl() { [[ "$*" == "is-active --quiet ssh.service" && "$sshd_state" == up ]]; }
     get() {
       case "$1" in
@@ -537,6 +546,7 @@ ping_main="$(
   updates() { :; }
   guard() { echo guard; }
   guard_loaded() { return 0; }
+  guard_refuses_users() { return 0; }
   installed() { return 0; }
   report_settled() { :; }
   systemctl() { [[ "$1" == is-active ]]; }
@@ -639,11 +649,25 @@ case "$*" in
     # What a flag makes happen at the moment of the load.
     [[ ! -e /stubs/at-load-disk-fails ]] || touch /stubs/install-broken
     [[ ! -e /stubs/at-load-a-login ]] || touch /run/watchtower-ruleset/an-early-login
-    [[ ! -e /stubs/load-broken ]] && nft --file /etc/nftables.conf 2>/dev/null ;;
+    [[ ! -e /stubs/load-broken ]] && nft --file "$(cat /stubs/ruleset-path 2>/dev/null || echo /etc/nftables.conf)" 2>/dev/null ;;
   "restart watchtower-ruleset-rollback.timer")
     [[ ! -e /stubs/timer-broken ]] ;;
   "is-active --quiet ssh.service")
     [[ ! -e /stubs/sshd-down ]] ;;
+  "start ssh.service")
+    # sshd that won't start whatever the gate says, as a bad config does.
+    [[ ! -e /stubs/sshd-start-broken ]] || exit 1
+    # sshd as it really is: nothing without its ExecStartPre, which is the tool.
+    if [[ -e /stubs/sshd-runs-its-gate ]]; then
+      if /usr/local/sbin/watchtower-ruleset gate >/dev/null 2>&1; then
+        rm -f /stubs/sshd-down
+      else
+        touch /stubs/sshd-down
+        exit 1
+      fi
+    fi ;;
+  "stop ssh.service")
+    [[ ! -e /stubs/sshd-runs-its-gate ]] || touch /stubs/sshd-down ;;
 esac
 STUB
 cat >"${stubs}/curl" <<'STUB'
@@ -652,7 +676,12 @@ args=("$@")
 for ((i = 0; i < $#; i++)); do
   if [[ "${args[i]}" == --data ]]; then
     [[ ! -e /stubs/attribute-broken ]] || exit 7
-    printf '%s\n' "${args[i + 1]}" >/stubs/attribute
+    # The ruleset's in /stubs/attribute, the others in a file of their own.
+    url="${!#}"
+    case "$url" in
+      */watchtower/ruleset) printf '%s\n' "${args[i + 1]}" >/stubs/attribute ;;
+      *) printf '%s\n' "${args[i + 1]}" >"/stubs/attribute-${url##*/}" ;;
+    esac
     exit 0
   fi
 done
@@ -673,6 +702,9 @@ STUB
 chmod 0755 "${stubs}/systemctl" "${stubs}/curl" "${stubs}/install" "${stubs}/nft"
 
 tool() { PATH="${stubs}:${PATH}" bash /check/ruleset.sh "$@"; }
+as_user() { setpriv --reuid=65534 --regid=65534 --clear-groups env PATH="${stubs}:${PATH}" "$@"; }
+# Gone, or dead with only its parent left to notice.
+proc_gone() { [[ ! -d "/proc/$1" || "$(cut -d' ' -f3 "/proc/$1/stat" 2>/dev/null)" == Z ]]; }
 guard_on() { nft list chain inet metadata_guard metadata >/dev/null 2>&1; }
 called() { grep -qxF -- "$1" "${stubs}/calls"; }
 # check <name> <command...>
@@ -689,7 +721,8 @@ refute() {
 same_file() { cmp -s "$1" "$2"; }
 no_file() { [[ ! -e "$1" ]]; }
 # What the last command told the guest attribute, as bootstrap.sh reads it.
-state_is() { [[ "$(ruleset_state "$1" 0 <"${stubs}/attribute")" == "$2" ]]; }
+state_is() { [[ "$(ruleset_state "$1" "" <"${stubs}/attribute")" == "$2" ]]; }
+this_boot="$(cat /proc/sys/kernel/random/boot_id)"
 reason_is() { [[ "$rc" == "$1" ]]; }
 
 # The files: a is the real one, b and c differ by a comment.
@@ -706,13 +739,17 @@ printf '# chain metadata\ntable inet metadata_guard\ndelete table inet metadata_
 printf 'table inet metadata_guard {\n  chain metadata {\n    meta skuid != 0 counter reject\n  }\n}\n' >"${rules}/unhooked"
 # A good guard with a table the others lack, to tell which is in the kernel.
 { cat nftables.conf; printf 'table inet marked {\n}\n'; } >"${rules}/marked"
+# Every name a guard has, and it lets every uid through.
+sed 's/meta skuid != 0 counter reject with icmpx admin-prohibited/meta skuid != 0 accept/' nftables.conf >"${rules}/inverted"
+# Reads as a guard, and only guards a port the token doesn't use.
+sed 's/meta skuid != 0 counter reject/tcp dport 8080 meta skuid != 0 counter reject/' nftables.conf >"${rules}/narrow"
+# Keeps root out too, so the token.
+sed 's/meta skuid != 0 counter reject/tcp dport 80 reject\n\t\tmeta skuid != 0 counter reject/' nftables.conf >"${rules}/root-too"
 # What the package ships.
 printf 'flush ruleset\ntable inet filter {\n  chain output {\n    type filter hook output priority filter;\n  }\n}\n' >"${rules}/package"
 sha_a="$(sha256sum "${rules}/a" | cut -d' ' -f1)"
 sha_b="$(sha256sum "${rules}/b" | cut -d' ' -f1)"
 sha_c="$(sha256sum "${rules}/c" | cut -d' ' -f1)"
-sha_fake="$(sha256sum "${rules}/fake-guard" | cut -d' ' -f1)"
-sha_unhooked="$(sha256sum "${rules}/unhooked" | cut -d' ' -f1)"
 sha_broken="$(sha256sum "${rules}/broken" | cut -d' ' -f1)"
 sha_marked="$(sha256sum "${rules}/marked" | cut -d' ' -f1)"
 
@@ -720,7 +757,8 @@ sha_marked="$(sha256sum "${rules}/marked" | cut -d' ' -f1)"
 fresh() {
   rm -rf "$state_dir" "$dropbox"
   rm -f "${stubs}/load-broken" "${stubs}/timer-broken" "${stubs}/install-broken" \
-    "${stubs}/nft-broken" "${stubs}/at-load-disk-fails" "${stubs}/at-load-a-login"
+    "${stubs}/nft-broken" "${stubs}/at-load-disk-fails" "${stubs}/at-load-a-login" \
+    "${stubs}/sshd-start-broken" "${stubs}/sshd-down" "${stubs}/sshd-runs-its-gate" "${stubs}/ruleset-path"
   mkdir -p "$dropbox"
   chmod 1777 "$dropbox"
   cp "${rules}/package" /etc/nftables.conf
@@ -760,11 +798,17 @@ check "first install: the guard is on" guard_on
 check "first install: records the trial" grep -qx "$sha_a" "${state_dir}/pending"
 check "first install: arms the timer" called "restart ${timer}"
 check "first install: starts sshd" called "start ssh.service"
-if [[ "$(grep -n "restart ${timer}" "${stubs}/calls" | cut -d: -f1)" -lt "$(grep -n 'reload-or-restart nftables.service' "${stubs}/calls" | cut -d: -f1)" ]]; then
-  pass "ruleset: first install: armed before it loads"
-else
-  flunk "ruleset: first install: loaded before it armed"
-fi
+check "first install: says which boot it is" grep -qx "$this_boot" "${stubs}/attribute-boot"
+check "first install: and its word has that boot's id" test "$(ruleset_state "$sha_a" "$this_boot" <"${stubs}/attribute")" = pending
+# line_of <call>: where it came in the order of what systemctl was asked.
+line_of() { grep -nxF -- "$1" "${stubs}/calls" | head -1 | cut -d: -f1; }
+trial_in_order() {
+  [[ "$(line_of "restart ${timer}")" -lt "$(line_of 'stop ssh.service')" &&
+    "$(line_of 'stop ssh.service')" -lt "$(line_of '--no-block stop user.slice')" &&
+    "$(line_of '--no-block stop user.slice')" -lt "$(line_of 'reload-or-restart nftables.service')" &&
+    "$(line_of 'reload-or-restart nftables.service')" -lt "$(line_of 'start ssh.service')" ]]
+}
+check "first install: armed, sshd and logins ended, loaded, sshd started, in that order" trial_in_order
 fire
 check "first install, fired: says rolled back" state_is "$sha_a" "rolled back"
 check "first install, fired: puts back what was there" same_file "${rules}/package" /etc/nftables.conf
@@ -813,6 +857,7 @@ check "confirm: nothing pending" no_file "${state_dir}/pending"
 check "confirm: records it" grep -qx "$sha_a" "${state_dir}/confirmed"
 check "confirm: stops the timer" called "stop ${timer}"
 check "confirm: empties the directory" no_file "${dropbox}/confirm"
+check "confirm: reports a login, on this boot" login_seen "$this_boot" "$(date +%s)" <"${stubs}/attribute-login"
 : >"${stubs}/calls"
 fire
 refute "confirm: a late timer does nothing" called "--no-block reboot"
@@ -822,9 +867,30 @@ apply_ruleset a
 check "confirm: says so at the next boot" state_is "$sha_a" confirmed
 refute "confirm: no timer at the next boot" called "restart ${timer}"
 check "confirm: the guard is on at the next boot" guard_on
+refute "confirm: a boot with no change ends no one's sessions" called "--no-block stop user.slice"
+refute "confirm: a boot with no change doesn't stop sshd" called "stop ssh.service"
 : >"${stubs}/calls"
+rm -f "${stubs}/attribute-login"
 confirm
 refute "confirm: with nothing pending, nothing" called "stop ${timer}"
+check "confirm: with nothing pending, the login is still reported" login_seen "$this_boot" "$(date +%s)" <"${stubs}/attribute-login"
+
+# confirmed means sshd is up too. An sshd that won't start, at a boot with no change.
+reboot_vm
+touch "${stubs}/sshd-start-broken" "${stubs}/sshd-down"
+apply_ruleset a
+check "sshd won't start: exit 1" reason_is 1
+check "sshd won't start: says failed" state_is "$sha_a" failed
+refute "sshd won't start: doesn't say confirmed" state_is "$sha_a" confirmed
+sshd_down_word="$(cat "${stubs}/attribute")"
+rm -f "${stubs}/sshd-start-broken" "${stubs}/sshd-down"
+apply_ruleset a
+check "sshd starts again: says confirmed" state_is "$sha_a" confirmed
+# Starts, and doesn't stay up.
+touch "${stubs}/sshd-down"
+apply_ruleset a
+check "sshd doesn't stay up: says failed" state_is "$sha_a" failed
+rm -f "${stubs}/sshd-down"
 
 # A login from before the load shows nothing about the new ruleset, even when it
 # was queued behind apply's lock: the load takes its file with it.
@@ -841,6 +907,23 @@ check "an early login: still pending" test -e "${state_dir}/pending"
 refute "an early login: the timer stays" called "stop ${timer}"
 confirm
 check "an early login: a later one confirms" no_file "${state_dir}/pending"
+# A process from before the load, which outlives it, doing what a login does. A
+# trial ends it, and nothing it left behind can confirm.
+reboot_vm
+as_user bash -c 'while :; do touch /run/watchtower-ruleset/left-behind 2>/dev/null; sleep 0.1; done' &
+left_behind=$!
+sleep 0.5
+check "a process from before the load: it's running" test -e "${dropbox}/left-behind"
+apply_ruleset a 20
+check "a process from before the load: says pending" state_is "$sha_a" pending
+check "a process from before the load: it's gone" proc_gone "$left_behind"
+sleep 0.5
+check "a process from before the load: its file went, and none came after" test -z "$(find "$dropbox" -mindepth 1 -print -quit)"
+out="$(tool confirm 2>&1)"; rc=$?
+check "a process from before the load: can't confirm" test -e "${state_dir}/pending"
+wait "$left_behind" 2>/dev/null
+confirm
+check "a process from before the load: a later login confirms" no_file "${state_dir}/pending"
 fresh
 apply_ruleset a
 confirm
@@ -904,19 +987,45 @@ check "broken: sshd runs" called "start ssh.service"
 apply_ruleset no-guard
 check "no guard: refused" reason_is 0
 check "no guard: not installed" same_file "${rules}/c" /etc/nftables.conf
-# ... and one that only names the guard, or has it with nothing leading there,
+# ... and one that only names the guard, has it with nothing leading there, lets
+# every uid through, reads as a guard and doesn't do the job, or keeps root out too,
 # never reaches the live kernel: it's tried where nothing can see it.
-for sneaky in fake-guard unhooked; do
+for sneaky in fake-guard unhooked inverted narrow root-too; do
   reboot_vm
   apply_ruleset "$sneaky"
-  sneaky_sha="$sha_fake"
-  [[ "$sneaky" == fake-guard ]] || sneaky_sha="$sha_unhooked"
+  sneaky_sha="$(sha256sum "${rules}/${sneaky}" | cut -d' ' -f1)"
   check "${sneaky}: refused" state_is "$sneaky_sha" refused
   check "${sneaky}: not installed" same_file "${rules}/c" /etc/nftables.conf
   check "${sneaky}: nothing pending" no_file "${state_dir}/pending"
   check "${sneaky}: never loaded, so the live guard stays" guard_on
   refute "${sneaky}: never loaded, so no reboot" called "--no-block reboot"
+  refute "${sneaky}: never loaded, so no one's sessions end" called "--no-block stop user.slice"
 done
+# The real ruleset passes all of that, with the same test, or nothing above shows
+# anything.
+check "the real ruleset: does a guard's job in the namespace" env PATH="${stubs}:${PATH}" unshare --net bash /check/ruleset.sh probe nftables.conf
+# What the gate and the ping go by, of what's in the kernel now: its rules, not its
+# name.
+loaded_is() { tool loaded >/dev/null 2>&1; }
+gate_says() { tool gate >/dev/null 2>&1; }
+refuses_is() { tool refuses-users >/dev/null 2>&1; }
+echo 200 >"${stubs}/account-code"
+for bad_kernel in inverted fake-guard unhooked; do
+  nft flush ruleset
+  nft --file "${rules}/${bad_kernel}"
+  refute "the kernel, ${bad_kernel}: not loaded" loaded_is
+  refute "the kernel, ${bad_kernel}: the gate refuses it, on a VM with an account" gate_says
+done
+echo 404 >"${stubs}/account-code"
+nft flush ruleset
+nft --file "${rules}/narrow"
+refute "the kernel, narrow: a user reaches the server, as the live test shows" refuses_is
+nft flush ruleset
+nft --file nftables.conf
+check "the kernel, the real one: loaded" loaded_is
+check "the kernel, the real one: a user is refused" refuses_is
+tool floor
+check "the kernel, the floor: loaded" loaded_is
 reboot_vm
 # A file that passes that and still won't load live, or leaves no guard there.
 touch "${stubs}/load-broken"
@@ -1092,7 +1201,7 @@ check "boot, no change, no load: applied" reason_is 0
 check "boot, no change, no load: says failed, for bootstrap to stop on" state_is "$sha_c" failed
 refute "boot, no change, no load: doesn't say confirmed" state_is "$sha_c" confirmed
 check "boot, no change, no load: no record of it" no_file "${state_dir}/confirmed"
-check "boot, no change, no load: the old one in the kernel" guard_on
+check "boot, no change, no load: a guard in the kernel, the old one or the floor" guard_on
 check "boot, no change, no load: the file stays" same_file "${rules}/c" /etc/nftables.conf
 check "boot, no change, no load: sshd runs" called "start ssh.service"
 # ... and the old one won't load either: the floor.
@@ -1132,7 +1241,6 @@ check "no metadata: sshd runs" called "start ssh.service"
 # What a user can do. Pending, with a user's files of every kind in the way.
 fresh
 apply_ruleset a
-as_user() { setpriv --reuid=65534 --regid=65534 --clear-groups env PATH="${stubs}:${PATH}" "$@"; }
 : >"${stubs}/calls"
 out="$(as_user bash /check/ruleset.sh rollback 2>&1)"; rc=$?
 refute "a user: can't fire it" reason_is 0
@@ -1177,29 +1285,54 @@ if grep -q 'could not put that in the guest attribute' <<<"$out"; then pass "rul
 apply_ruleset a
 if grep -qF "bastion: ruleset pending ${sha_a} at " <<<"$out"; then pass "ruleset: a line for the console too"; else flunk "ruleset: no line for the console"; fi
 
-# bootstrap.sh's reading of the attribute: that ruleset's, and not too old.
+# bootstrap.sh's reading of the attribute: that ruleset's, and that boot's.
+boot_a="aaaaaaaa-0000-4000-8000-000000000001"
+boot_b="bbbbbbbb-0000-4000-8000-000000000002"
+now="$(date +%s)"
 read_state() { [[ "$(ruleset_state "$2" "$3" <<<"$1")" == "$4" ]]; }
-check "bootstrap reads: one word" read_state "confirmed ${sha_a} at 200" "$sha_a" 0 confirmed
-check "bootstrap reads: two words" read_state "rolled back ${sha_b} at 300" "$sha_b" 0 "rolled back"
-check "bootstrap reads: refused" read_state "refused ${sha_c} at 400" "$sha_c" 0 refused
-check "bootstrap reads: failed" read_state "failed ${sha_c} at 400" "$sha_c" 0 failed
-check "bootstrap reads: not an earlier boot's" read_state "confirmed ${sha_a} at 200" "$sha_a" 201 ""
-check "bootstrap reads: another ruleset's are no news" read_state "confirmed ${sha_b} at 200" "$sha_a" 0 ""
-check "bootstrap reads: nothing from nothing" test -z "$(ruleset_state "$sha_a" 0 </dev/null)"
+check "bootstrap reads: one word" read_state "confirmed ${sha_a} at 200 boot ${boot_a}" "$sha_a" "$boot_a" confirmed
+check "bootstrap reads: two words" read_state "rolled back ${sha_b} at 300 boot ${boot_a}" "$sha_b" "$boot_a" "rolled back"
+check "bootstrap reads: refused" read_state "refused ${sha_c} at 400 boot ${boot_a}" "$sha_c" "$boot_a" refused
+check "bootstrap reads: failed" read_state "failed ${sha_c} at 400 boot ${boot_a}" "$sha_c" "$boot_a" failed
+check "bootstrap reads: any boot's, when asked" read_state "rolled back ${sha_b} at 300 boot ${boot_a}" "$sha_b" "" "rolled back"
+check "bootstrap reads: not an earlier boot's" read_state "confirmed ${sha_a} at 200 boot ${boot_b}" "$sha_a" "$boot_a" ""
+check "bootstrap reads: not without a boot" read_state "confirmed ${sha_a} at 200" "$sha_a" "" ""
+check "bootstrap reads: another ruleset's are no news" read_state "confirmed ${sha_b} at 200 boot ${boot_a}" "$sha_a" "$boot_a" ""
+check "bootstrap reads: nothing from nothing" test -z "$(ruleset_state "$sha_a" "$boot_a" </dev/null)"
+check "bootstrap reads: not ten years from now" read_state "confirmed ${sha_a} at $((now + 315360000)) boot ${boot_a}" "$sha_a" "$boot_a" ""
+check "bootstrap reads: a minute of clock skew is fine" read_state "confirmed ${sha_a} at $((now + 60)) boot ${boot_a}" "$sha_a" "$boot_a" confirmed
 # Only the value, whole: not a serial line of any shape, which any user can write.
-check "bootstrap reads: not a console line" read_state "bastion: ruleset confirmed ${sha_a} at 200" "$sha_a" 0 ""
-check "bootstrap reads: not one inside another" read_state "x confirmed ${sha_a} at 200" "$sha_a" 0 ""
+check "bootstrap reads: not a console line" read_state "bastion: ruleset confirmed ${sha_a} at 200 boot ${boot_a}" "$sha_a" "$boot_a" ""
+check "bootstrap reads: not one inside another" read_state "x confirmed ${sha_a} at 200 boot ${boot_a}" "$sha_a" "$boot_a" ""
+# And a login: on that boot, since then, and no later than now.
+saw_login() { login_seen "$2" "$3" <<<"$1"; }
+check "bootstrap reads a login: this boot, now" saw_login "login ${now} boot ${boot_a}" "$boot_a" "$now"
+check "bootstrap reads a login: with a minute of clock skew" saw_login "login $((now - 60)) boot ${boot_a}" "$boot_a" "$now"
+refute "bootstrap reads a login: not another boot's" saw_login "login ${now} boot ${boot_b}" "$boot_a" "$now"
+refute "bootstrap reads a login: not an old one" saw_login "login $((now - 3600)) boot ${boot_a}" "$boot_a" "$now"
+refute "bootstrap reads a login: not one from the future" saw_login "login $((now + 3600)) boot ${boot_a}" "$boot_a" "$now"
+refute "bootstrap reads a login: not a console line" saw_login "bastion: login ${now} boot ${boot_a}" "$boot_a" "$now"
+refute "bootstrap reads a login: not nothing" saw_login "" "$boot_a" "$now"
 
-# bootstrap.sh's wait. The attribute's values, in turn, from a file of them.
-# wait_case <name> <want exit> <want dispatches> <since> <values, one a line>
+# bootstrap.sh's wait. The attribute's values, in turn, from a file of them, with
+# watchtower/boot saying which boot it is.
+# wait_case <name> <want exit> <want dispatches> <the boot before a restart, or "">
+#   <values, one a line> [<the boot it says it's on>]
 BASTION=watchtower-bastion
+BASTION_ZONE=stand-in-zone
+GCP_PROJECT=stand-in-project
 confirm_by_hand="the-hand-confirm"
 ruleset_sha="$sha_a"
+attribute_error=/tmp/attribute-error
 wait_case() {
-  local name=$1 want_rc=$2 want_dispatches=$3 since=$4 values=$5 got rc
+  local name=$1 want_rc=$2 want_dispatches=$3 old_boot=$4 values=$5 says_boot=${6-$boot_a} got rc
   printf '%s\n' "$values" >"${stubs}/values"
   got="$(
     bastion_attribute() {
+      if [[ "$1" == boot ]]; then
+        printf '%s\n' "$says_boot"
+        return
+      fi
       # The next value, the last one staying.
       local value
       value="$(head -1 "${stubs}/values")"
@@ -1210,7 +1343,7 @@ wait_case() {
     log() { printf '%s\n' "$*"; }
     die() { printf 'died: %s\n' "$*"; exit 1; }
     sleep() { :; }
-    bastion_ruleset_wait "$since"
+    bastion_ruleset_wait "$old_boot"
   )"
   rc=$?
   local dispatches
@@ -1222,20 +1355,195 @@ wait_case() {
   fi
   wait_out="$got"
 }
-wait_case "confirmed" 0 0 0 "confirmed ${sha_a} at 200"
-wait_case "pending, then confirmed: dispatches once" 0 1 0 "pending ${sha_a} at 100
-pending ${sha_a} at 101
-confirmed ${sha_a} at 200"
+word() { printf '%s %s at %s boot %s' "$1" "${3:-$sha_a}" "${4:-200}" "${2:-$boot_a}"; }
+wait_case "confirmed" 0 0 "" "$(word confirmed)"
+wait_case "pending, then confirmed: dispatches once" 0 1 "" "$(word pending)
+$(word pending)
+$(word confirmed)"
 if grep -qF "$confirm_by_hand" <<<"$wait_out"; then pass "bootstrap waits: says how to confirm by hand"; else flunk "bootstrap waits: doesn't say how to confirm by hand"; fi
-wait_case "rolled back stops" 1 0 0 "rolled back ${sha_a} at 200"
-wait_case "pending, then rolled back stops" 1 1 0 "pending ${sha_a} at 100
-rolled back ${sha_a} at 200"
-wait_case "refused stops, as a rerun finds it" 1 0 0 "refused ${sha_a} at 200"
-wait_case "failed stops" 1 0 0 "failed ${sha_a} at 200"
-wait_case "an earlier boot's word isn't this boot's" 1 0 300 "confirmed ${sha_a} at 200"
-wait_case "another ruleset's word isn't this one's" 1 0 0 "confirmed ${sha_b} at 200"
-wait_case "a forged console line isn't a word" 1 0 0 "bastion: ruleset confirmed ${sha_a} at 200"
-wait_case "nothing at all stops, in the end" 1 0 0 ""
+wait_case "rolled back stops" 1 0 "" "$(word 'rolled back')"
+wait_case "pending, then rolled back stops" 1 1 "" "$(word pending)
+$(word 'rolled back')"
+wait_case "refused stops, as a rerun finds it" 1 0 "" "$(word refused)"
+wait_case "failed stops" 1 0 "" "$(word failed)"
+wait_case "an earlier boot's word isn't this boot's" 1 0 "" "$(word confirmed "$boot_b")"
+wait_case "after a restart, the old boot's word isn't one, while the VM still says that boot" 1 0 "$boot_a" "$(word confirmed)"
+wait_case "after a restart, the new boot's word is" 0 0 "$boot_b" "$(word confirmed)"
+wait_case "no boot reported is no word" 1 0 "" "$(word confirmed)" ""
+wait_case "another ruleset's word isn't this one's" 1 0 "" "$(word confirmed "$boot_a" "$sha_b")"
+wait_case "a date in the future isn't a word" 1 0 "" "$(word confirmed "$boot_a" "$sha_a" "$((now + 315360000))")"
+wait_case "a forged console line isn't a word" 1 0 "" "bastion: ruleset $(word confirmed)"
+wait_case "nothing at all stops, in the end" 1 0 "" ""
+# What the tool itself said above, of an sshd that wouldn't start: no success.
+wait_case "confirmed with sshd down, in the tool's own words, stops" 1 0 "" "$sshd_down_word" "$this_boot"
+
+# A guest attribute that isn't there yet, and one that can't be read.
+attribute_case() {
+  local name=$1 want=$2 message=$3 got
+  : >"$attribute_error"
+  got="$(
+    compute() { echo "$message" >&2; return 1; }
+    guest_attribute watchtower/ruleset 2>&1
+    attribute_refusal
+  )"
+  case "$want" in
+    quiet) if [[ -z "$got" ]]; then pass "bootstrap reads attributes: ${name}"; else flunk "bootstrap reads attributes: ${name}: ${got}"; fi ;;
+    refused) if [[ "$got" == *refused*refused* ]]; then pass "bootstrap reads attributes: ${name}"; else flunk "bootstrap reads attributes: ${name}: ${got}"; fi ;;
+  esac
+}
+attribute_case "not there yet says nothing" quiet "ERROR: HTTPError 404: The resource 'guestAttributes/watchtower/ruleset' was not found"
+attribute_case "no permission says so, now and when it gives up" refused "ERROR: PERMISSION_DENIED: Required 'compute.instances.getGuestAttributes' permission"
+attribute_case "turned off says so, now and when it gives up" refused "ERROR: Guest attributes are disabled"
+if [[ "$(compute() { echo a-value; }; guest_attribute watchtower/ruleset)" == a-value ]]; then pass "bootstrap reads attributes: a value"; else flunk "bootstrap reads attributes: no value"; fi
+# ... all the way to the message the owner is left with.
+refused_wait="$(
+  compute() { echo 'ERROR: PERMISSION_DENIED: no' >&2; return 1; }
+  log() { :; }
+  die() { printf 'died: %s\n' "$*"; exit 1; }
+  sleep() { :; }
+  bastion_ruleset_wait "" 2>/dev/null
+)"
+if [[ "$refused_wait" == *"was refused"*PERMISSION_DENIED* ]]; then pass "bootstrap waits: says the reads were refused, not only that nothing came"; else flunk "bootstrap waits: gives up with: ${refused_wait}"; fi
+
+# bootstrap.sh's wait for a login.
+# login_case <name> <want exit> <want dispatches> <values, one a line>
+login_case() {
+  local name=$1 want_rc=$2 want_dispatches=$3 values=$4 got rc
+  printf '%s\n' "$values" >"${stubs}/values"
+  got="$(
+    bastion_attribute() {
+      local value
+      value="$(head -1 "${stubs}/values")"
+      [[ "$(wc -l <"${stubs}/values")" -le 1 ]] || sed -i 1d "${stubs}/values"
+      printf '%s\n' "$value"
+    }
+    bastion_dispatch() { echo dispatched; }
+    log() { printf '%s\n' "$*"; }
+    die() { printf 'died: %s\n' "$*"; exit 1; }
+    sleep() { :; }
+    bastion_login_wait "$boot_a"
+  )"
+  rc=$?
+  local dispatches
+  dispatches="$(grep -c '^dispatched$' <<<"$got")"
+  if [[ "$rc" == "$want_rc" && "$dispatches" == "$want_dispatches" ]]; then
+    pass "bootstrap waits for a login: ${name}"
+  else
+    flunk "bootstrap waits for a login: ${name}: exit ${rc}, ${dispatches} dispatches; want exit ${want_rc}, ${want_dispatches} dispatches"
+  fi
+}
+login_case "there already: no job" 0 0 "login ${now} boot ${boot_a}"
+login_case "none, so the job, then it comes" 0 1 "
+login ${now} boot ${boot_a}"
+login_case "another boot's doesn't count, and the job runs" 0 1 "login ${now} boot ${boot_b}
+login ${now} boot ${boot_a}"
+login_case "none ever: stops" 1 1 ""
+login_case "only an old one: stops" 1 1 "login $((now - 3600)) boot ${boot_a}"
+
+# --- bootstrap: bastion_update, in order, with gcloud stubbed --------------------
+# update_trace <metadata differs?> <account differs?> [the compute call that fails]:
+# prints everything it does, and "exit <n>" last. Under set -e and the real exit
+# trap, as bootstrap.sh runs it.
+update_trace() {
+  local meta=$1 account=$2 failing=${3:-}
+  (
+    set -e
+    n=0
+    bastion_files=stand-in-files
+    BASTION_SA=stand-in-account
+    current='{"meta":{"startup-script":"old"}}'
+    want="$current"
+    [[ "$meta" != yes ]] || want='{"meta":{"startup-script":"new"}}'
+    account_differs=""
+    [[ "$account" != yes ]] || account_differs=1
+    retry_args=()
+    stop_in_flight=""
+    cleanup=/tmp/update-trace-cleanup
+    log() { :; }
+    die() { echo died; exit 1; }
+    sleep() { :; }
+    compute() { echo "compute-$2"; [[ "$2" != "$failing" ]]; }
+    bastion_attribute() {
+      case "$1" in
+        boot) echo boot-before ;;
+        settled) echo "$bastion_boot_id" ;;
+      esac
+    }
+    bastion_ruleset_wait() { n=$((n + 1)); echo "wait-after-${1:-nothing}"; bastion_boot_id="boot-${n}"; }
+    bastion_login_wait() { echo "login-on-$1"; }
+    trap bastion_on_exit EXIT
+    bastion_update
+  ) 2>/dev/null
+  echo "exit $?"
+}
+# Not through check: set -e does nothing inside an if, and it's what's under test.
+# update_case <name> <want> <metadata differs?> <account differs?> [what fails]
+update_case() {
+  local name=$1 want=$2 got
+  got="$(update_trace "$3" "$4" "${5:-}")"
+  got="${got//$'\n'/ }"
+  if [[ "$got" == "$want" ]]; then pass "update: ${name}"; else flunk "update: ${name}: ${got}"; fi
+}
+update_case "both differ: metadata before the stop, a stop for the account, each boot asked, and a login last" \
+  "compute-add-metadata compute-stop compute-start wait-after-boot-before compute-stop compute-set-service-account compute-start wait-after-boot-1 login-on-boot-2 exit 0" yes yes
+update_case "only the metadata: one restart" \
+  "compute-add-metadata compute-stop compute-start wait-after-boot-before login-on-boot-1 exit 0" yes no
+update_case "only the account: goes by this boot, then asks the new one" \
+  "wait-after-nothing compute-stop compute-set-service-account compute-start wait-after-boot-1 login-on-boot-2 exit 0" no yes
+update_case "nothing differs: no restart, and it's still asked, with a login" \
+  "wait-after-nothing login-on-boot-1 exit 0" no no
+update_case "metadata refused: never stopped, and the failure stands" \
+  "compute-add-metadata exit 1" yes no add-metadata
+update_case "a stop that fails: started anyway, and the failure stands" \
+  "compute-add-metadata compute-stop compute-start exit 1" yes no stop
+update_case "the account refused: the exit trap starts it, and the failure stands" \
+  "wait-after-nothing compute-stop compute-set-service-account compute-start exit 1" no yes set-service-account
+
+# The exit trap alone: the status it came with, whatever the start does.
+trap_trace() {
+  local in_flight=$1 start_rc=$2
+  (
+    cleanup=/tmp/update-trace-cleanup
+    stop_in_flight="$in_flight"
+    compute() { echo "compute-$2"; return "$start_rc"; }
+    trap bastion_on_exit EXIT
+    exit 7
+  ) 2>/dev/null
+  echo "exit $?"
+}
+trap_is() { [[ "$(trap_trace "$2" "$3" | tr '\n' ' ')" == "$1 " ]]; }
+check "exit trap: a stop in flight: starts it, keeps the status" trap_is "compute-start exit 7" 1 0
+check "exit trap: the start fails too: keeps the status" trap_is "compute-start exit 7" 1 1
+check "exit trap: nothing in flight: leaves it alone" trap_is "exit 7" "" 0
+
+# The last word before "Done".
+# final_is <want exit> <status> <boot it says> <ruleset attribute> <login attribute>
+final_is() {
+  local want_rc=$1 vm_status=$2 says_boot=$3 ruleset=$4 login=$5 rc
+  (
+    bastion_boot_id="$boot_a"
+    login_since="$now"
+    compute() { echo "$vm_status"; }
+    bastion_attribute() {
+      case "$1" in
+        boot) echo "$says_boot" ;;
+        ruleset) echo "$ruleset" ;;
+        login) echo "$login" ;;
+      esac
+    }
+    die() { exit 1; }
+    bastion_final_check
+  ) >/dev/null 2>&1
+  rc=$?
+  [[ "$rc" == "$want_rc" ]]
+}
+login_word="login ${now} boot ${boot_a}"
+check "final check: running, this boot, confirmed, a login" final_is 0 RUNNING "$boot_a" "$(word confirmed)" "$login_word"
+check "final check: stopped" final_is 1 TERMINATED "$boot_a" "$(word confirmed)" "$login_word"
+check "final check: running, and it has rebooted since" final_is 1 RUNNING "$boot_b" "$(word confirmed "$boot_b")" "login ${now} boot ${boot_b}"
+check "final check: running, and says no boot" final_is 1 RUNNING "" "$(word confirmed)" "$login_word"
+check "final check: running, and sshd has failed since" final_is 1 RUNNING "$boot_a" "$(word failed)" "$login_word"
+check "final check: running, and no login" final_is 1 RUNNING "$boot_a" "$(word confirmed)" ""
 
 # The units, as systemd reads them.
 fresh
@@ -1283,7 +1591,28 @@ refute "units, cron: a user can't add one now" test "$?" = 0
 check "units, cron: nor did it stay" test -z "$(find /var/spool/cron/crontabs -mindepth 1 -print -quit)"
 check "units, cron: root only" grep -qx root /etc/cron.allow
 check "units, at: root only" grep -qx root /etc/at.allow
-check "units, linger: asked for by anyone, refused" grep -q 'set-self-linger' /etc/polkit-1/rules.d/10-watchtower-ruleset.rules
+# at's spool, where it's installed: a user's job goes, and root's stays.
+mkdir -p /var/spool/cron/atjobs
+touch /var/spool/cron/atjobs/a-users-job /var/spool/cron/atjobs/roots-job
+chown 65534 /var/spool/cron/atjobs/a-users-job
+check "units, at: setup again" tool setup
+check "units, at: the one from before is gone" no_file /var/spool/cron/atjobs/a-users-job
+check "units, at: root's stays" test -e /var/spool/cron/atjobs/roots-job
+# polkit's rule, under the JavaScript engine polkit uses here, as polkit would call
+# it, since logind and polkit don't run in this container.
+{
+  echo 'var rule; var polkit = {Result: {NO: "refused"}, addRule: function (f) { rule = f; }};'
+  cat /etc/polkit-1/rules.d/10-watchtower-ruleset.rules
+  echo 'print(rule({id: "org.freedesktop.login1.set-self-linger"}, {user: "a-user"}));'
+  echo 'print(rule({id: "org.freedesktop.login1.set-user-linger"}, {user: "a-user"}));'
+  echo 'print(rule({id: "org.freedesktop.login1.reboot"}, {user: "a-user"}));'
+} >/tmp/polkit-rule.js
+linger_answers="$(duk /tmp/polkit-rule.js | tr '\n' ' ')"
+if [[ "$linger_answers" == "refused refused undefined " ]]; then
+  pass "units, linger: a user's own and another's refused, and nothing else touched"
+else
+  flunk "units, linger: polkit's rule answers: ${linger_answers}"
+fi
 # The floor: the same guard as the file, and it holds.
 nft flush ruleset
 nft --file nftables.conf
@@ -1399,7 +1728,11 @@ if [[ "$vrc" == 0 && -z "$(grep 'watchtower' <<<"$ping_verify")" ]]; then
 else
   flunk "ping units: systemd-analyze verify: ${ping_verify}"
 fi
-refute "ping units: nothing of sshd waits on it" grep -qs 'watchtower-ping' /etc/systemd/system/ssh.service.d/watchtower-guard.conf
+# No unit anywhere names it but its own two, and they ask for nothing to wait on
+# them: so nothing of sshd, the guard or the rollback can depend on it.
+ping_mentions="$(grep -Rl 'watchtower-ping' /etc/systemd/system /usr/lib/systemd/system 2>/dev/null | grep -vE '/watchtower-ping\.(service|timer)$')"
+check "ping units: no other unit names them" test -z "$ping_mentions"
+refute "ping units: nothing is made to need them" grep -qE '^(RequiredBy|WantedBy|Before)=' /etc/systemd/system/watchtower-ping.service
 check "ping units: says nothing when all goes well" test -z "$ping_units_out"
 
 # --- recovery: recovery.sh, the one-off startup script for when SSH is gone -------
@@ -1434,7 +1767,16 @@ cat >"${recovery_bin}/du" <<'STUB'
 #!/bin/bash
 echo '9.0G /home/stand-in-user'
 STUB
-chmod 0755 "${recovery_bin}/df" "${recovery_bin}/journalctl" "${recovery_bin}/apt-get" "${recovery_bin}/dpkg" "${recovery_bin}/du"
+# Metadata's copy of the tool, when /stubs/tool-in-metadata is there.
+cat >"${recovery_bin}/curl" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *instance/attributes/watchtower-ruleset* ]]; then
+  [[ -e /stubs/tool-in-metadata ]] || exit 22
+  exec cat /stubs/tool-in-metadata
+fi
+exec /stubs/curl "$@"
+STUB
+chmod 0755 "${recovery_bin}/df" "${recovery_bin}/journalctl" "${recovery_bin}/apt-get" "${recovery_bin}/dpkg" "${recovery_bin}/du" "${recovery_bin}/curl"
 recovery() {
   out="$(PATH="${recovery_bin}:${stubs}:${PATH}" bash /check/recovery.sh 2>&1)"
   rc=$?
@@ -1531,21 +1873,165 @@ rm -f "${stubs}/nft-broken" "${stubs}/sshd-down"
 echo 404 >"${stubs}/account-code"
 check "recovery, nft broken: exit 0" reason_is 0
 check "recovery, nft broken: reinstalls it" called "apt-get -q -o DPkg::Lock::Timeout=120 install -y --reinstall --no-install-recommends nftables"
+check "recovery, nft broken: with fresh lists" test "$(line_of 'apt-get -q -o DPkg::Lock::Timeout=120 update')" -lt "$(line_of 'apt-get -q -o DPkg::Lock::Timeout=120 install -y --reinstall --no-install-recommends nftables')"
 refute "recovery, nft broken: the gate holds, so no sshd" called "start ssh.service"
 check "recovery, nft broken: says the guard's off" said 'bastion-recovery: guard: NOT loaded'
 check "recovery, nft broken: says sshd's off" said 'bastion-recovery: sshd: NOT active'
 check "recovery, nft broken: says why" said "why sshd isn't up"
 check "recovery, nft broken: done" said 'bastion-recovery: done'
 
-# No tool at all: what's left is to start them.
-fresh
-full_disk 41
-mv /usr/local/sbin/watchtower-ruleset /usr/local/sbin/watchtower-ruleset.away
+# The tool gone or cut short, with sshd as it really is: nothing without its gate,
+# on a VM with an account and the guard in the kernel.
+real_tool=/usr/local/sbin/watchtower-ruleset
+# tool_damage <how>: gone, cut mid-line, or cut at a line, where it still parses.
+tool_damage() {
+  case "$1" in
+    gone) rm -f "$real_tool" ;;
+    mid-line) head -c 12000 ruleset.sh >"$real_tool" ;;
+    at-a-line) head -n 40 ruleset.sh >"$real_tool" ;;
+  esac
+  [[ "$1" == gone ]] || chmod 0755 "$real_tool"
+}
+tool_setting() {
+  fresh
+  full_disk 41
+  install -m 0755 ruleset.sh "$real_tool"
+  nft --file nftables.conf
+  echo 200 >"${stubs}/account-code"
+  touch "${stubs}/sshd-runs-its-gate" "${stubs}/sshd-down"
+  rm -f "${stubs}/tool-in-metadata"
+  : >"${stubs}/calls"
+}
+for damage in gone mid-line at-a-line; do
+  # Nothing in metadata: sshd stays down, and says so. It isn't got past the gate.
+  tool_setting
+  tool_damage "$damage"
+  recovery
+  check "recovery, tool ${damage}, nothing in metadata: exit 0" reason_is 0
+  check "recovery, tool ${damage}, nothing in metadata: says it couldn't" said 'could not restore it'
+  if [[ "$damage" != at-a-line ]]; then
+    check "recovery, tool ${damage}, nothing in metadata: says sshd is down" said 'bastion-recovery: sshd: NOT active'
+    check "recovery, tool ${damage}, nothing in metadata: sshd is down" test -e "${stubs}/sshd-down"
+  fi
+  check "recovery, tool ${damage}, nothing in metadata: done" said 'bastion-recovery: done'
+  # A good copy there: it's back, and sshd with it.
+  tool_setting
+  tool_damage "$damage"
+  cp ruleset.sh "${stubs}/tool-in-metadata"
+  recovery
+  check "recovery, tool ${damage}, metadata has it: exit 0" reason_is 0
+  check "recovery, tool ${damage}, metadata has it: says so" said 'restored it'
+  check "recovery, tool ${damage}, metadata has it: whole" same_file ruleset.sh "$real_tool"
+  check "recovery, tool ${damage}, metadata has it: executable" test -x "$real_tool"
+  check "recovery, tool ${damage}, metadata has it: sshd up" said 'bastion-recovery: sshd: active'
+  check "recovery, tool ${damage}, metadata has it: through the gate" no_file "${stubs}/sshd-down"
+done
+# A bad copy there: not put in place, and no temp file left.
+tool_setting
+tool_damage mid-line
+cp "$real_tool" "${stubs}/damaged-tool"
+head -c 9000 ruleset.sh >"${stubs}/tool-in-metadata"
 recovery
-mv /usr/local/sbin/watchtower-ruleset.away /usr/local/sbin/watchtower-ruleset
-check "recovery, no tool: exit 0" reason_is 0
-check "recovery, no tool: starts sshd" called "start ssh.service"
-check "recovery, no tool: starts the guard" called "start nftables.service"
+check "recovery, a bad copy in metadata: not put in place" same_file "${stubs}/damaged-tool" "$real_tool"
+check "recovery, a bad copy in metadata: nothing left behind" no_file "${real_tool}.tmp"
+check "recovery, a bad copy in metadata: says it couldn't" said 'could not restore it'
+# The gate, untouched by any of it: guard off, an account, a whole tool.
+tool_setting
+nft flush ruleset
+touch "${stubs}/nft-broken"
+recovery
+rm -f "${stubs}/nft-broken"
+check "recovery, no guard: sshd stays down" test -e "${stubs}/sshd-down"
+install -m 0755 ruleset.sh "$real_tool"
+fresh
+echo 404 >"${stubs}/account-code"
+
+# --- a real full disk: a small tmpfs, real install, real ENOSPC ------------------
+# put, from startup.sh, over a tool on a disk with no room: the old one stays whole.
+tiny=/tiny-disk
+mkdir -p "$tiny"
+if mount -t tmpfs -o size=64k tmpfs "$tiny"; then
+  head -c 30000 /dev/zero >"${tiny}/filler"
+  { echo '#!/bin/bash'; head -c 28000 /dev/zero | tr '\0' '#'; echo; echo 'main "$@"'; } >"${tiny}/tool"
+  chmod 0755 "${tiny}/tool"
+  cp "${tiny}/tool" /tmp/tool-before
+  { echo '#!/bin/bash'; head -c 40000 /dev/zero | tr '\0' '#'; echo; } >/tmp/tool-bigger
+  (put /tmp/tool-bigger "${tiny}/tool" 0755 root) 2>/dev/null
+  rc=$?
+  check "put, no room: fails" test "$rc" = 1
+  check "put, no room: the tool stays whole" same_file /tmp/tool-before "${tiny}/tool"
+  check "put, no room: nothing left behind" no_file "${tiny}/tool.tmp"
+  rm -f "${tiny}/filler"
+  # Room, and a tool that won't parse: the old one stays too.
+  printf '#!/bin/bash\nif then\n' >/tmp/tool-broken
+  (put /tmp/tool-broken "${tiny}/tool" 0755 root) 2>/dev/null
+  check "put, won't parse: the tool stays whole" same_file /tmp/tool-before "${tiny}/tool"
+  check "put, won't parse: nothing left behind" no_file "${tiny}/tool.tmp"
+  # Room, and a good one: it goes in, with its mode.
+  printf '#!/bin/bash\necho new\n' >/tmp/tool-good
+  (put /tmp/tool-good "${tiny}/tool" 0755 root) 2>/dev/null
+  check "put, room: in place" same_file /tmp/tool-good "${tiny}/tool"
+  check "put, room: executable" test -x "${tiny}/tool"
+  # A file that's no script needn't parse.
+  printf 'not ( a script\n' >/tmp/a-config
+  (put /tmp/a-config "${tiny}/config" 0644 root) 2>/dev/null
+  check "put, a config: in place" same_file /tmp/a-config "${tiny}/config"
+  umount "$tiny"
+else
+  flunk "a real full disk: can't mount a small tmpfs here"
+fi
+
+# The switch itself, with its ruleset and state on that small disk.
+small_tool=/small-disk-ruleset.sh
+if mount -t tmpfs -o size=64k tmpfs "$tiny"; then
+  sed -e "s#^STATE=.*#STATE=\"${tiny}/state\"#" -e "s#^RULESET=.*#RULESET=\"${tiny}/nftables.conf\"#" ruleset.sh >"$small_tool"
+  small() { PATH="${stubs}:${PATH}" bash "$small_tool" "$@"; }
+  fill_disk() { head -c 100000 /dev/zero >"${tiny}/filler" 2>/dev/null; }
+  fresh
+  echo "${tiny}/nftables.conf" >"${stubs}/ruleset-path"
+  cp "${rules}/marked" "${tiny}/nftables.conf"
+  nft --file "${rules}/marked"
+  # A login on a full disk: not lost. It counts once there's room.
+  : >"${stubs}/attribute"
+  out="$(small apply "${rules}/a" "" 2>&1)"; rc=$?
+  check "full disk: a on trial" state_is "$sha_a" pending
+  fill_disk
+  touch "${dropbox}/a-login"
+  out="$(small confirm 2>&1)"; rc=$?
+  check "full disk, a login: its file stays" test -e "${dropbox}/a-login"
+  check "full disk, a login: the trial stands" grep -qx "$sha_a" "${tiny}/state/pending"
+  refute "full disk, a login: not confirmed" state_is "$sha_a" confirmed
+  check "full disk, a login: says so" said 'could not record the confirmation'
+  check "full disk, a login: still shows someone got in" login_seen "$this_boot" "$(date +%s)" <"${stubs}/attribute-login"
+  rm -f "${tiny}/filler"
+  out="$(small confirm 2>&1)"; rc=$?
+  check "full disk, then room: confirmed" state_is "$sha_a" confirmed
+  check "full disk, then room: its file went" no_file "${dropbox}/a-login"
+  check "full disk, then room: nothing pending" no_file "${tiny}/state/pending"
+  # A rollback on a full disk, by real ENOSPC.
+  : >"${stubs}/attribute"
+  out="$(small apply "${rules}/b" "" 2>&1)"; rc=$?
+  check "full disk, rollback: b on trial" state_is "$sha_b" pending
+  fill_disk
+  : >"${stubs}/calls"
+  out="$(small rollback 2>&1)"; rc=$?
+  refute "full disk, rollback: fails, so it retries" reason_is 0
+  check "full disk, rollback: says failed" state_is "$sha_b" failed
+  check "full disk, rollback: the old guard is in the kernel, needing no disk" guard_on
+  check "full disk, rollback: the record stays" grep -qx "$sha_b" "${tiny}/state/pending"
+  check "full disk, rollback: the file is whole" same_file "${rules}/b" "${tiny}/nftables.conf"
+  refute "full disk, rollback: no reboot" called "--no-block reboot"
+  rm -f "${tiny}/filler"
+  out="$(small rollback 2>&1)"; rc=$?
+  check "full disk, rollback, then room: exit 0" reason_is 0
+  check "full disk, rollback, then room: says rolled back" state_is "$sha_b" "rolled back"
+  check "full disk, rollback, then room: the old one back" same_file "${rules}/a" "${tiny}/nftables.conf"
+  check "full disk, rollback, then room: reboots" called "--no-block reboot"
+  umount "$tiny"
+  rm -f "${stubs}/ruleset-path"
+else
+  flunk "a real full disk: can't mount a small tmpfs here"
+fi
 exit "$fail"
 RUN
 

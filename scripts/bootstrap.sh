@@ -67,7 +67,9 @@
 #      this dispatches bastion-confirm.yml, for the branch it's run from, to
 #      log in as the deployer and cancel it, and waits to see which came of
 #      it, in a guest attribute only root can write once the guard is on, and
-#      never prints "Done" unless this boot has confirmed it. Rolled back, it
+#      never prints "Done" unless this boot, by its boot id, has confirmed it with
+#      sshd active, and a real login has reached it during this run (the same job,
+#      dispatched again, and the attribute watchtower/login). Rolled back, it
 #      stops, and a rerun tries again: a fixed file has a new sha256, and the
 #      same file is asked for again. The account goes on only after that ruleset
 #      is confirmed, and it's asked again of the boot with the account: two
@@ -304,7 +306,24 @@ fi
 # Storage is billed: keep each image's 10 newest versions, delete the rest
 # once they are a week old.
 cleanup="$(mktemp)"
-trap 'rm -f "$cleanup"' EXIT
+# What the last read of a guest attribute was refused with, if it was.
+attribute_error="$(mktemp)"
+# Set from a stop of the bastion until its start has worked (step 7).
+stop_in_flight=""
+# On any way out, the exit status it came with. A failure between a stop and its
+# start must not leave break glass down, nor be reported as something else.
+bastion_on_exit() {
+  local rc=$?
+  rm -f "$cleanup" "$attribute_error"
+  if [[ -n "$stop_in_flight" ]]; then
+    printf 'warning: %s was stopped by this run: starting it again\n' "$BASTION" >&2
+    compute instances start "$BASTION" --zone "$BASTION_ZONE" ||
+      printf 'warning: %s did not start, so break glass is down: gcloud compute instances start %s --zone %s --project %s\n' \
+        "$BASTION" "$BASTION" "$BASTION_ZONE" "$GCP_PROJECT" >&2
+  fi
+  exit "$rc"
+}
+trap bastion_on_exit EXIT
 cat >"$cleanup" <<'JSON'
 [
   {"name": "keep-newest", "action": {"type": "Keep"}, "mostRecentVersions": {"keepCount": 10}},
@@ -425,9 +444,14 @@ BASTION_SA="$(sa_email "$BASTION")"
 # deployer from the VM's token.
 retry_iam gcloud iam service-accounts add-iam-policy-binding "$BASTION_SA" --project "$GCP_PROJECT" \
   --member "serviceAccount:${DEPLOYER}" --role roles/iam.serviceAccountUser
+bastion_stop() {
+  stop_in_flight=1
+  compute instances stop "$BASTION" --zone "$BASTION_ZONE"
+}
 bastion_start() {
   compute instances start "$BASTION" --zone "$BASTION_ZONE" ||
     die "${BASTION} is stopped and did not start, so break glass is down: rerun this, which starts it first"
+  stop_in_flight=""
 }
 # Up, or on its way: a run that failed between a stop and its start leaves it
 # stopped with nothing below left to do, and nothing below starts it otherwise.
@@ -447,47 +471,66 @@ bastion_up() {
   done
   die "${BASTION} stayed ${state} for 5 minutes, so break glass is down"
 }
-# ruleset_state <sha> <since>: the guest attribute watchtower/ruleset on stdin;
+# ruleset_state <sha> <boot>: the guest attribute watchtower/ruleset on stdin;
 # prints what came of that ruleset (pending, confirmed, rolled back, refused or
-# failed), if it's no older than since, an epoch. Nothing when there is none: the
-# attribute outlasts a stop, so a value alone says nothing about this boot.
-# scripts/check-bastion.sh tests it.
+# failed), if it's that boot's, or any boot's when boot is empty. Nothing when there
+# is none: the attribute outlasts a stop, a reset and a reboot, so a value alone
+# says nothing about this boot. A time beyond 5 minutes of clock skew ahead of this
+# machine's is no word either. scripts/check-bastion.sh tests it.
 ruleset_state() {
-  { grep -xE '(pending|confirmed|rolled back|refused|failed) [0-9a-f]{64} at [0-9]+' || true; } |
-    awk -v sha="$1" -v since="$2" '
-      $(NF - 2) == sha && $NF + 0 >= since + 0 {
+  { grep -xE '(pending|confirmed|rolled back|refused|failed) [0-9a-f]{64} at [0-9]+ boot [0-9a-f-]+' || true; } |
+    awk -v sha="$1" -v boot="$2" -v latest="$(($(date +%s) + 300))" '
+      $(NF - 4) == sha && $(NF - 2) + 0 <= latest + 0 && (boot == "" || $NF == boot) {
         state = $1
-        if (NF == 5) state = $1 " " $2
+        if (NF == 7) state = $1 " " $2
       }
       END { print state }'
+}
+# login_seen <boot> <since>: the guest attribute watchtower/login on stdin; true if
+# it's a login on that boot, since then (an epoch, less 5 minutes of clock skew).
+login_seen() {
+  { grep -xE 'login [0-9]+ boot [0-9a-f-]+' || true; } |
+    awk -v boot="$1" -v earliest="$(($2 - 300))" -v latest="$(($(date +%s) + 300))" '
+      $NF == boot && $2 + 0 >= earliest + 0 && $2 + 0 <= latest + 0 { seen = 1 }
+      END { exit !seen }'
+}
+# guest_attribute <path>: its value, and nothing when it isn't there yet. A read
+# that's refused for any other reason says so, and stays on record for the message
+# of whatever then gives up waiting: enable-guest-attributes off, no permission.
+guest_attribute() {
+  local value
+  if value="$(compute instances get-guest-attributes "$BASTION" --zone "$BASTION_ZONE" \
+    --query-path "$1" --format 'value(value)' 2>"$attribute_error")"; then
+    printf '%s\n' "$value"
+  elif grep -qiE 'not.?found|HTTPError 404' "$attribute_error"; then
+    : >"$attribute_error"
+  else
+    printf 'warning: reading guest attribute %s was refused: %s\n' "$1" "$(tail -n 1 "$attribute_error")" >&2
+  fi
+}
+# What to add to a message about nothing being reported.
+attribute_refusal() {
+  if [[ -s "$attribute_error" ]]; then
+    printf ' Reading its guest attributes was refused, so it may have said more: %s' "$(tail -n 1 "$attribute_error")"
+  fi
 }
 # bastion_attribute <key>: what the startup script reports. Never the serial
 # output: any user can put a line there (logger, through rsyslog), and the guard
 # keeps them from these.
 bastion_attribute() {
-  compute instances get-guest-attributes "$BASTION" --zone "$BASTION_ZONE" \
-    --query-path "watchtower/$1" --format 'value(value)' 2>/dev/null || true
+  guest_attribute "watchtower/$1"
 }
-# When it last started, as an epoch: an attribute from before that is an earlier
-# boot's.
-bastion_started() {
-  local started
-  started="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format 'value(lastStartTimestamp)')"
-  [[ -n "$started" ]] || die "${BASTION} says nothing of when it last started"
-  date -d "$started" +%s
-}
-# The way to cancel a rollback by hand, as any account with OS Login on it.
+# The way to cancel a rollback, or show a login, by hand, as any account with OS
+# Login on it.
 confirm_by_hand="gcloud compute ssh ${BASTION} --zone ${BASTION_ZONE} --project ${GCP_PROJECT} --tunnel-through-iap --command 'touch /run/watchtower-ruleset/confirm'"
 # The guest agent publishes the host keys once the VM has booted.
-bastion_host_key() {
-  compute instances get-guest-attributes "$BASTION" --zone "$BASTION_ZONE" \
-    --query-path hostkeys/ssh-ed25519 --format 'value(value)' 2>/dev/null || true
-}
+bastion_host_key() { guest_attribute hostkeys/ssh-ed25519; }
 # Dispatches bastion-confirm.yml through Gitea's API, for this branch: it logs
-# in as the deployer and cancels the rollback. Says plainly if it can't, and
-# never fails: then the rollback is what happens. The token goes through a
-# pipe, never into a variable or an argument. The job pins the host key sent
-# here: a new VM's isn't in the stack file yet.
+# in as the deployer, which cancels a rollback and shows that login works. Says
+# plainly if it can't, and never fails: then the rollback is what happens, or the
+# wait for a login gives up. The token goes through a pipe, never into a variable or
+# an argument. The job pins the host key sent here: a new VM's isn't in the stack
+# file yet.
 bastion_dispatch() {
   local branch payload key
   branch="$(git -C "$repo_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
@@ -502,21 +545,29 @@ bastion_dispatch() {
     log "  dispatched bastion-confirm.yml on ${branch}"
   else
     printf 'warning: could not dispatch bastion-confirm.yml on %s: Gitea is down, gopass is locked, or the branch is not pushed.\n' "${branch:-this checkout}" >&2
-    printf 'warning: unless someone logs in, the bastion rolls this ruleset back in 10 minutes. To confirm by hand:\n  %s\n' "$confirm_by_hand" >&2
+    printf 'warning: this needs someone to log in, or a new ruleset rolls back in 10 minutes. To do it by hand:\n  %s\n' "$confirm_by_hand" >&2
   fi
   rm -f "$payload"
 }
-# Waits for what comes of the ruleset at this boot, dispatching the job when it
-# goes pending, and returns only if it's confirmed. A rollback takes 10 minutes
-# and a reboot, so this outlasts it.
+# bastion_ruleset_wait <the boot before this run's restart, if it made one>: waits
+# for what comes of the ruleset at this boot, by its boot id, dispatching the job when
+# it goes pending, and returns only if it's confirmed, with that boot's id in
+# bastion_boot_id. A rollback takes 10 minutes and a reboot, so this outlasts it.
+# Two reads a time, so within the 10 a minute guest attributes allow a VM.
 bastion_ruleset_wait() {
-  local since=$1 state="" dispatched=""
+  local old_boot=$1 boot state dispatched=""
   log "  waiting for ${BASTION}'s ruleset ${ruleset_sha:0:12}: it rolls back after 10 minutes unless confirmed"
-  for _ in $(seq 100); do
-    state="$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" "$since")"
+  for _ in $(seq 67); do
+    boot="$(bastion_attribute boot)"
+    state=""
+    # Until the boot says so, an old word could pass for its own.
+    if [[ -n "$boot" && "$boot" != "$old_boot" ]]; then
+      state="$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" "$boot")"
+    fi
     case "$state" in
       confirmed)
-        log "  ruleset confirmed"
+        log "  ruleset confirmed, with sshd active"
+        bastion_boot_id="$boot"
         return 0
         ;;
       "rolled back")
@@ -526,7 +577,7 @@ bastion_ruleset_wait() {
         die "${BASTION} refused ruleset ${ruleset_sha:0:12} (see its serial output): it won't load or gives no guard, so what it ran stays. Fix config/bastion/nftables.conf and rerun"
         ;;
       failed)
-        die "${BASTION} could not load ruleset ${ruleset_sha:0:12}, or could not put its old one back on disk (see its serial output, and \"A new ruleset\" in docs/runbook.md): it runs on the old ruleset or the floor from the kernel"
+        die "${BASTION} could not load ruleset ${ruleset_sha:0:12}, could not put its old one back on disk, or could not start sshd (see its serial output, and \"A new ruleset\" in docs/runbook.md): it runs on the old ruleset or the floor from the kernel"
         ;;
       pending)
         if [[ -z "$dispatched" ]]; then
@@ -539,9 +590,90 @@ bastion_ruleset_wait() {
         ;;
       *) ;;
     esac
-    sleep 10
+    sleep 15
   done
-  die "${BASTION} reported nothing final for ruleset ${ruleset_sha:0:12} within 15 minutes, so it still runs as it did: see its serial output, and rerun"
+  die "${BASTION} reported nothing final for ruleset ${ruleset_sha:0:12} within 15 minutes, so it still runs as it did: see its serial output, and rerun.$(attribute_refusal)"
+}
+# bastion_login_wait <boot>: returns once a real login has reached that boot during
+# this wait, dispatching the job if none has. The account's boot needs this above
+# all: only a login shows OS Login still lets anyone onto a VM with an account. A
+# fresh one each run, whose boot id is the VM's own word on which boot is running
+# now, so an old attribute can't stand in for this boot.
+bastion_login_wait() {
+  local boot=$1 dispatched=""
+  login_since="$(date +%s)"
+  log "  waiting for a real login to reach ${BASTION}"
+  for _ in $(seq 60); do
+    if bastion_attribute login | login_seen "$boot" "$login_since"; then
+      log "  a login reached it"
+      return 0
+    fi
+    if [[ -z "$dispatched" ]]; then
+      dispatched=1
+      bastion_dispatch
+      log "  if the job can't log in (a new environment has no GCP_DEPLOYER_KEY yet), do it by hand: ${confirm_by_hand}"
+    fi
+    sleep 15
+  done
+  die "no login reached ${BASTION} on this boot within 15 minutes: break glass may not work. See the bastion-confirm job, try it by hand (${confirm_by_hand}), and rerun.$(attribute_refusal)"
+}
+# bastion_update: what differs goes on, in order, ending on a VM that has confirmed
+# this ruleset at this boot and let a login in. Metadata goes on before the stop,
+# so a failure there leaves the VM running. Needs current, want, account_differs and
+# retry_args, below.
+bastion_update() {
+  local old_boot=""
+  if [[ "$(jq -c .meta <<<"$current")" != "$(jq -c .meta <<<"$want")" || "${#retry_args[@]}" -gt 0 ]]; then
+    log "  updating ${BASTION} in place: its metadata, stop, start"
+    old_boot="$(bastion_attribute boot)"
+    compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata-from-file "$bastion_files" "${retry_args[@]}"
+    bastion_stop
+    bastion_start
+  fi
+  # Every run, as the attribute doesn't age out: this boot's word on this file, so
+  # a run that changed nothing can't report success over a refused or unconfirmed
+  # ruleset.
+  bastion_ruleset_wait "$old_boot"
+  if [[ -n "$account_differs" ]]; then
+    # Never on a VM whose ruleset this boot hasn't confirmed (above): sshd's gate
+    # would keep everyone out of a VM with a token and no guard, and with a bad
+    # ruleset that means no way in at all. And not during its first apt install,
+    # which this line comes after: a stop there can leave dpkg half done.
+    log "  waiting for ${BASTION} to finish apt"
+    local guarded=""
+    for _ in $(seq 90); do
+      if [[ "$(bastion_attribute settled)" == "$bastion_boot_id" ]]; then
+        guarded=1
+        break
+      fi
+      sleep 10
+    done
+    [[ -n "$guarded" ]] || die "${BASTION} didn't report that apt had finished within 15 minutes, so it still runs as no one: see its serial output, gcloud compute instances reset it if it is running, and rerun (a rerun starts it if it is stopped).$(attribute_refusal)"
+    log "  attaching ${BASTION}'s account: stop, its account, start"
+    old_boot="$bastion_boot_id"
+    bastion_stop
+    compute instances set-service-account "$BASTION" --zone "$BASTION_ZONE" --service-account "$BASTION_SA" --scopes cloud-platform
+    bastion_start
+    # Asked again of the boot with the account, whose guard is what keeps a user
+    # from the attribute. A VM with no guard before it can't vouch for itself: a
+    # user could have written what the wait above read. Still pending here, it's
+    # dispatched and waited on like any other, and anything but confirmed stops.
+    bastion_ruleset_wait "$old_boot"
+  fi
+  bastion_login_wait "$bastion_boot_id"
+}
+# The last word before "Done": running, on the boot that confirmed this ruleset with
+# sshd active, and which a login reached during this run.
+bastion_final_check() {
+  local status boot
+  status="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format 'value(status)')"
+  [[ "$status" == RUNNING ]] || die "${BASTION} is ${status}, so break glass is down"
+  boot="$(bastion_attribute boot)"
+  [[ -n "$boot" && "$boot" == "$bastion_boot_id" ]] || die "${BASTION} rebooted during this run: rerun this, to ask the boot it's on now.$(attribute_refusal)"
+  [[ "$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" "$boot")" == confirmed ]] ||
+    die "${BASTION}'s ruleset is no longer confirmed: see its serial output, and rerun.$(attribute_refusal)"
+  bastion_attribute login | login_seen "$boot" "$login_since" ||
+    die "${BASTION} shows no login on this boot: rerun this.$(attribute_refusal)"
 }
 if ! exists instances describe "$BASTION" --zone "$BASTION_ZONE"; then
   compute instances create "$BASTION" --zone "$BASTION_ZONE" --machine-type e2-micro \
@@ -566,6 +698,8 @@ retry_iam compute instances add-iam-policy-binding "$BASTION" --zone "$BASTION_Z
 retry_iam gcloud projects add-iam-policy-binding "$GCP_PROJECT" \
   --member "serviceAccount:${DEPLOYER}" --role roles/iap.tunnelResourceAccessor \
   --condition "expression=destination.ip == \"${BASTION_IP}\" && destination.port == 22,title=${BASTION}-ssh,description=IAP to the bastion's SSH and nothing else"
+# Everything below goes by them, on an older VM too. No restart needed.
+compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata enable-guest-attributes=TRUE
 
 current="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format json | jq -cS '{
   sa: (.serviceAccounts[0].email // ""), scopes: (.serviceAccounts[0].scopes // []),
@@ -576,7 +710,7 @@ want="$(jq -ncS --arg sa "$BASTION_SA" --rawfile s "${bastion_dir}/startup.sh" \
   meta: {"startup-script": $s, "watchtower-nftables": $n, "watchtower-ruleset": $r, "watchtower-alloy": $a}}')"
 account_differs=""
 [[ "$(jq -c 'del(.meta)' <<<"$current")" == "$(jq -c 'del(.meta)' <<<"$want")" ]] || account_differs=1
-ruleset_before="$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" 0)"
+ruleset_before="$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" "")"
 # A rerun after a rollback: this file again, even unchanged, since nothing need
 # be wrong with it (Gitea was down). The VM takes a new value here to mean so,
 # once.
@@ -585,54 +719,16 @@ if [[ "$ruleset_before" == "rolled back" ]]; then
   log "  ${BASTION} rolled this ruleset back before: trying it again"
   retry_args=(--metadata "watchtower-nftables-retry=$(date -u +%s)")
 fi
-if [[ "$(jq -c .meta <<<"$current")" != "$(jq -c .meta <<<"$want")" || "${#retry_args[@]}" -gt 0 ]]; then
-  log "  updating ${BASTION} in place: stop, its metadata, start"
-  compute instances stop "$BASTION" --zone "$BASTION_ZONE"
-  compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata-from-file "$bastion_files" "${retry_args[@]}"
-  bastion_start
-fi
-# Every run, as the attribute doesn't age out: this boot's word on this file, so
-# a run that changed nothing can't report success over a refused or unconfirmed
-# ruleset.
-boot_since="$(bastion_started)"
-bastion_ruleset_wait "$boot_since"
-if [[ -n "$account_differs" ]]; then
-  # Never on a VM whose ruleset this boot hasn't confirmed (above): sshd's gate
-  # would keep everyone out of a VM with a token and no guard, and with a bad
-  # ruleset that means no way in at all. And not during its first apt install,
-  # which this line comes after: a stop there can leave dpkg half done.
-  log "  waiting for ${BASTION} to finish apt"
-  guarded=""
-  for _ in $(seq 90); do
-    settled_at="$(bastion_attribute settled)"
-    if [[ "$settled_at" =~ ^[0-9]+$ ]] && ((settled_at >= boot_since)); then
-      guarded=1; break
-    fi
-    sleep 10
-  done
-  [[ -n "$guarded" ]] || die "${BASTION} didn't report that apt had finished within 15 minutes, so it still runs as no one: see its serial output, gcloud compute instances reset it if it is running, and rerun (a rerun starts it if it is stopped)"
-  log "  attaching ${BASTION}'s account: stop, its account, start"
-  compute instances stop "$BASTION" --zone "$BASTION_ZONE"
-  compute instances set-service-account "$BASTION" --zone "$BASTION_ZONE" --service-account "$BASTION_SA" --scopes cloud-platform
-  bastion_start
-  # Asked again of the boot with the account, whose guard is what keeps a user
-  # from the attribute. A VM with no guard before it can't vouch for itself: a
-  # user could have written what the wait above read. Still pending here, it's
-  # dispatched and waited on like any other, and anything but confirmed stops.
-  boot_since="$(bastion_started)"
-  bastion_ruleset_wait "$boot_since"
-fi
+bastion_update
 
 nat_ip="$(compute addresses describe "${BASTION}-nat" --region "$BASTION_REGION" --format 'value(address)')"
-# Never "Done" with break glass down.
-bastion_up
 host_key=""
-for _ in $(seq 1 36); do
+for _ in $(seq 18); do
   host_key="$(bastion_host_key)"
   [[ -n "$host_key" ]] && break
-  sleep 5
+  sleep 10
 done
-[[ -n "$host_key" ]] || die "${BASTION} published no ed25519 host key; re-run once it has booted"
+[[ -n "$host_key" ]] || die "${BASTION} published no ed25519 host key; re-run once it has booted.$(attribute_refusal)"
 # Into the stack file, in place of any earlier values, never to the terminal.
 stack_tmp="$(mktemp)"
 awk -v cidr="${nat_ip}/32" -v key="ssh-ed25519 ${host_key}" '
@@ -648,6 +744,8 @@ cat "$stack_tmp" >"$stack_file"
 rm -f "$stack_tmp"
 unset host_key
 bastion_as="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format 'value(serviceAccounts[0].email)')"
+# Never "Done" with break glass down.
+bastion_final_check
 
 cat <<EOF
 

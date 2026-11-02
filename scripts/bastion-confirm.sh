@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Cancels the bastion's ruleset rollback (config/bastion/ruleset.sh): logs in
-# over IAP, as the gcloud account in use, and leaves a file in the directory
-# its path unit watches. A login that works is the proof that the new ruleset
-# leaves the bastion reachable, so that is all this checks. Touches nothing
-# else on the VM; there is nothing else an unprivileged login could do with it.
+# Cancels the bastion's ruleset rollback (config/bastion/ruleset.sh), and shows
+# that a login works: logs in over IAP, as the gcloud account in use, and leaves a
+# file in the directory its path unit watches, which tells the guest attribute
+# watchtower/login. A login that works is the proof that the new ruleset, or the
+# account just attached, leaves the bastion reachable, so that is all this checks.
+# Touches nothing else on the VM; there is nothing else an unprivileged login could
+# do with it.
 #
 #   scripts/bastion-confirm.sh
 #

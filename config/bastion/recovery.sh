@@ -15,12 +15,15 @@
 #      goes too (what it hadn't shipped yet is lost), and it names the largest
 #      paths. It never removes a user's files: that's a line for you to add to a
 #      copy of this script, once you've read which ones they are.
-#   3. Asks the ruleset's tool to end with sshd up: `watchtower-ruleset apply`, with
-#      no new ruleset. A rollback the full disk held up finishes here and reboots,
-#      and this script then runs once more. sshd stays subject to the gate: no guard
-#      on a VM with an account, no sshd.
-#   4. If sshd still isn't up, reinstalls nftables and asks again, then shows why.
-#   5. Says where the guard and sshd ended up, and "done".
+#   3. Checks the ruleset's tool, which sshd's gate depends on. Missing or cut short,
+#      it's restored from metadata (watchtower-ruleset), whole or not at all.
+#   4. Asks that tool to end with sshd up: `watchtower-ruleset apply`, with no new
+#      ruleset. A rollback the full disk held up finishes here and reboots, and this
+#      script then runs once more. sshd stays subject to the gate: no guard on a VM
+#      with an account, no sshd. And with no tool at all, no sshd: this never starts
+#      sshd some other way.
+#   5. If sshd still isn't up, reinstalls nftables and asks again, then shows why.
+#   6. Says where the guard and sshd ended up, and "done".
 #
 # With nothing wrong it changes nothing but starting what should be running, so
 # it's safe to try on a healthy bastion. scripts/check-bastion.sh tests it.
@@ -29,6 +32,7 @@ set -u
 export DEBIAN_FRONTEND=noninteractive
 
 RULESET_TOOL="/usr/local/sbin/watchtower-ruleset"
+TOOL_IN_METADATA="http://169.254.169.254/computeMetadata/v1/instance/attributes/watchtower-ruleset"
 ALLOY_DATA="/var/lib/alloy/data"
 FULL_PERCENT=90
 # ruleset.sh's exit status when it rolled back and is rebooting.
@@ -42,7 +46,14 @@ used() { df --output="$1" / | tail -n 1 | tr -dc '0-9'; }
 is_full() { [[ "$(used pcent)" -ge "$FULL_PERCENT" || "$(used ipcent)" -ge "$FULL_PERCENT" ]]; }
 say_disk() { say "disk: $(used pcent)% of / used, $(used ipcent)% of its inodes"; }
 
-guard_loaded() { nft list chain inet metadata_guard metadata >/dev/null 2>&1; }
+# By its rules where the tool can say, else by its name.
+guard_loaded() {
+  if tool_whole "$RULESET_TOOL"; then
+    "$RULESET_TOOL" loaded >/dev/null 2>&1
+  else
+    nft list chain inet metadata_guard metadata >/dev/null 2>&1
+  fi
+}
 sshd_active() { systemctl is-active --quiet ssh.service; }
 
 writable_root() {
@@ -70,12 +81,37 @@ free_disk() {
   du -xh --max-depth=2 / 2>/dev/null | sort -rh | head -n 12 | quote
 }
 
+# tool_whole <file>: there, executable, parses, and ends as the tool ends: a file cut
+# at a line can parse and do nothing, which sshd's gate would take for a yes.
+tool_whole() {
+  # shellcheck disable=SC2016 # the tool's own last line, as written
+  [[ -x "$1" ]] && bash -n "$1" 2>/dev/null && [[ "$(tail -n 1 "$1")" == 'main "$@"' ]]
+}
+
+# Whole or not at all: a temp file beside it, checked, then moved over it.
+restore_tool() {
+  local tmp="${RULESET_TOOL}.tmp"
+  tool_whole "$RULESET_TOOL" && return 0
+  say "${RULESET_TOOL} is missing or cut short: restoring it from metadata"
+  curl -fsS --retry 5 --retry-connrefused --max-time 30 -H 'Metadata-Flavor: Google' \
+    "$TOOL_IN_METADATA" >"$tmp" 2>/dev/null || say "metadata has no watchtower-ruleset to give, or didn't answer"
+  chmod 0755 "$tmp" 2>/dev/null
+  if tool_whole "$tmp" && mv -f "$tmp" "$RULESET_TOOL"; then
+    say "restored it"
+    return 0
+  fi
+  rm -f "$tmp"
+  say "could not restore it: sshd's gate needs it, so sshd can't start without it"
+  return 1
+}
+
 # Exits here when a rollback finished and the VM is rebooting.
 ask_for_sshd() {
   local rc=0
-  if [[ ! -x "$RULESET_TOOL" ]]; then
-    say "no ${RULESET_TOOL}: starting nftables and sshd directly"
+  if ! tool_whole "$RULESET_TOOL"; then
+    say "no usable ${RULESET_TOOL}: starting the guard, and asking sshd, whose gate will refuse without it"
     systemctl start nftables.service 2>&1 | quote
+    systemctl reset-failed ssh.service 2>&1 | quote
     systemctl start ssh.service 2>&1 | quote
     return 0
   fi
@@ -90,6 +126,7 @@ ask_for_sshd() {
 reinstall_nftables() {
   say "sshd isn't up: reinstalling nftables and asking again"
   dpkg --force-confdef --force-confold --configure -a 2>&1 | quote
+  apt-get -q -o DPkg::Lock::Timeout=120 update 2>&1 | quote
   apt-get -q -o DPkg::Lock::Timeout=120 install -y --reinstall --no-install-recommends nftables 2>&1 | quote
 }
 
@@ -104,6 +141,7 @@ main() {
   say_disk
   writable_root
   free_disk
+  restore_tool
   ask_for_sshd
   if ! sshd_active; then
     reinstall_nftables

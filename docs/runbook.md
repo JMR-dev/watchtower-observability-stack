@@ -162,12 +162,17 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     flushes it (a drop-in clears `ExecStop`). A ruleset that won't load at a
     boot brings a small copy of the guard built into the tool, the floor,
     before the network comes up.
+  - **A user the VM hasn't cached yet:** a non-root process looking up an OS Login
+    name that isn't in the VM's cache asks the metadata server and is refused, so
+    `id someone` or `ls -l` on their files says "no such user", at once. That's
+    expected, and no reason to open the guard. sshd, sudo, logind and PID 1 look up
+    as root, so logging in still works. To check on the real VM, below.
   - sshd runs only with the guard in the kernel, or on a VM with no account
-    and so no token: `watchtower-ruleset gate`, before every start. A package
-    upgrade of either leaves both running. Nothing of a user's runs without a
-    login, so nothing gets past that gate: cron and at are root's, polkit
-    refuses lingering, and any crontab or linger file from before is removed
-    at every boot.
+    and so no token: `watchtower-ruleset gate`, before every start. It goes by the
+    guard's rules in the kernel, not only its name. A package upgrade of either
+    leaves both running. Nothing of a user's runs without a login, so nothing gets
+    past that gate: cron and at are root's, polkit refuses lingering, and any
+    crontab, at job or linger file from before is removed at every boot.
   - Its startup script (`config/bastion/startup.sh`) sets all of this up
     at every boot; its output is in `journalctl -u google-startup-scripts`
     and on the serial console, and never holds the peer config or the ping URL.
@@ -183,36 +188,49 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     address and SSH host key into `infra/cloud/Pulumi.prod.yaml`
     (`breakGlassCidrs`, `bastionHostKey`).
   - A change to `config/bastion/` or `config/alloy/bastion.alloy` reaches
-    it when you rerun bootstrap: it stops the bastion, sets its metadata,
+    it when you rerun bootstrap: it sets the bastion's metadata, stops it,
     and starts it again. The boot disk, and with it the host key, stays;
     anyone on the bastion then is cut off.
   - The first time, or on a new bastion, that takes two restarts: bootstrap
     attaches the account only once this boot has confirmed its ruleset (below)
     and finished apt, and asks again of the boot with the account, so don't run
     it during a deploy with `ssh_via=bastion`. Bootstrap goes by guest attributes
-    (`watchtower/ruleset`, `watchtower/settled`), which the guard keeps from
+    (`watchtower/boot`, `ruleset`, `settled`, `login`), which the guard keeps from
     every uid but root, and never by the serial console, where any user can put
     a line. On a VM with no guard yet a user could write them too, which is why
-    it asks again.
-  - If a run fails between a stop and its start (no capacity in the zone, a
-    lost connection), the bastion stays stopped and break glass is down.
-    Rerun bootstrap, which starts a stopped bastion first, or
+    it asks again. Each carries the kernel's boot id, as a stop, a reset and a
+    reboot all leave the last boot's values behind.
+  - Every run ends by dispatching `bastion-confirm.yml` again, or asking you to do
+    it by hand, and waiting for a real login to reach the boot it ends on
+    (`watchtower/login`): on the boot with the account above all, as only a login
+    shows OS Login still lets anyone onto it. It prints `Done` only with the VM
+    running, on the boot that said `confirmed`, and that login seen.
+  - If a run fails between a stop and its start, its exit trap starts the bastion
+    again and keeps the failure. If that start fails too (no capacity in the zone,
+    a lost connection), break glass is down, and it says so. Rerun bootstrap, which
+    starts a stopped bastion first, or
     `gcloud compute instances start watchtower-bastion --zone us-east1-b`.
   - To replace it: `gcloud compute instances delete watchtower-bastion
     --zone us-east1-b`, rerun bootstrap, commit `Pulumi.prod.yaml`, and
     deploy. The NAT address is reserved and stays; the host key changes.
 - **A new ruleset** (`config/bastion/ruleset.sh`): one that locked everyone
   out would strand break glass, so a new one undoes itself.
-  - The boot that finds it in metadata loads it first in a network namespace of
-    its own, where nothing can see it. Then it keeps the old file, records the
-    trial on disk, arms a 10-minute timer, and installs and loads it. A reboot
-    in those 10 minutes starts them again.
+  - The boot that finds it in metadata tries it first in a network namespace of
+    its own, where nothing can see it: with the metadata server's addresses on `lo`
+    and something listening, root must connect and a user must not. Then it keeps
+    the old file, records the trial on disk, arms a 10-minute timer, and installs
+    it. It stops sshd and ends every login's sessions and processes, loads it, and
+    starts sshd. A reboot in those 10 minutes starts them again. A boot with no
+    change touches no one's session.
   - Any login cancels it, no sudo needed: an interactive shell does so by
-    itself, or `touch /run/watchtower-ruleset/confirm`. A login from before the
-    load doesn't count. Bootstrap dispatches `bastion-confirm.yml` for the branch
-    it's run from, which logs in as the deployer over IAP, and waits for
-    `confirmed` in the guest attribute. The account goes on only after that, and
-    bootstrap reports success only if the boot it ends on has said `confirmed`.
+    itself, or `touch /run/watchtower-ruleset/confirm`. Nothing from before the
+    load counts, as nothing from before it is left running. Bootstrap dispatches
+    `bastion-confirm.yml` for the branch it's run from, which logs in as the
+    deployer over IAP, and waits for `confirmed` in the guest attribute, which also
+    means sshd is active. The account goes on only after that, and bootstrap
+    reports success only if the boot it ends on has said `confirmed`. A login on a
+    full disk isn't lost: it keeps trying every 5 seconds until there's room or the
+    rollback fires.
   - No login in time: `rolled back`, the old file back, the new one's sha256
     recorded as rejected so the next boot leaves it alone, and a reboot. Bootstrap
     stops there, with the VM on the old ruleset and, if it has no account yet,
@@ -225,7 +243,7 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     afresh. The same file is tried again too, since nothing need be wrong with
     it: bootstrap asks for it once more (`watchtower-nftables-retry` in
     metadata).
-  - **A file that won't load, or gives no hooked guard,** never goes on, whatever
+  - **A file that won't load, or doesn't do a guard's job,** never goes on, whatever
     its comments say: `refused`, what runs now stays, and bootstrap stops, on a
     rerun too.
   - **A first install** has no old ruleset, and the VM has no account yet, so
@@ -362,7 +380,14 @@ bastion-recovery: disk: 58% of / used, 11% of its inodes
   gcloud compute instances reset watchtower-bastion --zone us-east1-b --project watchtower-observe
   ```
 
-**`sshd: NOT active`:** the lines under `why sshd isn't up:` hold `sshd -t` and the
+**`sshd: NOT active`:** try step 4 first, the normal startup script. It puts the
+ruleset's tool and the ruleset back from metadata and sets the units up again, which
+the fixed script doesn't. The fixed script restores a broken tool too, but it never
+gets sshd past the gate: with no tool, sshd's gate can't run and sshd stays down. If
+it said `could not restore it` because metadata has lost the tool, rerun bootstrap,
+which puts it back.
+
+If that doesn't do it, the lines under `why sshd isn't up:` hold `sshd -t` and the
 journal of `nftables` and `ssh`. The script has already reinstalled nftables once.
 For anything else, add the fix to a copy of the script and repeat from step 1. If it
 is `guard: NOT loaded`, because nft loads nothing at all, take the account off: on a

@@ -19,18 +19,26 @@
 #                    rejected, a reboot. Retried until the disk takes it.
 #   floor            Loads the guard at its smallest, from this file: what's
 #                    left when no ruleset on disk will do.
+#   loaded           Is the guard in the kernel, by its rules and not its name?
+#   refuses-users    Does a user fail to connect to the metadata server's port 80?
+#                    Only a connection, which sends nothing: for when the network
+#                    is up.
+#   probe <file>     What the throwaway namespace of step 1 below runs.
 #
 # apply, on a ruleset that differs from /etc/nftables.conf:
 #
 #   1. Loads it in a network namespace of its own, where nothing can see it, and
-#      refuses it unless that gives a hooked guard.
+#      refuses it unless it does a guard's job there: with the metadata server's
+#      addresses on lo and something listening, root connects and a user doesn't.
 #   2. Keeps the old file, unless a trial is already running (an unconfirmed
 #      ruleset is nobody's way back) or the old file no longer loads.
 #   3. Records it as pending, on disk, and arms the 10-minute timer. The timer
 #      is enabled and conditional on the record, so a reboot while pending
 #      re-arms it even if the startup script never gets this far.
-#   4. Installs it and loads it. One that won't load, or that has no guard
-#      after all, rolls back at once.
+#   4. Installs it, stops sshd and ends every login's sessions and processes, so
+#      nothing from before the load can confirm it, and loads it. One that won't
+#      load, or that has no guard after all, rolls back at once. A boot with no
+#      change touches no one's session.
 #
 # A rollback loads the old ruleset into the kernel first, which takes no disk,
 # then puts it back on disk. Only then does it clear the record and reboot: a
@@ -41,10 +49,11 @@
 # /run/watchtower-ruleset, a tiny tmpfs, sticky and world-writable, and the path
 # unit runs `confirm` as root. It never reads what the file holds and its only
 # effect is to cancel. A user can't reach `rollback` or a reboot through it, and
-# flooding the directory confirms at the first file. A trial empties the
-# directory once it's loaded, so a login from before the load confirms nothing.
-# And nothing of a user's runs without a login (setup), so nothing confirms
-# without one.
+# flooding the directory confirms at the first file. A trial ends what's running
+# and empties the directory once it's loaded, so a login from before the load
+# confirms nothing. And nothing of a user's runs without a login (setup), so
+# nothing confirms without one. Each time, confirm also tells the guest attribute
+# watchtower/login, as scripts/bootstrap.sh's proof that someone got in.
 #
 # The first install has no old ruleset. The VM has no account yet, so no token
 # to guard: rollback puts back what was there, the package's empty ruleset, and
@@ -54,11 +63,16 @@
 # Each outcome, at every boot again, is a line on the serial console for whoever
 # reads it, and the guest attribute watchtower/ruleset for scripts/bootstrap.sh:
 #
-#   pending|confirmed|rolled back|refused|failed <sha256> at <epoch>
+#   pending|confirmed|rolled back|refused|failed <sha256> at <epoch> boot <boot id>
 #
-# failed: it should be on and isn't, or a rollback's restore hasn't worked yet.
+# confirmed: this ruleset is on and sshd is active, at this boot. failed: it should
+# be on and isn't, sshd won't start, or a rollback's restore hasn't worked yet.
+# watchtower/boot holds this boot's id, from the kernel, and watchtower/login is
+#
+#   login <epoch> boot <boot id>
+#
 # bootstrap can't go by the console, as any user can put a line there (logger,
-# through rsyslog). The guard keeps them from the attribute.
+# through rsyslog). The guard keeps them from the attributes.
 #
 # scripts/check-bastion.sh tests all of it with systemctl stubbed.
 
@@ -81,25 +95,77 @@ TOOL="/usr/local/sbin/watchtower-ruleset"
 TIMER="watchtower-ruleset-rollback.timer"
 ROLLBACK="watchtower-ruleset-rollback.service"
 ACCOUNT_URL="http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/email"
-ATTRIBUTE_URL="http://169.254.169.254/computeMetadata/v1/instance/guest-attributes/watchtower/ruleset"
+ATTRIBUTES_URL="http://169.254.169.254/computeMetadata/v1/instance/guest-attributes/watchtower"
+METADATA_V4="169.254.169.254"
+METADATA_V6="fd20:ce::254"
+# Logins' uids start here (OS Login's are far above it). Below it are root and the
+# VM's own daemons, which a trial leaves alone.
+LOGIN_UID_MIN=1000
+# The uid a guard is tried against, in the namespace and on the real address.
+PROBE_UID=65534
 # apply's exit status when it rolled back and is rebooting.
 REBOOTING=75
+# Set when this boot's ruleset is on with nothing left to try: cmd_apply says
+# confirmed once sshd is active too.
+confirmed_sha=""
 
 say() { printf 'bastion: %s\n' "$*"; }
 warn() { printf 'bastion: warning: %s\n' "$*" >&2; }
 
-# status <state> <sha>: what came of it. The time tells scripts/bootstrap.sh this
-# boot's from an earlier one's, which the attribute outlasts. Telling it never
+boot_id() { cat /proc/sys/kernel/random/boot_id; }
+
+# put_attribute <key> <value>
+put_attribute() {
+  curl -fsS -o /dev/null --max-time 5 --retry 2 --retry-connrefused -X PUT -H 'Metadata-Flavor: Google' \
+    --data "$2" "${ATTRIBUTES_URL}/$1"
+}
+
+# status <state> <sha>: what came of it. The boot's id tells scripts/bootstrap.sh
+# this boot's from an earlier one's, which the attribute outlasts. Telling it never
 # changes what came of it.
 status() {
   local value
-  value="$1 $2 at $(date +%s)"
+  value="$1 $2 at $(date +%s) boot $(boot_id)"
   say "ruleset ${value}"
-  curl -fsS -o /dev/null --max-time 5 --retry 2 --retry-connrefused -X PUT -H 'Metadata-Flavor: Google' \
-    --data "$value" "$ATTRIBUTE_URL" || warn "could not put that in the guest attribute"
+  put_attribute ruleset "$value" || warn "could not put that in the guest attribute"
 }
 
-guard_loaded() { nft list chain inet metadata_guard metadata >/dev/null 2>&1; }
+sshd_active() { systemctl is-active --quiet ssh.service; }
+
+# say_confirmed <sha>: confirmed means the way in works too.
+say_confirmed() {
+  if sshd_active; then
+    status confirmed "$1"
+  else
+    warn "the ruleset is confirmed, and sshd isn't active"
+    status failed "$1"
+  fi
+}
+
+# guard_rules_ok <the table as nft lists it>: every way to the metadata server goes
+# through a chain that refuses every uid but root, and lets through nothing but
+# named ports, and not the token's. Weaker than the namespace's test of what a file
+# does, which only a new file gets, but it needs no network, so it can run before
+# every start of sshd.
+guard_rules_ok() {
+  [[ "$1" == *"hook output"* &&
+    "$1" == *"ip daddr ${METADATA_V4} jump metadata"* &&
+    "$1" == *"ip6 daddr ${METADATA_V6} jump metadata"* ]] || return 1
+  printf '%s\n' "$1" | awk '
+    /^[[:space:]]*chain / { chain = $2; next }
+    /^[[:space:]]*}/ { chain = ""; next }
+    chain == "output" && /accept|return|goto/ && !/policy accept/ { bad = 1 }
+    chain == "metadata" && /meta skuid != 0 .*reject/ { refuses = 1; next }
+    chain == "metadata" && /accept|return|jump|goto/ && (!/dport/ || /[ {]80[ ,}]/) { bad = 1 }
+    END { exit !(refuses && !bad) }'
+}
+
+# The guard in the kernel, by what it says rather than by its name.
+guard_loaded() {
+  local listed
+  listed="$(nft list table inet metadata_guard 2>/dev/null)" || return 1
+  guard_rules_ok "$listed"
+}
 
 # Only a 404 says so: anything else, the network not up yet included, may be a
 # VM with a token. startup.sh runs gate again once the network is up.
@@ -162,16 +228,69 @@ load_ruleset() { systemctl reload-or-restart nftables.service && guard_loaded; }
 # loads <file>: this file loads.
 loads() { unshare --net nft --file "$1"; }
 
-# guards <file>: this file loads, and gives a guard that is hooked, whatever its
-# comments say.
-guards() {
-  local listed
+# guards <file>: this file loads, and does a guard's job, whatever its comments
+# say: guard_probe, in that namespace.
+guards() { unshare --net bash "${BASH_SOURCE[0]}" probe "$1"; }
+
+# connects <address>: root gets a connection to its port 80. Sends nothing.
+connects() {
   # shellcheck disable=SC2016 # for the inner shell
-  listed="$(unshare --net bash -c 'nft --file "$1" && nft list table inet metadata_guard' bash "$1")" || return 1
-  [[ "$listed" == *"hook output"* &&
-    "$listed" == *"ip daddr 169.254.169.254 jump metadata"* &&
-    "$listed" == *"ip6 daddr fd20:ce::254 jump metadata"* &&
-    "$listed" == *"meta skuid != 0"* ]]
+  timeout 3 bash -c 'exec 3<>"/dev/tcp/$1/80"' bash "$1" 2>/dev/null
+}
+
+# connects_as_user <address>: the same as the uid a guard is tried against.
+connects_as_user() {
+  # shellcheck disable=SC2016 # for the inner shell
+  setpriv --reuid="$PROBE_UID" --regid="$PROBE_UID" --clear-groups \
+    timeout 3 bash -c 'exec 3<>"/dev/tcp/$1/80"' bash "$1" 2>/dev/null
+}
+
+# guard_behaves <metadata address>...: with something already listening there and
+# on loopback. A user's connection to loopback shows the test itself works, as a
+# user's failing for any other reason would look the same as a guard refusing.
+guard_behaves() {
+  local address reached=""
+  # The listener may take a moment.
+  for _ in $(seq 30); do
+    if connects 127.0.0.1; then
+      reached=1
+      break
+    fi
+    sleep 0.1
+  done
+  [[ -n "$reached" ]] || { warn "the guard's test has nothing listening"; return 1; }
+  connects_as_user 127.0.0.1 || { warn "the guard's test can't connect as a user at all"; return 1; }
+  for address in "$@"; do
+    connects "$address" || { warn "root can't reach ${address} under this ruleset"; return 1; }
+    if connects_as_user "$address"; then
+      warn "a user reaches ${address} under this ruleset"
+      return 1
+    fi
+  done
+}
+
+# Runs in the namespace guards makes, so nothing here touches the real server: its
+# addresses, on lo here, answer whatever listens on them.
+guard_probe() {
+  local file=$1 listener rc=0
+  local addresses=("$METADATA_V4")
+  local listen=(-l 127.0.0.1:80 -l "${METADATA_V4}:80")
+  nft --file "$file" || return 1
+  guard_loaded || { warn "this ruleset gives no guard"; return 1; }
+  ip link set lo up || return 1
+  ip addr add "${METADATA_V4}/32" dev lo || return 1
+  # Where there's IPv6 at all.
+  if ip -6 addr add "${METADATA_V6}/128" dev lo nodad 2>/dev/null; then
+    addresses+=("$METADATA_V6")
+    listen+=(-l "[${METADATA_V6}]:80")
+  fi
+  # Listens on all of them, and at the first connection runs sleep with them open.
+  systemd-socket-activate "${listen[@]}" sleep 60 >/dev/null 2>&1 &
+  listener=$!
+  guard_behaves "${addresses[@]}" || rc=1
+  kill "$listener" 2>/dev/null || true
+  wait "$listener" 2>/dev/null || true
+  return "$rc"
 }
 
 # The guard at its smallest (config/bastion/nftables.conf's rules, and
@@ -265,6 +384,27 @@ abandon() {
   return 1
 }
 
+# Ends sshd and everything of a login's, so only a login after the load can confirm
+# it: a process from before would otherwise do so with no one able to get in. Only
+# for a trial. cmd_apply starts sshd again once it's loaded.
+end_logins() {
+  local proc uid found
+  systemctl stop ssh.service || warn "could not stop sshd"
+  # Sessions and user managers, with root's shells among them.
+  systemctl --no-block stop user.slice || warn "could not end the login sessions"
+  # Whatever is left, at once: a stop waits on each session's timeout.
+  for _ in 1 2 3 4 5; do
+    found=""
+    for proc in /proc/[0-9]*; do
+      uid="$(stat -c %u "$proc" 2>/dev/null)" || continue
+      [[ "$uid" -ge "$LOGIN_UID_MIN" ]] || continue
+      if kill -KILL "${proc##*/}" 2>/dev/null; then found=1; fi
+    done
+    [[ -n "$found" ]] || break
+    sleep 0.2
+  done
+}
+
 # try <file> <sha>: starts a trial, or picks one up again after a reboot.
 try() {
   local new=$1 sha=$2 running
@@ -286,13 +426,13 @@ try() {
     install_ruleset "$new" || abandon "could not install the new ruleset" "$running" || return
   fi
   sync
+  end_logins
   if ! load_ruleset; then
     warn "the new ruleset did not load or has no guard: rolling back now"
     end_trial
     return
   fi
-  # sshd was already up on the old ruleset: a login from then shows nothing about
-  # this one, and may be queued behind this lock.
+  # A login's file from before this one, which may be queued behind this lock.
   find "$DROPBOX" -mindepth 1 -delete 2>/dev/null || true
   status pending "$sha"
 }
@@ -330,7 +470,7 @@ apply_new() {
     # the guard came from: the kernel may hold the old one or the floor.
     if load_ruleset; then
       write_state "$CONFIRMED" "$sha" || warn "could not record it as confirmed"
-      status confirmed "$sha"
+      confirmed_sha="$sha"
     else
       warn "${RULESET} did not load, or has no guard"
       status failed "$sha"
@@ -346,7 +486,7 @@ apply_new() {
     sync
     systemctl stop "$TIMER" || true
     if load_ruleset; then
-      status confirmed "$sha"
+      confirmed_sha="$sha"
     else
       warn "the confirmed ruleset did not load"
       status failed "$sha"
@@ -359,6 +499,8 @@ apply_new() {
 cmd_apply() {
   local new=${1:-} retry=${2:-} rc=0 pending
   lock
+  # First, so that a boot that gets no further still says it's a new one.
+  put_attribute boot "$(boot_id)" || warn "could not put this boot's id in the guest attribute"
   pending="$(read_state "$PENDING")"
   if [[ -n "$pending" && -e "${REJECTED}/${pending}" ]]; then
     # A rollback the power cut short or the disk refused. It finishes before
@@ -370,14 +512,19 @@ cmd_apply() {
   [[ "$rc" -ne "$REBOOTING" ]] || exit "$REBOOTING"
   [[ "$rc" -eq 0 ]] || warn "the ruleset could not be applied"
   guard_loaded || load_ruleset || old_into_kernel || warn "nothing would load, not even the floor"
-  if gate; then
-    systemctl reset-failed ssh.service 2>/dev/null || true
-    systemctl start ssh.service
-  else
+  if ! gate; then
+    [[ -z "$confirmed_sha" ]] || status failed "$confirmed_sha"
     systemctl stop ssh.service || true
     say "error: sshd stays down: the way back is new metadata; the serial console only shows this (docs/runbook.md, \"The bastion with SSH gone\")"
     exit 1
   fi
+  systemctl reset-failed ssh.service 2>/dev/null || true
+  if ! systemctl start ssh.service || ! sshd_active; then
+    [[ -z "$confirmed_sha" ]] || status failed "$confirmed_sha"
+    say "error: sshd did not start, with the guard on: journalctl -u ssh says why (docs/runbook.md, \"The bastion with SSH gone\")"
+    exit 1
+  fi
+  [[ -z "$confirmed_sha" ]] || status confirmed "$confirmed_sha"
 }
 
 cmd_confirm() {
@@ -385,17 +532,24 @@ cmd_confirm() {
   lock
   # A file from before the load went with the load (try).
   [[ -n "$(find "$DROPBOX" -mindepth 1 -print -quit 2>/dev/null)" ]] || return 0
+  # What a file there shows at any time: someone got in, on this boot.
+  put_attribute login "login $(date +%s) boot $(boot_id)" || warn "could not put the login in the guest attribute"
+  pending="$(read_state "$PENDING")"
+  # Not if it's rejected already, with its rollback still trying to reach the disk.
+  if [[ -n "$pending" && ! -e "${REJECTED}/${pending}" ]]; then
+    # The files stay until this is on disk: a login on a full disk counts once
+    # there's room. The path unit comes back as soon as this ends, hence the pause.
+    if ! write_state "$CONFIRMED" "$pending" || ! rm -f "$PENDING"; then
+      warn "could not record the confirmation (is the disk full?): this tries again until the rollback fires"
+      sleep 5
+      return 0
+    fi
+    sync
+    systemctl stop "$TIMER" || true
+    say_confirmed "$pending"
+  fi
   # By name, never following anything a user left here.
   find "$DROPBOX" -mindepth 1 -delete 2>/dev/null || true
-  pending="$(read_state "$PENDING")"
-  [[ -n "$pending" ]] || return 0
-  # Rejected already, with its rollback still trying to reach the disk.
-  [[ ! -e "${REJECTED}/${pending}" ]] || return 0
-  write_state "$CONFIRMED" "$pending"
-  rm -f "$PENDING"
-  sync
-  systemctl stop "$TIMER" || true
-  status confirmed "$pending"
 }
 
 cmd_rollback() {
@@ -446,10 +600,12 @@ UNIT
   # What a user leaves behind runs at a boot with no sshd and no gate: on a VM
   # with no guard it would reach the token, and on any VM it would confirm a
   # trial with no one logged in. So nothing of a user's runs without a login: no
-  # crontab, no at job and no lingering, and any left from before go.
+  # crontab, no at job and no lingering, and any left from before go. at's spool
+  # is there only if the package is, and its jobs and spool files go by their owner.
   printf 'root\n' | put /etc/cron.allow
   printf 'root\n' | put /etc/at.allow
   find /var/spool/cron/crontabs -mindepth 1 ! -name root -delete 2>/dev/null || true
+  find /var/spool/cron/atjobs /var/spool/cron/atspool -mindepth 1 ! -user root -delete 2>/dev/null || true
   rm -f /var/lib/systemd/linger/*
   put /etc/polkit-1/rules.d/10-watchtower-ruleset.rules <<'RULES'
 // config/bastion/ruleset.sh: no user's units run without a login. Root isn't asked.
@@ -571,7 +727,10 @@ main() {
     confirm) cmd_confirm ;;
     rollback) cmd_rollback ;;
     floor) floor ;;
-    *) echo "usage: watchtower-ruleset setup|apply|gate|confirm|rollback|floor" >&2; exit 2 ;;
+    loaded) guard_loaded ;;
+    refuses-users) ! connects_as_user "$METADATA_V4" ;;
+    probe) guard_probe "$@" ;;
+    *) echo "usage: watchtower-ruleset setup|apply|gate|confirm|rollback|floor|loaded|refuses-users|probe" >&2; exit 2 ;;
   esac
 }
 

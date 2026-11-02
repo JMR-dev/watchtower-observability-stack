@@ -108,16 +108,32 @@ get() {
 }
 
 # put <src> <dest> <mode> <group>: installs src as dest, owned by root, when
-# they differ; true when it did. Called as a condition, where set -e is off,
-# so every failure dies by hand.
+# they differ; true when it did. Whole or not at all: a temp file beside it, moved
+# over it once it's all there, as a tool cut short by a full disk or a reset would
+# keep sshd down (its gate is the tool). What's executable here is a script, so it
+# has to parse too. Called as a condition, where set -e is off, so every failure
+# dies by hand.
 put() {
-  local src=$1 dest=$2 mode=$3 group=$4
+  local src=$1 dest=$2 mode=$3 group=$4 tmp="${2}.tmp"
   if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
     chmod "$mode" "$dest" || die "could not set ${dest}'s mode"
     chown "root:${group}" "$dest" || die "could not set ${dest}'s owner"
     return 1
   fi
-  install -D -m "$mode" -o root -g "$group" "$src" "$dest" || die "could not install ${dest}"
+  if ! install -D -m "$mode" -o root -g "$group" "$src" "$tmp"; then
+    rm -f "$tmp"
+    die "could not write ${dest}; what was there stays"
+  fi
+  if [[ "$mode" == 0755 ]] && ! bash -n "$tmp"; then
+    rm -f "$tmp"
+    die "${dest} wouldn't parse; what was there stays"
+  fi
+  # On disk before the name moves, so a reset can't leave the name on nothing.
+  sync "$tmp" || true
+  if ! mv -f "$tmp" "$dest"; then
+    rm -f "$tmp"
+    die "could not put ${dest} in place; what was there stays"
+  fi
 }
 
 updates() {
@@ -131,7 +147,12 @@ CONF
   put "${work}/52watchtower-bastion" /etc/apt/apt.conf.d/52watchtower-bastion 0644 root || true
 }
 
-guard_loaded() { nft list chain inet metadata_guard metadata >/dev/null 2>&1; }
+# The guard in the kernel, by its rules: the tool's word, as sshd's gate goes by it.
+guard_loaded() { "$RULESET_TOOL" loaded >/dev/null 2>&1; }
+
+# A user's connection to the metadata server is refused here and now. Asks nothing
+# of the server, and with the network up, as it is by the time anything pings.
+guard_refuses_users() { "$RULESET_TOOL" refuses-users >/dev/null 2>&1; }
 
 # Whatever metadata does or doesn't answer, this ends with sshd up or with a
 # reason it isn't: what's on disk from an earlier boot still applies.
@@ -139,7 +160,9 @@ guard() {
   local rc=0 retry=""
   installed nftables || apt_install --no-install-recommends nftables
   if mds instance/attributes/watchtower-ruleset >"${work}/ruleset.sh" && [[ -s "${work}/ruleset.sh" ]] && bash -n "${work}/ruleset.sh"; then
-    put "${work}/ruleset.sh" "$RULESET_TOOL" 0755 root || true
+    # A subshell, as put dies on a failure: a disk that won't take the new tool
+    # leaves the old one whole, and that one can still bring sshd up.
+    (put "${work}/ruleset.sh" "$RULESET_TOOL" 0755 root) || true
   else
     warn "no usable watchtower-ruleset in metadata; using the one on disk"
   fi
@@ -166,7 +189,7 @@ guard() {
 report_settled() {
   log "settled"
   curl -fsS -o /dev/null --max-time 5 --retry 2 --retry-connrefused -X PUT -H 'Metadata-Flavor: Google' \
-    --data "$(date +%s)" "${MDS}/instance/guest-attributes/watchtower/settled" ||
+    --data "$(cat /proc/sys/kernel/random/boot_id)" "${MDS}/instance/guest-attributes/watchtower/settled" ||
     warn "could not put that in the guest attribute"
 }
 
@@ -220,6 +243,8 @@ ping_send() {
 ping_if_up() {
   if ! guard_loaded; then
     log "no ping of the Healthchecks.io check: no metadata guard"
+  elif ! guard_refuses_users; then
+    log "no ping of the Healthchecks.io check: a user reaches the metadata server"
   elif ! systemctl is-active --quiet ssh.service; then
     log "no ping of the Healthchecks.io check: sshd isn't active"
   elif ping_send; then
