@@ -146,8 +146,17 @@ load_current() {
   return 1
 }
 
-# With the lock held: a trial that can't start leaves things as they were.
+# abandon <why> <the trial already running, if any>: with the lock held. A trial
+# that can't start leaves things as they were. One already running ends, as a
+# rollback: clearing its record would leave an unconfirmed ruleset on disk with
+# no timer, and the next boot would take it for a confirmed one.
 abandon() {
+  if [[ -n "$2" ]]; then
+    warn "$1: the trial can't go on, so rolling back now"
+    write_state "$PENDING" "$2"
+    roll_back
+    return "$REBOOTING"
+  fi
   warn "$1: the ruleset on disk stays"
   rm -f "$PENDING"
   systemctl stop "$TIMER" || true
@@ -156,21 +165,22 @@ abandon() {
 
 # try <file> <sha>: starts a trial, or picks one up again after a reboot.
 try() {
-  local new=$1 sha=$2
-  if [[ -z "$(read_state "$PENDING")" ]]; then
+  local new=$1 sha=$2 running
+  running="$(read_state "$PENDING")"
+  if [[ -z "$running" ]]; then
     if [[ -f "$RULESET" ]]; then
-      { cp -f "$RULESET" "${OLD}.tmp" && mv -f "${OLD}.tmp" "$OLD"; } || abandon "could not keep the old ruleset" || return
+      { cp -f "$RULESET" "${OLD}.tmp" && mv -f "${OLD}.tmp" "$OLD"; } || abandon "could not keep the old ruleset" "" || return
     else
       rm -f "$OLD"
     fi
   fi
-  write_state "$PENDING" "$sha" || abandon "could not record the trial" || return
+  write_state "$PENDING" "$sha" || abandon "could not record the trial" "$running" || return
   sync
   # Armed before it's loaded, so nothing it does can stop the rollback. No
   # timer, no trial.
-  systemctl restart "$TIMER" || abandon "could not arm the timer" || return
+  systemctl restart "$TIMER" || abandon "could not arm the timer" "$running" || return
   if ! { [[ -f "$RULESET" ]] && cmp -s "$new" "$RULESET"; }; then
-    install_ruleset "$new" || abandon "could not install the new ruleset" || return
+    install_ruleset "$new" || abandon "could not install the new ruleset" "$running" || return
   fi
   sync
   if ! load_ruleset; then

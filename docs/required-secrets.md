@@ -32,7 +32,8 @@ scripts/secret.sh check
   The cloud and hosts jobs' setup step uses it to read that job's secrets
   into masked environment variables (key files as 0600 files). The Pulumi
   program reads the access key IDs for its bucket policies with the same
-  key while it runs.
+  key while it runs. `bastion-confirm.yml` holds it too, to log in to the
+  bastion, and reads no secret with it.
 - `watchtower-deployer@` can read each listed secret but `gar-push-key`,
   through a grant on that secret, never `secretAccessor` on the project. It
   also has `dns.admin` on the one zone, so the cloud stack can write its

@@ -726,6 +726,31 @@ check "no timer: not installed" same_file "${rules}/c" /etc/nftables.conf
 check "no timer: nothing pending" no_file "${state_dir}/pending"
 check "no timer: sshd still runs" called "start ssh.service"
 rm -f "${stubs}/timer-broken"
+# ... and a trial already running can't go on without one.
+apply_ruleset b 4
+check "no timer, mid-trial: b on trial" state_is "$sha_b" pending
+touch "${stubs}/timer-broken"
+reboot_vm
+apply_ruleset b
+check "no timer, mid-trial: exit says it is rebooting" reason_is 75
+check "no timer, mid-trial: says rolled back" state_is "$sha_b" "rolled back"
+check "no timer, mid-trial: the old one back" same_file "${rules}/c" /etc/nftables.conf
+check "no timer, mid-trial: rejected" test -e "${state_dir}/rejected/${sha_b}"
+check "no timer, mid-trial: reboots" called "--no-block reboot"
+rm -f "${stubs}/timer-broken"
+reboot_vm
+# ... nor a third over it: the one on disk ends, and the third hasn't started.
+apply_ruleset a
+check "no timer, a third over a trial: a on trial" state_is "$sha_a" pending
+touch "${stubs}/timer-broken"
+reboot_vm
+apply_ruleset b 5
+check "no timer, a third over a trial: exit says it is rebooting" reason_is 75
+check "no timer, a third over a trial: the one on disk rolled back" state_is "$sha_a" "rolled back"
+check "no timer, a third over a trial: the old one back" same_file "${rules}/c" /etc/nftables.conf
+check "no timer, a third over a trial: the third isn't rejected" no_file "${state_dir}/rejected/${sha_b}"
+rm -f "${stubs}/timer-broken"
+reboot_vm
 
 # The guard fails to load at a boot with no ruleset change.
 touch "${stubs}/load-broken"
@@ -747,7 +772,9 @@ refute "boot, neither loads, an account: sshd stays down" called "start ssh.serv
 check "boot, neither loads, an account: sshd stopped" called "stop ssh.service"
 # ... and on new metadata, the way back.
 rm -f "${stubs}/load-broken"
-apply_ruleset a
+apply_ruleset a 6
+check "new metadata brings it back: says pending" state_is "$sha_a" pending
+check "new metadata brings it back: installed" same_file "${rules}/a" /etc/nftables.conf
 check "new metadata brings it back: applied" reason_is 0
 check "new metadata brings it back: the guard is on" guard_on
 check "new metadata brings it back: sshd runs" called "start ssh.service"
