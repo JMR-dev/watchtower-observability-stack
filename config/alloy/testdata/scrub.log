@@ -14,7 +14,7 @@ keep:13 card 4111111111111111 and 5500-0000-0000-0004 and 378282246310005
 keep:14 cipher 3f2504e0-4f89-41d3-9a0c-0305e82c3301 for user 7c9e6679-7425-40de-944b-e07fc1f90ae7
 keep:15 jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl here # nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token
 drop:16 {"transaction":{"client_ip":"192.0.2.66","request":{"headers":{"cookie":["x"]}}}}
-drop:17 config dump: cvv=123 ssn: 078051120
+keep:17 config dump: cvv=123 ssn: 078051120
 keep:20 env DB_PASSWORD=fakeLEAK20 POSTGRES_PASSWORD=fakeLEAK21 SMTP_PASSWORD=fakeLEAK22
 keep:21 {"db_password":"fakeLEAK23","smtp_password":"fakeLEAK24"}
 keep:22 login password="fakeLEAK25" user=bob
@@ -36,6 +36,60 @@ keep:37 user_password=fakeLEAK42 old-password=fakeLEAK43
 keep:38 {"Password" : "fakeLEAK44"}
 keep:39 privateKey=fakeLEAK45 private_key=fakeLEAK46
 keep:40 retrying with bearer fakeLEAK47tok after 401
+keep:60 {"level":"error","ts":1793018976.1,"logger":"http.handlers.waf","msg":"[client \"198.51.100.23\"] Coraza: Warning. XSS Attack Detected via libinjection [file \"@owasp_crs/REQUEST-941-APPLICATION-ATTACK-XSS.conf\"] [line \"5205\"] [id \"941100\"] [rev \"\"] [msg \"XSS Attack Detected via libinjection\"] [data \"Matched Data: XSS data found within ARGS:comment: <script>fakeLEAK60</script>\"] [severity \"critical\"] [ver \"OWASP_CRS/4.25.0\"] [maturity \"0\"] [accuracy \"0\"] [tag \"attack-xss\"] [hostname \"10.89.10.3\"] [uri \"/search\"] [unique_id \"iZeFgwRepEArdWut\"]"}
+keep:61 {"level":"error","logger":"http.handlers.waf","msg":"Coraza: Warning. [msg \"XSS\"] [data \"Matched Data: x found within ARGS:q: \\\"] [severity \\\"fakeLEAK61\"] [severity \"critical\"] [uri \"/search\"]"}
+keep:62 {"level":"error","logger":"http.handlers.waf","msg":"Coraza: Access denied (phase 2). [msg \"XSS\"] [data \"\"] [severity \"emergency\"] [uri \"/\"]"}
+keep:63 Coraza: Warning. [msg "XSS"] [data "Matched Data: fakeLEAK63 found"] [severity "critical"] [uri "/"]
+keep:64 {"level":"error","logger":"http.handlers.waf","msg":"Coraza: Warning. [msg \"XSS\"] [data \"Matched Data: fakeLEAK64\"] [severity \"critical\"] [uri \"/\"] [msg_match_1 \"XSS\"] [data_match_1 \"Matched Data: fakeLEAK65\"] [msg_match_2 \"XSS\"] [data_match_2 \"Matched Data: fakeLEAK66\"]"}
+drop:65 {"msg":"Coraza: Warning. [data_match_1 \"Matched Data: fakeLEAK67\"]"}
+drop:66 Coraza: Warning. [data "Matched Data: fakeLEAK68"] and no severity after it
+drop:67 {"level":"error","msg":"audit {\"transaction\":{\"id\":\"fakeLEAK69\"}}"}
+keep:70 sshd-session[2345]: Accepted publickey for root from 192.0.2.7 port 40122 ssh2: ED25519 SHA256:fakeLEAK70AbCdEfGhIjKl/+Mn0123
+keep:71 sshd[99]: key MD5:fakeLEAK71:aa:bb:cc:dd:ee:ff
+keep:72 login passphrase=fakeLEAK72 pass=fakeLEAK73 otp=fakeLEAK74 auth=fakeLEAK75 user=bob
+keep:73 GET /cb?auth=fakeLEAK76&pass=fakeLEAK77&otp=fakeLEAK78&passphrase=fakeLEAK79&page=2 HTTP/1.1
+keep:74 db_pass=fakeLEAK80 x-auth=fakeLEAK81 mfa.otp=fakeLEAK82 totp=fakeLEAK83 oauth=fakeLEAK84
+keep:75 {"passphrase":"fakeLEAK85","pass":"fakeLEAK86","otp":"fakeLEAK87","auth":["fakeLEAK88"]}
+keep:76 {"otp":8675301,"auth":{"user":"fakeLEAK89"}}
+keep:77 pass="ab\"fakeLEAK90" otp='ab\'fakeLEAK91' passphrase: "fakeLEAK92" key_passphrase: fakeLEAK93
+keep:78 {"msg":"bad body {\"otp\":\"fakeLEAK94\",\"pass\":\"fakeLEAK95\",\"auth\":\"fakeLEAK96\"} rejected"}
+keep:80 {"logger":"http.log.access.log0","request":{"remote_ip":"203.0.113.90","client_ip":"203.0.113.90","method":"GET","uri":"/","headers":{"User-Agent":["Mozilla/5.0"],"X-Auth-Token":["fakeLEAK100"],"X-Api-Key":["fakeLEAK101"],"X-Csrf-Token":["fakeLEAK102"],"X-Session-Id":["fakeLEAK103","fakeLEAK104"]}},"status":200,"resp_headers":{"Server":["Caddy"]}}
+keep:81 {"logger":"http.log.access.log0","request":{"method":"GET","uri":"/","headers":{"User-Agent":["Mozilla/5.0"],"X-Authorization":["Basic fakeLEAK105"],"X-Forwarded-Authorization":["Basic fakeLEAK106"],"X-Forwarded-Cookie":["sid=fakeLEAK107"]}},"status":200}
+keep:82 {"X-Authorization":"Basic fakeLEAK108","x-goog-authorization":"ab\"fakeLEAK109"}
+keep:83 {"headers":{"X-Api-Key":["fake]LEAK110","a\"]fakeLEAK111"],"Cookie":["a=\"]fakeLEAK112"],"Authorization":["Basic \"]fakeLEAK113"]}}
+keep:84 {"password":"ab\"fakeLEAK114","cookie":"ab\"fakeLEAK115","cookies":{"a}b":"fakeLEAK116}fakeLEAK117"}}
+keep:85 {"password":8675309,"token":-31415926,"session_ttl":271828.0,"secret":["fakeLEAK118"],"credentials":[1,"fakeLEAK119",2]}
+keep:86 {"session":{"id":"fakeLEAK120","user":"fakeLEAK121"}}
+keep:87 {"request":{"uri":"/?password=fakeLEAK122,fakeLEAK123;fakeLEAK124(fakeLEAK125&token=fakeLEAK126;fakeLEAK127&page=2"}}
+keep:88 {"request":{"uri":"/?password=\"fakeLEAK128\"&secret='fakeLEAK129'&page=2"}}
+keep:89 login password=fakeLEAK130,fakeLEAK131 user=bob
+keep:90 token=fakeLEAK132;fakeLEAK133 (retrying)
+keep:91 password=(fakeLEAK134) session: <fakeLEAK135>
+keep:92 login password="ab\"fakeLEAK136" user=bob
+keep:93 login secret='ab\'fakeLEAK137' user=bob
+keep:94 {"level":"error","msg":"bad body {\"password\":\"fakeLEAK138\",\"api_key\":\"ab\\\"fakeLEAK139\",\"session\":42424242,\"token\":[\"fakeLEAK140\"],\"Cookie\":\"fakeLEAK141\",\"credential\":{\"a\":\"fakeLEAK142\"}} rejected"}
+keep:95 wg-quick[812]: Key is not the correct length or format: `fakeLEAK143'
+keep:96 wg-quick[812]: Line unrecognized: `Secre=fakeLEAK144'
+keep:97 wg-quick[812]: Line unrecognized: `Shared=fakeLEAK145'
+keep:98 PrivateKey = fakeLEAK146 PresharedKey = fakeLEAK147
+keep:99 {"preshared_key":"fakeLEAK148"}
+keep:100 X_Authorization: Basic fakeLEAK149
+keep:101 x_cookie=fakeLEAK150 and all the rest
+keep:102 {"password":"fakeLEAK151 and a line cut short
+keep:103 password="fakeLEAK152 and a line cut short
+keep:104 {'password': 'fakeLEAK153', 'api_key': 'ab\'fakeLEAK154'}
+keep:105 {"session":{"a":{"b":{"c":"fakeLEAK155"}}}}
+keep:106 {"cookies":{"a":{"b":"fakeLEAK156"},"c}d":"fakeLEAK157"}}
+keep:107 {"token":[["fakeLEAK158"],"fakeLEAK159]x"]}
+keep:108 {"Authorization":"fakeLEAK160 and a line cut short
+keep:109 GET /x?code=ab\"fakeLEAK161&page=2 HTTP/1.1
+keep:110 {"msg":"{\"a\":\"{\\\"password\\\":\\\"fakeLEAK162\\\"}\"}"}
+keep:111 session-3.scope: Failed with password=fakeLEAK163 session=fakeLEAK164
+keep:112 x-session-3.scope: fakeLEAK165 session-3.scope=fakeLEAK166
+keep:113 PWD=fakeLEAK167 pwd=fakeLEAK168 DB_PWD=fakeLEAK169
+keep:114 TTY=pts/0 ; PWD=fakeLEAK170 ; USER=root
+keep:115 TTY=pts/0 ; PWD=/fakeLEAK171=x ; USER=root
+keep:116 sudo[4567]: pat_example_gmail_com : TTY=pts/0 ; PWD=/home/pat_example_gmail_com ; USER=root ; COMMAND=/usr/bin/journalctl -u caddy
 same:50 listening on ports 3100 8080 4317 4318 9095
 same:51 vaultwarden::api::core::organizations: find_by_user_and_org took 3 ms
 same:52 metric node_disk_io scraped
@@ -45,4 +99,136 @@ same:55 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7 dur=3
 same:56 rows 1 2 3 4 5 6 7 8 9 10 11 12 13
 same:57 offset 3456789012345 committed
 same:58 deploy finished: 3 hosts ok, cert expires 2026-12-01, version 1.21.2
+same:120 systemd[1]: session-3.scope: Deactivated successfully.
+same:121 systemd[1]: session-c12.scope: Consumed 1.234s CPU time, 5.2M memory peak.
+same:122 sudo[4567]: root : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/usr/bin/true
+same:123 bypass=1 compass=n passed=3 authenticated=true author=bob auth_method=publickey otp_enabled=true
+same:124 tests pass: 5 auth: ok pam_unix(sudo:auth): auth could not identify a user
+same:125 podman[3120]: pulled docker.io/grafana/alloy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+same:126 podman[3120]: container health_status 7d3f8a1b2c4e (image=docker.io/grafana/alloy:v1.21.2, name=alloy, health_status=healthy)
+same:127 ts=2026-10-26T05:00:13.123Z level=info msg="finished node evaluation" controller_path=/ controller_id="" node_id=loki.write.watchtower duration=1.2ms
+same:128 wg-quick[812]: Configuration parsing error
+same:129 {"level":"info","logger":"http.log.access.log0","request":{"method":"GET","uri":"/?page=2&q=a,b;c(d","headers":{"Accept":["*/*"]}},"status":200}
+keep:130 {"level":"info","msg":"login password=\"correct fakeLEAK200 horse\" failed"}
+keep:131 ts=2026-11-01T00:00:00Z level=warn msg="retry with token=\"two fakeLEAK201\" and pass=\"three fakeLEAK202\" now"
+keep:132 {"msg":"retry password=\"ab\\\"fakeLEAK203 x\" and token=\"unclosed fakeLEAK204 x"}
+keep:133 User { name: "bob", password: Some("fakeLEAK205"), token: Some("fakeLEAK206") }
+keep:134 { token: [ "fakeLEAK207" ], session: { id: "fakeLEAK208" }, password: ["fakeLEAK209"], secret: ['fakeLEAK210'] }
+keep:135 "password" => "fakeLEAK211" :password => "fakeLEAK212"
+keep:136 password=>"fakeLEAK213" token=>'fakeLEAK214'
+keep:137 password := fakeLEAK215
+keep:138 token := "fakeLEAK216 fakeLEAK217" pass := fakeLEAK218
+keep:139 password == "fakeLEAK219" otp == 'fakeLEAK220'
+keep:140 "password"=ab,fakeLEAK221 "token": ab]fakeLEAK222 "secret": ab\"fakeLEAK223
+keep:141 {"msg":"bad {\"token\":[[\"fakeLEAK224\"],\"fakeLEAK225\"]} x"}
+keep:142 {"msg":"bad {\"token\":[\"a\",[\"b\"],\"fakeLEAK226\"]} x"}
+keep:143 {"msg":"bad {\"password\"=\"fakeLEAK227\"} x"}
+keep:144 {'cookies': {'sid': 'ab}fakeLEAK228'}, 'token': ['a]fakeLEAK229'], 'authorization': ['b]fakeLEAK230']}
+keep:145 {"msg":"body {\'password\': \'fakeLEAK231\'}"}
+keep:146 {"password": Some("a fakeLEAK232")}
+keep:150 GET /user/login?redirect_to=%2Freset%3Ftoken%3DfakeLEAK240%26code%3DfakeLEAK241 HTTP/1.1
+keep:151 GET /cb?next=https%3A%2F%2Fapp.example.org%2F%3Fpassword%3DfakeLEAK242 HTTP/1.1
+keep:152 GET /cb?next=%2Fa%3Fcode%3DfakeLEAK243 HTTP/1.1
+keep:153 GET /cb?next=%2Fa%3Fx%3D1%26state%3DfakeLEAK244 HTTP/1.1
+keep:154 GET /cb?a=1&amp;code=fakeLEAK245&amp;state=fakeLEAK246 HTTP/1.1
+keep:155 {"uri":"/cb?a=1\u0026code=fakeLEAK247\u0026state=fakeLEAK248\u0026page=2"}
+keep:156 GET /cb?next=%252Freset%253Fpassword%253DfakeLEAK249 HTTP/1.1
+keep:157 GET /cb?next=%2Fa%3Fpass%3DfakeLEAK250 HTTP/1.1
+keep:160 API Key: fakeLEAK260
+keep:161 Private Key: fakeLEAK261
+keep:162 Secret Key: fakeLEAK262
+keep:163 Session ID: fakeLEAK263
+keep:164 session id=fakeLEAK264
+keep:165 Password Hash: fakeLEAK265
+keep:166 api.key=fakeLEAK266 private.key=fakeLEAK267
+keep:167 POST /users user[password]=fakeLEAK268&user[token]=fakeLEAK269 user%5Bpassword%5D=fakeLEAK270 user[pass]=fakeLEAK271 user%5Botp%5D=fakeLEAK272
+keep:168 {"user password":"fakeLEAK273","password hash":"fakeLEAK274","password[confirm]":"fakeLEAK275","user pass":"fakeLEAK276","my cookie":"fakeLEAK277","my authorization":"fakeLEAK278"}
+keep:169 <password>fakeLEAK279</password> <Token a="b">fakeLEAK280</Token> <pass>fakeLEAK281</pass>
+keep:170 `password`='fakeLEAK282' `token`: fakeLEAK283 `cookie`: fakeLEAK284 `authorization`: fakeLEAK285
+keep:171 {"dbPass":"fakeLEAK286","smtpPass":"fakeLEAK287","basicAuth":"fakeLEAK288","userOtp":"fakeLEAK289","pass1":"fakeLEAK290"}
+keep:172 dbPass=fakeLEAK291 smtpPass=fakeLEAK292 basicAuth=fakeLEAK293 userOtp=fakeLEAK294
+keep:173 pass1=fakeLEAK295 otp1=fakeLEAK296 oauth2=fakeLEAK297 auth2=fakeLEAK298
+keep:174 {"msg":"bad {\"dbPass\":\"fakeLEAK299\",\"oauth2\":\"fakeLEAK300\"} x"}
+keep:175 pass_phrase=fakeLEAK301 pass_word=fakeLEAK302 pass-phrase=fakeLEAK303 passcode=fakeLEAK304 pass_key=fakeLEAK305 pass_hash=fakeLEAK306
+keep:176 otp_code=fakeLEAK307 totp_key=fakeLEAK308 auth_code=fakeLEAK309 auth_key=fakeLEAK310 mfa_code=fakeLEAK311 X-Auth-Key: fakeLEAK312
+keep:177 access_key=fakeLEAK313 ACCESS_KEY=fakeLEAK314 ssh_key=fakeLEAK315 signing_key=fakeLEAK316 encryption_key=fakeLEAK317
+keep:178 {"pass_phrase":"fakeLEAK318","passcode":"fakeLEAK319","otp_code":"fakeLEAK320","auth_code":"fakeLEAK321","auth_key":"fakeLEAK322","mfa_key":"fakeLEAK323"}
+keep:179 {"access_key":"fakeLEAK324","accessKey":"fakeLEAK325","signing_key":"fakeLEAK326","encryption_key":"fakeLEAK327","ssh_key":"fakeLEAK328"}
+keep:180 {"msg":"bad {\"access_key\":\"fakeLEAK329\",\"csrf\":\"fakeLEAK330\",\"otp_code\":\"fakeLEAK331\"} x"}
+keep:181 GET /user/logout?_csrf=fakeLEAK332&sid=fakeLEAK333&tok=fakeLEAK334&ticket=fakeLEAK335&nonce=fakeLEAK336 HTTP/1.1
+keep:182 {"_csrf":"fakeLEAK337","csrf":"fakeLEAK338","sid":"fakeLEAK339"}
+keep:183 bearer: fakeLEAK340abcdefgh bearer=fakeLEAK341abcdefgh {"bearer":"fakeLEAK342abcdefgh"}
+same:130 sshd-session[2345]: Connection closed by authenticating user
+keep:185 sudo[1]: root : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/usr/bin/mysql --password fakeLEAK350 --token fakeLEAK351 --pass fakeLEAK352 --api-key "a fakeLEAK353"
+keep:186 {"Cmd":["app","--password","fakeLEAK354","--api-key","a fakeLEAK355"]}
+keep:187 headers=[('Cookie', 'sid=fakeLEAK356'), ('X-Api-Key', 'fakeLEAK357'), ('Authorization', 'Basic fakeLEAK358')]
+keep:188 {"msg":"run --token \"a fakeLEAK359\" now"}
+keep:190 authorization_header: Basic fakeLEAK360 and more
+keep:191 cookie_value=fakeLEAK361 and more
+keep:192 Cookie2: sid=fakeLEAK362
+keep:193 x-cookie-id: fakeLEAK363
+keep:194 header was Basic fakeLEAK364Zm9vOmJhcg== rejected
+keep:195 Authorization Basic fakeLEAK365Zm9vOmJhcg==
+keep:196 dsn postgres://app:ab/fakeLEAK366@db:5432/app and postgres://app:p@fakeLEAK367@db:5432/app
+keep:197 app:fakeLEAK368@tcp(db.example.org:3306)/app and app:fakeLEAK369@unix(/run/db.sock)/app
+keep:198 https://bob@example.com:fakeLEAK370@git.internal/x.git
+same:131 sysctl: net.ipv4.tcp_syncookies = 1
+same:132 sshd[12]: Basic authentication failed for user root
+same:133 {"uri":"http://localhost:8080/x","note":"a@b"}
+keep:200 client:2001:0db8:85a3:0000:0000:8a2e:0370:7399 connected
+keep:201 peer:2a01:4f8:c17:1234:5678:9abc:def0:1 connected
+keep:202 client:2a01::7 connected and ip_2001:db8::9 and from.2001:db8::a and 2a01:: too
+keep:203 ip_192.0.2.200 and 192.0.2.201_x and x192.0.2.202 and from.192.0.2.203
+keep:204 host-192-0-2-205.isp.example.org and ec2-198-51-100-206.compute-1.amazonaws.com
+keep:205 GET /a?ip=2001%3Adb8%3A%3A205 HTTP/1.1
+keep:206 192.0.2.1,192.0.2.2 192.0.2.3;192.0.2.4 2001:db8::1,2001:db8::2 [2001:db8::3]:1 2001:db8::4/64
+same:134 app[1]: db::commit ok
+same:135 app[1]: db::begin in 3 ms
+same:136 app[1]: build 1.2.3.4567 up
+keep:210 josé@example.com and also
+keep:211 o'brien@example.com and a!b@example.com
+keep:212 "bob smith"@example.com and bob@example.com1 and bob@example.com_old and bob%2540example.com
+keep:213 {"to":"bob\u0040example.com"}
+keep:214 mail bob@digital.service.gov.uk now
+same:137 systemd[1]: Started wg-quick@wg-watchtower.service - WireGuard via wg-quick(8) for wg/watchtower.
+same:138 systemd[1]: user@1000.service: Consumed 1.234s CPU time.
+same:139 systemd[1]: Started getty@tty1.service - Getty on tty1.
+same:140 systemd[1]: Finished backup@daily.timer.
+same:141 pnpm@9.15.4 and node@22.3.0 installed
+same:142 sshd[12]: Starting session: shell on pts/0 for root port 51515 id 0
+keep:220 {"ssn":"078051121","cvv":"fakeLEAK380","card_cvc":"fakeLEAK381"}
+keep:221 ssn="078051122" cvv='fakeLEAK382' SSN: "078051123"
+drop:222 form password=&fakeLEAK383
+same:143 app[1]: processname=alloy classname=Foo pid=3
+same:144 app[1]: successNumber: 3 accessNumber=4
+keep:225 {"a":"{\"msg\":\"[data \\\"Matched Data: fakeLEAK390\\\"] [severity \\\"critical\\\"]\"}"}
+keep:226 {"a":"{\"msg\":\"[msg_match_1 \\\"x\\\"] [data_match_1 \\\"Matched Data: fakeLEAK391\\\"]\"}"}
+drop:227 {"a":"{\"msg\":\"[data \\\"Matched Data: fakeLEAK392\\\"] and no severity\"}"}
+keep:230 {"password":"fakeLEAK400","passwd":"fakeLEAK401","pwd":"fakeLEAK402","secret":"fakeLEAK403","token":"fakeLEAK404","bearer":"fakeLEAK405","api_key":"fakeLEAK406","private_key":"fakeLEAK407","preshared_key":"fakeLEAK408","session":"fakeLEAK409","credential":"fakeLEAK410","csrf":"fakeLEAK411","otp_code":"fakeLEAK412","access_key":"fakeLEAK413"}
+keep:231 {"msg":"x {\"password\":\"fakeLEAK414\",\"passwd\":\"fakeLEAK415\",\"pwd\":\"fakeLEAK416\",\"secret\":\"fakeLEAK417\",\"token\":\"fakeLEAK418\",\"bearer\":\"fakeLEAK419\",\"api_key\":\"fakeLEAK420\",\"private_key\":\"fakeLEAK421\",\"preshared_key\":\"fakeLEAK422\",\"session\":\"fakeLEAK423\",\"credential\":\"fakeLEAK424\",\"csrf\":\"fakeLEAK425\",\"otp_code\":\"fakeLEAK426\",\"access_key\":\"fakeLEAK427\"} y"}
+keep:232 password=fakeLEAK428 passwd=fakeLEAK429 pwd=fakeLEAK430 secret=fakeLEAK431 token=fakeLEAK432 bearer=fakeLEAK433 api_key=fakeLEAK434 private_key=fakeLEAK435 preshared_key=fakeLEAK436 session=fakeLEAK437 credential=fakeLEAK438 csrf=fakeLEAK439 otp_code=fakeLEAK440 access_key=fakeLEAK441
+keep:233 <password>fakeLEAK442</password> <passwd>fakeLEAK443</passwd> <pwd>fakeLEAK444</pwd> <secret>fakeLEAK445</secret> <token>fakeLEAK446</token> <bearer>fakeLEAK447</bearer> <api_key>fakeLEAK448</api_key> <private_key>fakeLEAK449</private_key> <preshared_key>fakeLEAK450</preshared_key> <session>fakeLEAK451</session> <credential>fakeLEAK452</credential> <csrf>fakeLEAK453</csrf> <otp_code>fakeLEAK454</otp_code> <access_key>fakeLEAK455</access_key>
+keep:234 --password fakeLEAK456 --passwd fakeLEAK457 --pwd fakeLEAK458 --secret fakeLEAK459 --token fakeLEAK460 --bearer fakeLEAK461 --api-key fakeLEAK462 --private-key fakeLEAK463 --preshared-key fakeLEAK464 --session fakeLEAK465 --credential fakeLEAK466 --csrf fakeLEAK467 --otp-code fakeLEAK468 --access-key fakeLEAK469
+keep:235 [('password', 'fakeLEAK470'), ('passwd', 'fakeLEAK471'), ('pwd', 'fakeLEAK472'), ('secret', 'fakeLEAK473'), ('token', 'fakeLEAK474'), ('bearer', 'fakeLEAK475'), ('api_key', 'fakeLEAK476'), ('private_key', 'fakeLEAK477'), ('preshared_key', 'fakeLEAK478'), ('session', 'fakeLEAK479'), ('credential', 'fakeLEAK480'), ('csrf', 'fakeLEAK481'), ('otp_code', 'fakeLEAK482'), ('access_key', 'fakeLEAK483')]
+keep:240 "authorization" => "fakeLEAK500"
+keep:241 "cookie" := "fakeLEAK501"
+keep:242 "x-authorization" == "fakeLEAK502"
+keep:243 "cookie" == "fakeLEAK503"
+keep:244 "cookie" => "fakeLEAK504"
+keep:245 "authorization" := "fakeLEAK505"
+keep:246 {"authorization": Some("a fakeLEAK506")}
+keep:247 {"cookie": Some("a fakeLEAK507")}
+keep:248 "password" := "fakeLEAK508"
+keep:249 "token" == "fakeLEAK509"
+keep:250 {"msg":"x {\"password\" => \"fakeLEAK510\"} y"}
+keep:251 {"msg":"x {\"password\" := \"fakeLEAK511\"} y"}
+keep:252 {"msg":"x {\"password\" == \"fakeLEAK512\"} y"}
+keep:253 {"msg":"x {\"password\": Some(\"a fakeLEAK513\")} y"}
+keep:254 {"msg":"x {\"sid\":\"fakeLEAK514\",\"ssn\":\"fakeLEAK515\",\"cvv\":\"fakeLEAK516\",\"cvc\":\"fakeLEAK517\"} y"}
+keep:255 cvc=fakeLEAK518 cvv2=fakeLEAK519
+keep:256 pass => "fakeLEAK520" otp=Some("a fakeLEAK521")
+keep:257 auth=[ "a fakeLEAK522" ]
+keep:258 {"msg":"x otp=\"unclosed fakeLEAK523 y"}
+keep:259 --token 'a fakeLEAK524' now
+keep:260 peer 2001:0db8:85a3:0000:0000:8a2e:0370:7334 up
 same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series

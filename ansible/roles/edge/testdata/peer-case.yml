@@ -1,0 +1,23 @@
+---
+# One case of playbooks/test-peer-check.yml.
+- name: The check's answer
+  vars:
+    edge_peer_config:
+      content: "{{ peer_case.config }}"
+  block:
+    - name: The check
+      ansible.builtin.include_tasks: ../tasks/peer_check.yml
+
+    - name: It passed
+      ansible.builtin.set_fact:
+        edge_test_refused: false
+  rescue:
+    - name: It refused
+      ansible.builtin.set_fact:
+        edge_test_refused: true
+
+- name: The check gave the expected answer
+  ansible.builtin.assert:
+    that: edge_test_refused == (peer_case.refused | default(false))
+    fail_msg: "{{ peer_case.name }}: refused={{ edge_test_refused }}"
+    quiet: true

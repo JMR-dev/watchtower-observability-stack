@@ -1,0 +1,53 @@
+---
+# An agent's config goes out only as pinned: nothing wg-quick would run, no
+# DNS, the tunnel as its only route, its address and settings. Each line is
+# judged as wg reads it: the comment cut, every blank removed, keys in any case.
+# So `Allowed IPs` and `Fw Mark` are the keys they look like, and a written form
+# can't slip past. Only the keys wg-easy's template writes (its
+# generateClientConfig) get through, and only printable ASCII, tabs and
+# newlines, so nothing can hide behind a line break or blank that another
+# reader counts differently (splitlines() below breaks on more than wg does, and
+# a config it would read differently is refused for those bytes).
+#
+# no_log: the config holds the peer's private key. Only a yes or no leaves this
+# task, so the assert below prints nothing from the config.
+# playbooks/test-peer-check.yml runs this over made-up configs.
+- name: Read the agent's config as wg does
+  vars:
+    edge_peer_lines: >-
+      {{ edge_peer_config.content.splitlines()
+         | map('regex_replace', '#.*$', '')
+         | map('regex_replace', '\s', '')
+         | map('lower')
+         | reject('equalto', '')
+         | list }}
+    edge_peer_keys: "{{ edge_peer_lines | map('regex_replace', '=.*$', '') | list }}"
+    edge_peer_allowed_keys:
+      - "[interface]"
+      - privatekey
+      - address
+      - mtu
+      - "[peer]"
+      - publickey
+      - presharedkey
+      - allowedips
+      - persistentkeepalive
+      - endpoint
+  ansible.builtin.set_fact:
+    edge_peer_safe: >-
+      {{ edge_peer_config.content is not search('[^\t\n\x20-\x7e]')
+         and edge_peer_keys | difference(edge_peer_allowed_keys) | length == 0
+         and edge_peer_keys | select('equalto', '[interface]') | list | length == 1
+         and edge_peer_keys | select('equalto', '[peer]') | list | length == 1
+         and edge_peer_keys | select('equalto', 'endpoint') | list | length == 1
+         and edge_peer_lines | select('match', 'allowedips=') | list == ['allowedips=' ~ watchtower_tunnel_cidr]
+         and edge_peer_lines | select('match', 'address=') | list == ['address=' ~ edge_peer.address ~ '/32']
+         and edge_peer_lines | select('match', 'mtu=') | list == ['mtu=' ~ edge_agent_mtu]
+         and edge_peer_lines | select('match', 'persistentkeepalive=') | list == ['persistentkeepalive=' ~ edge_agent_keepalive] }}
+  no_log: true
+
+- name: An agent's config is safe to publish
+  ansible.builtin.assert:
+    that: edge_peer_safe | bool
+    fail_msg: wg-easy's config for {{ edge_peer.name }} has hooks, DNS, more routes or a key it shouldn't, or lacks its pinned settings; not publishing it
+    quiet: true
