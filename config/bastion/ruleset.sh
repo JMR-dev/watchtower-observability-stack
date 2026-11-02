@@ -49,12 +49,14 @@
 # sshd still runs, on the floor. Step 7 then stops, with the VM running as no
 # one.
 #
-# Each outcome prints one line, which reaches the serial console, and at every
-# boot again, for scripts/bootstrap.sh:
+# Each outcome, at every boot again, is a line on the serial console for whoever
+# reads it, and the guest attribute watchtower/ruleset for scripts/bootstrap.sh:
 #
-#   bastion: ruleset pending|confirmed|rolled back|refused|failed <sha256> at <epoch>
+#   pending|confirmed|rolled back|refused|failed <sha256> at <epoch>
 #
 # failed: it should be on and isn't, or a rollback's restore hasn't worked yet.
+# bootstrap can't go by the console, as any user can put a line there (logger,
+# through rsyslog). The guard keeps them from the attribute.
 #
 # scripts/check-bastion.sh tests all of it with systemctl stubbed.
 
@@ -75,15 +77,23 @@ TOOL="/usr/local/sbin/watchtower-ruleset"
 TIMER="watchtower-ruleset-rollback.timer"
 ROLLBACK="watchtower-ruleset-rollback.service"
 ACCOUNT_URL="http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/email"
+ATTRIBUTE_URL="http://169.254.169.254/computeMetadata/v1/instance/guest-attributes/watchtower/ruleset"
 # apply's exit status when it rolled back and is rebooting.
 REBOOTING=75
 
 say() { printf 'bastion: %s\n' "$*"; }
 warn() { printf 'bastion: warning: %s\n' "$*" >&2; }
 
-# The line scripts/bootstrap.sh reads. The time tells it from a line an earlier
-# boot left in the serial output.
-status() { say "ruleset $1 $2 at $(date +%s)"; }
+# status <state> <sha>: what came of it. The time tells scripts/bootstrap.sh this
+# boot's from an earlier one's, which the attribute outlasts. Telling it never
+# changes what came of it.
+status() {
+  local value
+  value="$1 $2 at $(date +%s)"
+  say "ruleset ${value}"
+  curl -fsS -o /dev/null --max-time 5 --retry 2 --retry-connrefused -X PUT -H 'Metadata-Flavor: Google' \
+    --data "$value" "$ATTRIBUTE_URL" || warn "could not put that in the guest attribute"
+}
 
 guard_loaded() { nft list chain inet metadata_guard metadata >/dev/null 2>&1; }
 

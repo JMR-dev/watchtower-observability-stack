@@ -21,9 +21,11 @@
 #          on its IPv6 address, fd20:ce::254, where the container has IPv6.
 #   ruleset  ruleset.sh's dead man's switch, on real nft with systemctl and the
 #          metadata server stubbed: arm, confirm, fire, rejected, re-arm after
-#          a reboot, first install, a retry, a guard that won't load, what a
-#          non-root user can do, and the lines bootstrap.sh reads, through its
-#          own ruleset_state. Its units are checked by systemd-analyze verify.
+#          a reboot, first install, a retry, a guard that won't load, a disk
+#          that won't take a restore, the floor, what a non-root user can do,
+#          and the guest attribute bootstrap.sh reads, through its own
+#          ruleset_state and bastion_ruleset_wait. Its units are checked by
+#          systemd-analyze verify.
 #
 #   scripts/check-bastion.sh            # docker; CONTAINER_RUNTIME=podman locally
 #
@@ -52,18 +54,37 @@ cleanup() { [[ -z "$cid" ]] || "$rt" rm -f "$cid" >/dev/null 2>&1 || true; rm -r
 trap cleanup EXIT
 
 cp "${repo_root}/config/bastion/startup.sh" "${repo_root}/config/bastion/nftables.conf" "${repo_root}/config/bastion/ruleset.sh" "$work/"
-# The line bootstrap.sh stops the VM on, which run.sh checks main prints.
-grep -qF "grep -cF 'bastion: settled'" "${repo_root}/scripts/bootstrap.sh" || {
-  echo "FAIL  bootstrap.sh doesn't wait for 'bastion: settled'"
+# The attribute bootstrap.sh stops the VM on, which run.sh checks main sends.
+grep -qF 'bastion_attribute settled' "${repo_root}/scripts/bootstrap.sh" || {
+  echo "FAIL  bootstrap.sh doesn't wait for the settled attribute"
   exit 1
 }
-# How bootstrap.sh reads the ruleset's lines, which run.sh checks ruleset.sh
-# prints in that shape.
-sed -n '/^ruleset_state() {$/,/^}$/p' "${repo_root}/scripts/bootstrap.sh" >"${work}/ruleset_state.sh"
-[[ -s "${work}/ruleset_state.sh" ]] || {
-  echo "FAIL  bootstrap.sh has no ruleset_state"
+grep -qF 'guest-attributes/watchtower/settled' "${repo_root}/config/bastion/startup.sh" || {
+  echo "FAIL  startup.sh doesn't send the settled attribute"
   exit 1
 }
+# Any user can put a line on the serial console, so bootstrap.sh acts on none.
+if grep -q 'get-serial-port-output' "${repo_root}/scripts/bootstrap.sh"; then
+  echo "FAIL  bootstrap.sh reads the serial output"
+  exit 1
+fi
+# Every run asks, and asks again after the account goes on: the last wait comes
+# after the last thing that changes the VM.
+last_wait="$(grep -n '^ *bastion_ruleset_wait "' "${repo_root}/scripts/bootstrap.sh" | tail -1 | cut -d: -f1)"
+last_change="$(grep -n 'compute instances set-service-account' "${repo_root}/scripts/bootstrap.sh" | tail -1 | cut -d: -f1)"
+[[ -n "$last_wait" && -n "$last_change" && "$last_wait" -gt "$last_change" ]] || {
+  echo "FAIL  bootstrap.sh doesn't ask again after attaching the account"
+  exit 1
+}
+# How bootstrap.sh reads the ruleset's attribute and waits on it, which run.sh
+# checks against what ruleset.sh sends.
+sed -n '/^ruleset_state() {$/,/^}$/p; /^bastion_ruleset_wait() {$/,/^}$/p' "${repo_root}/scripts/bootstrap.sh" >"${work}/ruleset_state.sh"
+for fn in ruleset_state bastion_ruleset_wait; do
+  grep -q "^${fn}() {\$" "${work}/ruleset_state.sh" || {
+    echo "FAIL  bootstrap.sh has no ${fn}"
+    exit 1
+  }
+done
 
 cat >"${work}/probe.py" <<'PY'
 """serve [v6]: answers "ok" on the guard's ports, and with v6 on its IPv6
@@ -320,9 +341,11 @@ main_order="$(
   apt_install() { echo apt; }
   fetch_peer() { peer_state=none; }
   teardown() { echo teardown; }
+  # The attribute's PUT, which comes with the line.
+  curl() { [[ "$*" == *guest-attributes/watchtower/settled* ]] && echo settled-attribute; }
   main 2>/dev/null | tr '\n' ' '
 )"
-if [[ "$main_order" == "guard bastion: metadata guard loaded updates apt bastion: settled teardown " ]]; then
+if [[ "$main_order" == "guard bastion: metadata guard loaded updates apt bastion: settled settled-attribute teardown " ]]; then
   pass "apt: main says settled only after the guard and apt, and the guard goes first"
 else
   flunk "apt: main's order is: ${main_order}"
@@ -370,6 +393,7 @@ main_case() {
     fetch_peer() { peer_state="$state"; printf 'not a config\n' >"$1"; }
     teardown() { echo teardown; }
     health() { :; }
+    report_settled() { :; }
     main 2>/dev/null
   )"
   rc=$?
@@ -503,6 +527,14 @@ esac
 STUB
 cat >"${stubs}/curl" <<'STUB'
 #!/bin/bash
+args=("$@")
+for ((i = 0; i < $#; i++)); do
+  if [[ "${args[i]}" == --data ]]; then
+    [[ ! -e /stubs/attribute-broken ]] || exit 7
+    printf '%s\n' "${args[i + 1]}" >/stubs/attribute
+    exit 0
+  fi
+done
 cat /stubs/account-code
 STUB
 # A disk that won't take the ruleset: what ENOSPC or a read-only root does to it.
@@ -535,7 +567,8 @@ refute() {
 }
 same_file() { cmp -s "$1" "$2"; }
 no_file() { [[ ! -e "$1" ]]; }
-state_is() { [[ "$(ruleset_state "$1" 0 <<<"$out")" == "$2" ]]; }
+# What the last command told the guest attribute, as bootstrap.sh reads it.
+state_is() { [[ "$(ruleset_state "$1" 0 <"${stubs}/attribute")" == "$2" ]]; }
 reason_is() { [[ "$rc" == "$1" ]]; }
 
 # The files: a is the real one, b and c differ by a comment.
@@ -586,12 +619,13 @@ reboot_vm() {
 }
 # apply_ruleset <file> [<retry>]: as startup.sh calls it. Sets out and rc.
 apply_ruleset() {
+  : >"${stubs}/attribute"
   out="$(tool apply "${rules}/$1" "${2:-}" 2>&1)"
   rc=$?
 }
-fire() { out="$(tool rollback 2>&1)"; rc=$?; }
+fire() { : >"${stubs}/attribute"; out="$(tool rollback 2>&1)"; rc=$?; }
 # A login's file, then what the path unit starts.
-confirm() { touch "${dropbox}/a-login"; out="$(tool confirm 2>&1)"; rc=$?; }
+confirm() { : >"${stubs}/attribute"; touch "${dropbox}/a-login"; out="$(tool confirm 2>&1)"; rc=$?; }
 marked_on() { nft list table inet marked >/dev/null 2>&1; }
 
 # A first install: no ruleset to go back to, and no account.
@@ -1009,20 +1043,78 @@ fire
 check "nothing there, fired: none again" no_file /etc/nftables.conf
 check "nothing there, fired: reboots" called "--no-block reboot"
 
-# bootstrap.sh's reading of the lines: the last for that ruleset, not too old.
-lines="$(printf '%s\n' \
-  "[   12.3] startup-script: bastion: ruleset pending ${sha_a} at 100" \
-  "bastion: settled" \
-  "Nov 01 12:00:00 x systemd[1]: bastion: ruleset confirmed ${sha_a} at 200" \
-  "bastion: ruleset rolled back ${sha_b} at 300" \
-  "bastion: ruleset refused ${sha_c} at 400")"
-read_state() { [[ "$(ruleset_state "$1" "$2" <<<"$lines")" == "$3" ]]; }
-check "bootstrap reads: the last line" read_state "$sha_a" 0 confirmed
-check "bootstrap reads: two words" read_state "$sha_b" 0 "rolled back"
-check "bootstrap reads: refused" read_state "$sha_c" 0 refused
-check "bootstrap reads: not an earlier boot's" read_state "$sha_a" 201 ""
-check "bootstrap reads: another ruleset's are no news" read_state "$(printf 'd%.0s' {1..64})" 0 ""
+# Telling the attribute never changes what came of it.
+fresh
+touch "${stubs}/attribute-broken"
+apply_ruleset a
+rm -f "${stubs}/attribute-broken"
+check "no attribute: applied" reason_is 0
+check "no attribute: the trial runs" test -e "${state_dir}/pending"
+check "no attribute: sshd runs" called "start ssh.service"
+if grep -q 'could not put that in the guest attribute' <<<"$out"; then pass "ruleset: no attribute: says so"; else flunk "ruleset: no attribute: says nothing"; fi
+# ... and it's real output too, for whoever reads the console.
+apply_ruleset a
+if grep -qF "bastion: ruleset pending ${sha_a} at " <<<"$out"; then pass "ruleset: a line for the console too"; else flunk "ruleset: no line for the console"; fi
+
+# bootstrap.sh's reading of the attribute: that ruleset's, and not too old.
+read_state() { [[ "$(ruleset_state "$2" "$3" <<<"$1")" == "$4" ]]; }
+check "bootstrap reads: one word" read_state "confirmed ${sha_a} at 200" "$sha_a" 0 confirmed
+check "bootstrap reads: two words" read_state "rolled back ${sha_b} at 300" "$sha_b" 0 "rolled back"
+check "bootstrap reads: refused" read_state "refused ${sha_c} at 400" "$sha_c" 0 refused
+check "bootstrap reads: failed" read_state "failed ${sha_c} at 400" "$sha_c" 0 failed
+check "bootstrap reads: not an earlier boot's" read_state "confirmed ${sha_a} at 200" "$sha_a" 201 ""
+check "bootstrap reads: another ruleset's are no news" read_state "confirmed ${sha_b} at 200" "$sha_a" 0 ""
 check "bootstrap reads: nothing from nothing" test -z "$(ruleset_state "$sha_a" 0 </dev/null)"
+# Only the value, whole: not a serial line of any shape, which any user can write.
+check "bootstrap reads: not a console line" read_state "bastion: ruleset confirmed ${sha_a} at 200" "$sha_a" 0 ""
+check "bootstrap reads: not one inside another" read_state "x confirmed ${sha_a} at 200" "$sha_a" 0 ""
+
+# bootstrap.sh's wait. The attribute's values, in turn, from a file of them.
+# wait_case <name> <want exit> <want dispatches> <since> <values, one a line>
+BASTION=watchtower-bastion
+confirm_by_hand="the-hand-confirm"
+ruleset_sha="$sha_a"
+wait_case() {
+  local name=$1 want_rc=$2 want_dispatches=$3 since=$4 values=$5 got rc
+  printf '%s\n' "$values" >"${stubs}/values"
+  got="$(
+    bastion_attribute() {
+      # The next value, the last one staying.
+      local value
+      value="$(head -1 "${stubs}/values")"
+      [[ "$(wc -l <"${stubs}/values")" -le 1 ]] || sed -i 1d "${stubs}/values"
+      printf '%s\n' "$value"
+    }
+    bastion_dispatch() { echo dispatched; }
+    log() { printf '%s\n' "$*"; }
+    die() { printf 'died: %s\n' "$*"; exit 1; }
+    sleep() { :; }
+    bastion_ruleset_wait "$since"
+  )"
+  rc=$?
+  local dispatches
+  dispatches="$(grep -c '^dispatched$' <<<"$got")"
+  if [[ "$rc" == "$want_rc" && "$dispatches" == "$want_dispatches" ]]; then
+    pass "bootstrap waits: ${name}"
+  else
+    flunk "bootstrap waits: ${name}: exit ${rc}, ${dispatches} dispatches; want exit ${want_rc}, ${want_dispatches} dispatches"
+  fi
+  wait_out="$got"
+}
+wait_case "confirmed" 0 0 0 "confirmed ${sha_a} at 200"
+wait_case "pending, then confirmed: dispatches once" 0 1 0 "pending ${sha_a} at 100
+pending ${sha_a} at 101
+confirmed ${sha_a} at 200"
+if grep -qF "$confirm_by_hand" <<<"$wait_out"; then pass "bootstrap waits: says how to confirm by hand"; else flunk "bootstrap waits: doesn't say how to confirm by hand"; fi
+wait_case "rolled back stops" 1 0 0 "rolled back ${sha_a} at 200"
+wait_case "pending, then rolled back stops" 1 1 0 "pending ${sha_a} at 100
+rolled back ${sha_a} at 200"
+wait_case "refused stops, as a rerun finds it" 1 0 0 "refused ${sha_a} at 200"
+wait_case "failed stops" 1 0 0 "failed ${sha_a} at 200"
+wait_case "an earlier boot's word isn't this boot's" 1 0 300 "confirmed ${sha_a} at 200"
+wait_case "another ruleset's word isn't this one's" 1 0 0 "confirmed ${sha_b} at 200"
+wait_case "a forged console line isn't a word" 1 0 0 "bastion: ruleset confirmed ${sha_a} at 200"
+wait_case "nothing at all stops, in the end" 1 0 0 ""
 
 # The units, as systemd reads them.
 fresh

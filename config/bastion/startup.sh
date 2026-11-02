@@ -13,7 +13,7 @@
 #      cancels, and sshd runs only with the guard loaded or on a VM with no
 #      token (ruleset.sh). Nothing else runs if sshd may not.
 #   2. Security updates every day, rebooting at 04:00 UTC when one needs it.
-#   3. Prints "bastion: settled" once apt is done: scripts/bootstrap.sh stops
+#   3. Says so in a guest attribute once apt is done: scripts/bootstrap.sh stops
 #      the VM for its account only after that.
 #   4. Its agent peer (docs/client-telemetry.md), read from Secret Manager
 #      with that token, checked and normalised, as wg-quick@wg-watchtower. A
@@ -144,6 +144,16 @@ guard() {
     "$RULESET_REBOOTING") log "rolling back: rebooting"; exit 0 ;;
     *) die "sshd may not run (see above), so nothing else does" ;;
   esac
+}
+
+# What scripts/bootstrap.sh waits for, in a guest attribute: any user can put a
+# line on the console, and the guard keeps them from this. From here a stop can't
+# break apt.
+report_settled() {
+  log "settled"
+  curl -fsS -o /dev/null --max-time 5 --retry 2 --retry-connrefused -X PUT -H 'Metadata-Flavor: Google' \
+    --data "$(date +%s)" "${MDS}/instance/guest-attributes/watchtower/settled" ||
+    warn "could not put that in the guest attribute"
 }
 
 # check_peer <in> <out>: writes the config wg-quick may run, or fails saying
@@ -328,8 +338,7 @@ main() {
 
   updates
   installed wireguard-tools jq || apt_install --no-install-recommends wireguard-tools jq
-  # What scripts/bootstrap.sh waits for: from here a stop can't break apt.
-  log "settled"
+  report_settled
   fetch_peer "${work}/peer.in"
   case "$peer_state" in
     have) ;;

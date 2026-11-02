@@ -63,11 +63,16 @@
 #      ruleset goes on under a 10-minute rollback (config/bastion/ruleset.sh):
 #      this dispatches bastion-confirm.yml, for the branch it's run from, to
 #      log in as the deployer and cancel it, and waits to see which came of
-#      it. Rolled back, it stops, and a rerun tries again: a fixed file has a
-#      new sha256, and the same file is asked for again. The account goes on
-#      only after that ruleset is confirmed: two restarts the first time. sshd
-#      runs only with the guard loaded or on a VM with no account, so no user
-#      is ever on a VM with a token and no guard.
+#      it, in a guest attribute only root can write once the guard is on, and
+#      never prints "Done" unless this boot has confirmed it. Rolled back, it
+#      stops, and a rerun tries again: a fixed file has a new sha256, and the
+#      same file is asked for again. The account goes on only after that ruleset
+#      is confirmed, and it's asked again of the boot with the account: two
+#      restarts the first time. sshd runs only with the guard loaded or on a VM
+#      with no account, a user may leave nothing behind to run without logging
+#      in (no crontab, no lingering), and a file that won't load falls back to a
+#      guard built into the tool, so nothing of a user's runs with a token and no
+#      guard unless nft itself loads nothing, when sshd stays down.
 #      Writes the NAT address and the bastion's SSH host key into
 #      infra/cloud/Pulumi.prod.yaml (breakGlassCidrs, bastionHostKey), never
 #      to the terminal; commit the change and deploy.
@@ -430,22 +435,34 @@ bastion_up() {
   done
   die "${BASTION} stayed ${state} for 5 minutes, so break glass is down"
 }
-# ruleset_state <sha> <since>: the serial output on stdin; prints what last came
-# of that ruleset (pending, confirmed, rolled back or refused), going by lines
-# no older than since, an epoch. Nothing when there is none: serial output may
-# outlast a stop, so a line alone says nothing about this boot. scripts/
-# check-bastion.sh tests it.
+# ruleset_state <sha> <since>: the guest attribute watchtower/ruleset on stdin;
+# prints what came of that ruleset (pending, confirmed, rolled back, refused or
+# failed), if it's no older than since, an epoch. Nothing when there is none: the
+# attribute outlasts a stop, so a value alone says nothing about this boot.
+# scripts/check-bastion.sh tests it.
 ruleset_state() {
-  { grep -oE 'bastion: ruleset (pending|confirmed|rolled back|refused|failed) [0-9a-f]{64} at [0-9]+' || true; } |
+  { grep -xE '(pending|confirmed|rolled back|refused|failed) [0-9a-f]{64} at [0-9]+' || true; } |
     awk -v sha="$1" -v since="$2" '
       $(NF - 2) == sha && $NF + 0 >= since + 0 {
-        state = $3
-        if (NF == 7) state = $3 " " $4
+        state = $1
+        if (NF == 5) state = $1 " " $2
       }
       END { print state }'
 }
-bastion_serial() {
-  compute instances get-serial-port-output "$BASTION" --zone "$BASTION_ZONE" 2>/dev/null || true
+# bastion_attribute <key>: what the startup script reports. Never the serial
+# output: any user can put a line there (logger, through rsyslog), and the guard
+# keeps them from these.
+bastion_attribute() {
+  compute instances get-guest-attributes "$BASTION" --zone "$BASTION_ZONE" \
+    --query-path "watchtower/$1" --format 'value(value)' 2>/dev/null || true
+}
+# When it last started, as an epoch: an attribute from before that is an earlier
+# boot's.
+bastion_started() {
+  local started
+  started="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format 'value(lastStartTimestamp)')"
+  [[ -n "$started" ]] || die "${BASTION} says nothing of when it last started"
+  date -d "$started" +%s
 }
 # The way to cancel a rollback by hand, as any account with OS Login on it.
 confirm_by_hand="gcloud compute ssh ${BASTION} --zone ${BASTION_ZONE} --project ${GCP_PROJECT} --tunnel-through-iap --command 'touch /run/watchtower-ruleset/confirm'"
@@ -478,12 +495,13 @@ bastion_dispatch() {
   rm -f "$payload"
 }
 # Waits for what comes of the ruleset at this boot, dispatching the job when it
-# goes pending. A rollback takes 10 minutes and a reboot, so this outlasts it.
+# goes pending, and returns only if it's confirmed. A rollback takes 10 minutes
+# and a reboot, so this outlasts it.
 bastion_ruleset_wait() {
   local since=$1 state="" dispatched=""
   log "  waiting for ${BASTION}'s ruleset ${ruleset_sha:0:12}: it rolls back after 10 minutes unless confirmed"
   for _ in $(seq 100); do
-    state="$(bastion_serial | ruleset_state "$ruleset_sha" "$since")"
+    state="$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" "$since")"
     case "$state" in
       confirmed)
         log "  ruleset confirmed"
@@ -502,6 +520,9 @@ bastion_ruleset_wait() {
         if [[ -z "$dispatched" ]]; then
           dispatched=1
           bastion_dispatch
+          # Even when the dispatch worked: the job may still fail, and a new
+          # environment has no GCP_DEPLOYER_KEY for it yet.
+          log "  if the job can't log in (a new environment has no GCP_DEPLOYER_KEY yet), confirm by hand: ${confirm_by_hand}"
         fi
         ;;
       *) ;;
@@ -511,7 +532,6 @@ bastion_ruleset_wait() {
   die "${BASTION} reported nothing final for ruleset ${ruleset_sha:0:12} within 15 minutes, so it still runs as it did: see its serial output, and rerun"
 }
 if ! exists instances describe "$BASTION" --zone "$BASTION_ZONE"; then
-  bastion_new=1
   compute instances create "$BASTION" --zone "$BASTION_ZONE" --machine-type e2-micro \
     --network-interface "subnet=${BASTION},private-network-ip=${BASTION_IP},no-address" \
     --image-family debian-13 --image-project debian-cloud \
@@ -544,7 +564,7 @@ want="$(jq -ncS --arg sa "$BASTION_SA" --rawfile s "${bastion_dir}/startup.sh" \
   meta: {"startup-script": $s, "watchtower-nftables": $n, "watchtower-ruleset": $r, "watchtower-alloy": $a}}')"
 account_differs=""
 [[ "$(jq -c 'del(.meta)' <<<"$current")" == "$(jq -c 'del(.meta)' <<<"$want")" ]] || account_differs=1
-ruleset_before="$(bastion_serial | ruleset_state "$ruleset_sha" 0)"
+ruleset_before="$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" 0)"
 # A rerun after a rollback: this file again, even unchanged, since nothing need
 # be wrong with it (Gitea was down). The VM takes a new value here to mean so,
 # once.
@@ -553,42 +573,42 @@ if [[ "$ruleset_before" == "rolled back" ]]; then
   log "  ${BASTION} rolled this ruleset back before: trying it again"
   retry_args=(--metadata "watchtower-nftables-retry=$(date -u +%s)")
 fi
-# From before the stop: serial output may outlast one, and an earlier line is
-# no news of this boot.
-ruleset_since=0
-restarted=""
 if [[ "$(jq -c .meta <<<"$current")" != "$(jq -c .meta <<<"$want")" || "${#retry_args[@]}" -gt 0 ]]; then
   log "  updating ${BASTION} in place: stop, its metadata, start"
-  ruleset_since="$(date +%s)"
-  restarted=1
   compute instances stop "$BASTION" --zone "$BASTION_ZONE"
   compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata-from-file "$bastion_files" "${retry_args[@]}"
   bastion_start
 fi
-# Only when the answer matters: a rerun with nothing to do has nothing to wait
-# for, and serial output ages out.
-if [[ -n "${bastion_new:-}" || -n "$restarted" || -n "$account_differs" || "$ruleset_before" == pending ]]; then
-  bastion_ruleset_wait "$ruleset_since"
-fi
+# Every run, as the attribute doesn't age out: this boot's word on this file, so
+# a run that changed nothing can't report success over a refused or unconfirmed
+# ruleset.
+boot_since="$(bastion_started)"
+bastion_ruleset_wait "$boot_since"
 if [[ -n "$account_differs" ]]; then
-  # Never on a VM whose ruleset isn't confirmed (above): sshd's gate would keep
-  # everyone out of a VM with a token and no guard, and with a bad ruleset that
-  # means no way in at all. And not during its first apt install, which this
-  # line comes after: a stop there can leave dpkg half done.
+  # Never on a VM whose ruleset this boot hasn't confirmed (above): sshd's gate
+  # would keep everyone out of a VM with a token and no guard, and with a bad
+  # ruleset that means no way in at all. And not during its first apt install,
+  # which this line comes after: a stop there can leave dpkg half done.
   log "  waiting for ${BASTION} to finish apt"
   guarded=""
   for _ in $(seq 90); do
-    if compute instances get-serial-port-output "$BASTION" --zone "$BASTION_ZONE" 2>/dev/null |
-      grep -cF 'bastion: settled' >/dev/null; then
+    settled_at="$(bastion_attribute settled)"
+    if [[ "$settled_at" =~ ^[0-9]+$ ]] && ((settled_at >= boot_since)); then
       guarded=1; break
     fi
     sleep 10
   done
-  [[ -n "$guarded" ]] || die "${BASTION} didn't report 'bastion: settled' within 15 minutes, so it still runs as no one: see its serial output, gcloud compute instances reset it if it is running, and rerun (a rerun starts it if it is stopped)"
+  [[ -n "$guarded" ]] || die "${BASTION} didn't report that apt had finished within 15 minutes, so it still runs as no one: see its serial output, gcloud compute instances reset it if it is running, and rerun (a rerun starts it if it is stopped)"
   log "  attaching ${BASTION}'s account: stop, its account, start"
   compute instances stop "$BASTION" --zone "$BASTION_ZONE"
   compute instances set-service-account "$BASTION" --zone "$BASTION_ZONE" --service-account "$BASTION_SA" --scopes cloud-platform
   bastion_start
+  # Asked again of the boot with the account, whose guard is what keeps a user
+  # from the attribute. A VM with no guard before it can't vouch for itself: a
+  # user could have written what the wait above read. Still pending here, it's
+  # dispatched and waited on like any other, and anything but confirmed stops.
+  boot_since="$(bastion_started)"
+  bastion_ruleset_wait "$boot_since"
 fi
 
 nat_ip="$(compute addresses describe "${BASTION}-nat" --region "$BASTION_REGION" --format 'value(address)')"
