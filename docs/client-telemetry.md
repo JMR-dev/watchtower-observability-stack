@@ -282,16 +282,20 @@ As built: the account is made with the others (step 4) and granted through
 `agent_readers`. Step 7 gives `watchtower-deployer`
 `roles/iam.serviceAccountUser` on it, because OS Login admits a user to a VM
 that runs as a service account only then (the owner's decision, 2026-11-01).
-It attaches the account only after the guard's ruleset is confirmed: two
-restarts the first time.
+It attaches the account only after the guard's ruleset is confirmed, by a guest
+attribute only root can write once the guard is on, and asks again of the boot
+with the account: two restarts the first time.
 
 A new ruleset goes on under a 10-minute rollback (the owner's decision,
 2026-11-01; `config/bastion/ruleset.sh`, and the runbook's "A new ruleset"). A
 login cancels it, and bootstrap dispatches `bastion-confirm.yml` to log in as
 the deployer. sshd runs only with the guard in the kernel, or on a VM with no
-account. So a user may be on a VM with no guard, after a first install rolled
-back, but never on one with a token and no guard: an account goes on only over a
-confirmed ruleset, and sshd won't start on a VM with an account and no guard.
+account. An account goes on only over a confirmed ruleset, and a ruleset that
+won't load at a boot brings the floor, a small copy of the guard built into the
+tool, before the network comes up. Nothing of a user's runs without a login: no
+crontab, at job or lingering. So nothing of a user's runs with a token and no
+guard. The one case left is nft itself loading nothing, not even the floor, and
+then sshd stays down.
 
 The startup script, the ruleset, its tool and the Alloy config are files
 (`config/bastion/`, `config/alloy/bastion.alloy`) that bootstrap puts in the

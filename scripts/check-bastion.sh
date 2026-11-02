@@ -35,8 +35,10 @@
 # reboot), that a login's file reaches confirm, that the two services' lines
 # reach the serial console, that sshd's drop-in holds it back and the guest
 # agent's restarts get past it, that a package upgrade's restart keeps both up,
-# that the metadata server says 404 for a VM with no account, and that the
-# real rollback reboots into the old ruleset.
+# that the metadata server says 404 for a VM with no account, that it takes the
+# guest attribute from root, that the dropbox's tmpfs comes up, that a ruleset
+# that won't load brings the floor before the network, that polkit refuses a
+# user lingering, and that the real rollback reboots into the old ruleset.
 #
 # Needs the network (apt, inside the container). Files go in with `cp`, not
 # a bind mount: on the Gitea runners the daemon is Docker-in-Docker and

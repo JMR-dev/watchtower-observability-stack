@@ -150,10 +150,15 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     nftables (`config/bastion/nftables.conf`) refuses every other uid but
     for DNS, DHCP and NTP. `nft list chain inet metadata_guard metadata`
     counts the refusals. A restart of `nftables.service` reloads and never
-    flushes it (a drop-in clears `ExecStop`).
+    flushes it (a drop-in clears `ExecStop`). A ruleset that won't load at a
+    boot brings a small copy of the guard built into the tool, the floor,
+    before the network comes up.
   - sshd runs only with the guard in the kernel, or on a VM with no account
     and so no token: `watchtower-ruleset gate`, before every start. A package
-    upgrade of either leaves both running.
+    upgrade of either leaves both running. Nothing of a user's runs without a
+    login, so nothing gets past that gate: cron and at are root's, polkit
+    refuses lingering, and any crontab or linger file from before is removed
+    at every boot.
   - Its startup script (`config/bastion/startup.sh`) sets all of this up
     at every boot; its output is in `journalctl -u google-startup-scripts`
     and on the serial console, and never holds the peer config.
@@ -173,9 +178,13 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     and starts it again. The boot disk, and with it the host key, stays;
     anyone on the bastion then is cut off.
   - The first time, or on a new bastion, that takes two restarts: bootstrap
-    attaches the account only once the serial output shows its ruleset
-    confirmed (below) and apt finished (`bastion: settled`), so don't run it
-    during a deploy with `ssh_via=bastion`.
+    attaches the account only once this boot has confirmed its ruleset (below)
+    and finished apt, and asks again of the boot with the account, so don't run
+    it during a deploy with `ssh_via=bastion`. Bootstrap goes by guest attributes
+    (`watchtower/ruleset`, `watchtower/settled`), which the guard keeps from
+    every uid but root, and never by the serial console, where any user can put
+    a line. On a VM with no guard yet a user could write them too, which is why
+    it asks again.
   - If a run fails between a stop and its start (no capacity in the zone, a
     lost connection), the bastion stays stopped and break glass is down.
     Rerun bootstrap, which starts a stopped bastion first, or
@@ -185,42 +194,60 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     deploy. The NAT address is reserved and stays; the host key changes.
 - **A new ruleset** (`config/bastion/ruleset.sh`): one that locked everyone
   out would strand break glass, so a new one undoes itself.
-  - The boot that finds it in metadata keeps the old file, records the trial
-    on disk, arms a 10-minute timer, then installs and loads it. A reboot in
-    those 10 minutes starts them again.
+  - The boot that finds it in metadata loads it first in a network namespace of
+    its own, where nothing can see it. Then it keeps the old file, records the
+    trial on disk, arms a 10-minute timer, and installs and loads it. A reboot
+    in those 10 minutes starts them again.
   - Any login cancels it, no sudo needed: an interactive shell does so by
-    itself, or `touch /run/watchtower-ruleset/confirm`. Bootstrap dispatches
-    `bastion-confirm.yml` for the branch it's run from, which logs in as the
-    deployer over IAP, and waits for `bastion: ruleset confirmed` on the serial
-    console. The account goes on only after that.
-  - No login in time: `bastion: ruleset rolled back`, the old file back, the
-    new one's sha256 recorded as rejected so the next boot leaves it alone, and
-    a reboot. Bootstrap stops there, with the VM on the old ruleset and, if it
-    has no account yet, running as no one. The line repeats at every boot while
-    metadata holds that file.
-  - **Gitea down, or the dispatch fails:** bootstrap says so and prints the
-    command to confirm by hand, which any account with OS Login on the VM may
-    run. Otherwise the rollback is what happens.
+    itself, or `touch /run/watchtower-ruleset/confirm`. A login from before the
+    load doesn't count. Bootstrap dispatches `bastion-confirm.yml` for the branch
+    it's run from, which logs in as the deployer over IAP, and waits for
+    `confirmed` in the guest attribute. The account goes on only after that, and
+    bootstrap reports success only if the boot it ends on has said `confirmed`.
+  - No login in time: `rolled back`, the old file back, the new one's sha256
+    recorded as rejected so the next boot leaves it alone, and a reboot. Bootstrap
+    stops there, with the VM on the old ruleset and, if it has no account yet,
+    running as no one. It says so again at every boot while metadata holds that
+    file.
+  - **Gitea down, or the dispatch fails:** bootstrap says so. It prints the
+    command to confirm by hand whenever a ruleset goes pending, which any account
+    with OS Login on the VM may run. Otherwise the rollback is what happens.
   - **To recover, rerun bootstrap.** A fixed file has a new sha256 and is tried
     afresh. The same file is tried again too, since nothing need be wrong with
     it: bootstrap asks for it once more (`watchtower-nftables-retry` in
     metadata).
-  - **A file that fails `nft --check` or names no guard** never goes on:
-    `bastion: ruleset refused`, what runs now stays, and bootstrap stops.
+  - **A file that won't load, or gives no hooked guard,** never goes on, whatever
+    its comments say: `refused`, what runs now stays, and bootstrap stops, on a
+    rerun too.
   - **A first install** has no old ruleset, and the VM has no account yet, so
     no token to guard. Rollback puts back the package's empty ruleset, and sshd
-    still runs, so break glass stays up. A new environment's first run has no
-    `GCP_DEPLOYER_KEY` yet (`rotate-gcp-key.sh deployer` comes after bootstrap),
-    so the job can't log in: confirm by hand when bootstrap asks.
-  - **The guard won't load at a boot with no change:** the startup script loads
-    the old ruleset into the kernel and starts sshd, and the next boot tries the
-    current file again. If that fails too, on a VM with an account, sshd stays
-    down, since nothing may run with a token and no guard. The way back is new
-    metadata (rerun bootstrap with a ruleset that loads) or the serial console
-    (`gcloud compute instances add-metadata watchtower-bastion --zone us-east1-b
-    --metadata serial-port-enable=TRUE`, then `gcloud compute connect-to-serial-port
-    watchtower-bastion --zone us-east1-b`, and turn it off again). `journalctl
-    -u nftables -u ssh -u google-startup-scripts` says why.
+    still runs, on the floor, so break glass stays up. A new environment's first
+    run has no `GCP_DEPLOYER_KEY` yet (`rotate-gcp-key.sh deployer` comes after
+    bootstrap), so the job can't log in: confirm by hand when bootstrap prints how.
+  - **A rollback the disk won't take** (`failed`, on a full or read-only disk):
+    the old ruleset goes into the kernel at once, and that needs no disk, so sshd
+    keeps running on it. The trial's file stays on disk with its record, nothing
+    new goes on, and the rollback retries every minute with no reboot, then
+    reboots once it works. A login can't confirm it now. A fixed file in metadata
+    can't help, as it needs the same disk. The way in is a startup script of your
+    own, which runs as root at the next boot: `gcloud compute instances
+    add-metadata watchtower-bastion --zone us-east1-b --metadata-from-file
+    startup-script=<a one-off that frees the disk>`, then `gcloud compute instances
+    reset watchtower-bastion --zone us-east1-b`. A rerun of bootstrap then puts the
+    real one back.
+  - **The guard won't load at a boot with no change:** `failed`, and bootstrap
+    stops. The floor came on before the network, or the startup script loads the
+    old ruleset into the kernel, and sshd starts on that, so the VM stays guarded
+    and reachable. A file that has stopped loading never becomes the old ruleset:
+    the last one that loaded stays the way back. The next boot tries the current
+    file again.
+  - **nft loads nothing at all, not even the floor,** on a VM with an account:
+    sshd stays down, since nothing may run with a token and no guard. The way back
+    is new metadata (rerun bootstrap with a ruleset that loads) or the serial
+    console (`gcloud compute instances add-metadata watchtower-bastion --zone
+    us-east1-b --metadata serial-port-enable=TRUE`, then `gcloud compute
+    connect-to-serial-port watchtower-bastion --zone us-east1-b`, and turn it off
+    again). `journalctl -u nftables -u ssh -u google-startup-scripts` says why.
 
 Every service is a quadlet: `/etc/containers/systemd/<name>.container`
 generates `<name>.service`.
