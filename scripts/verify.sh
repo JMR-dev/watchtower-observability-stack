@@ -126,6 +126,13 @@ active() { # url: ACTIVE members of a dskit ring
 }
 [[ "$(active "http://${node_mesh}:3100/ring")" == "$nodes" ]] || fail "Loki's ingester ring is missing a node"
 [[ "$(active "http://${node_mesh}:8080/ingester/ring")" == "$nodes" ]] || fail "Mimir's ingester ring is missing a node"
+# A query that needs a querier. Mimir says it's ready, and its rings are whole,
+# with no querier connected to its scheduler, and every query then hangs.
+mimir_answers() {
+  edge 8080 -G -H 'X-Scope-OrgID: watchtower-smoke' "https://${domain}:8080/prometheus/api/v1/query" \
+    --data-urlencode 'query=count(up)' | jq -e '.status == "success"'
+}
+retry 12 10 mimir_answers || fail "Mimir's query API doesn't answer"
 under="$(on "$node" podman exec kafka /opt/kafka/bin/kafka-topics.sh \
   "--bootstrap-server=${node_mesh}:9092" --describe --under-replicated-partitions)"
 [[ -z "$under" ]] || fail "Kafka has under-replicated partitions: ${under}"
