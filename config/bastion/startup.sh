@@ -97,6 +97,11 @@ installed() {
 
 mds() { curl -fsS --retry 5 --retry-connrefused --max-time 30 -H 'Metadata-Flavor: Google' "${MDS}/$1"; }
 
+# mds_file <path> <file>: into a file by name. curl starts a named file over on a
+# retry. On stdout, a first try that stalled leaves its part, with the whole after it,
+# and that can still parse.
+mds_file() { curl -fsS --retry 5 --retry-connrefused --max-time 30 -H 'Metadata-Flavor: Google' -o "$2" "${MDS}/$1"; }
+
 # get <url> <out> [curl args...]: the body into out; prints the HTTP status,
 # 000 when nothing answered.
 get() {
@@ -159,7 +164,7 @@ guard_refuses_users() { "$RULESET_TOOL" refuses-users >/dev/null 2>&1; }
 guard() {
   local rc=0 retry=""
   installed nftables || apt_install --no-install-recommends nftables
-  if mds instance/attributes/watchtower-ruleset >"${work}/ruleset.sh" && [[ -s "${work}/ruleset.sh" ]] && bash -n "${work}/ruleset.sh"; then
+  if mds_file instance/attributes/watchtower-ruleset "${work}/ruleset.sh" && [[ -s "${work}/ruleset.sh" ]] && bash -n "${work}/ruleset.sh"; then
     # A subshell, as put dies on a failure: a disk that won't take the new tool
     # leaves the old one whole, and that one can still bring sshd up.
     (put "${work}/ruleset.sh" "$RULESET_TOOL" 0755 root) || true
@@ -170,7 +175,7 @@ guard() {
   # Without its timer no trial starts, so a failure here costs only that.
   "$RULESET_TOOL" setup || warn "could not set up ${RULESET_TOOL}'s units"
   retry="$(mds instance/attributes/watchtower-nftables-retry 2>/dev/null || true)"
-  if mds instance/attributes/watchtower-nftables >"${work}/nftables.conf" && [[ -s "${work}/nftables.conf" ]]; then
+  if mds_file instance/attributes/watchtower-nftables "${work}/nftables.conf" && [[ -s "${work}/nftables.conf" ]]; then
     "$RULESET_TOOL" apply "${work}/nftables.conf" "$retry" || rc=$?
   else
     warn "no watchtower-nftables in metadata; the ruleset on disk stays"
@@ -415,7 +420,8 @@ teardown() {
       systemctl reset-failed "$unit" 2>/dev/null || true
     fi
   done
-  rm -f "$WG_CONF" "$ALLOY_CONFIG"
+  # The temp file too: a reset in the middle of put leaves the key in it.
+  rm -f "$WG_CONF" "${WG_CONF}.tmp" "$ALLOY_CONFIG"
 }
 
 alloy_installed() {
@@ -502,7 +508,7 @@ main() {
     alloy_install
     alloy_changed=1
   fi
-  mds instance/attributes/watchtower-alloy >"${work}/bastion.alloy"
+  mds_file instance/attributes/watchtower-alloy "${work}/bastion.alloy"
   put "${work}/bastion.alloy" "$ALLOY_CONFIG" 0640 alloy && alloy_changed=1
   cat >"${work}/alloy-dropin.conf" <<'UNIT'
 # config/bastion/startup.sh: watchtower's config, with the tunnel only.

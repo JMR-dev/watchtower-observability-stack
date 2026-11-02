@@ -93,8 +93,10 @@ restore_tool() {
   local tmp="${RULESET_TOOL}.tmp"
   tool_whole "$RULESET_TOOL" && return 0
   say "${RULESET_TOOL} is missing or cut short: restoring it from metadata"
+  # A file by name, which curl starts over on a retry: on stdout, a first try that
+  # stalled would leave its part in front of the whole.
   curl -fsS --retry 5 --retry-connrefused --max-time 30 -H 'Metadata-Flavor: Google' \
-    "$TOOL_IN_METADATA" >"$tmp" 2>/dev/null || say "metadata has no watchtower-ruleset to give, or didn't answer"
+    -o "$tmp" "$TOOL_IN_METADATA" 2>/dev/null || say "metadata has no watchtower-ruleset to give, or didn't answer"
   chmod 0755 "$tmp" 2>/dev/null
   if tool_whole "$tmp" && mv -f "$tmp" "$RULESET_TOOL"; then
     say "restored it"

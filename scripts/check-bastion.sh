@@ -451,8 +451,13 @@ TOOL
     installed() { return 0; }
     mds() {
       case "$1" in
-        */watchtower-nftables) [[ "$attribute" == yes ]] && echo ruleset ;;
         */watchtower-nftables-retry) [[ "$attribute" == yes ]] && echo 7 ;;
+        *) return 22 ;;
+      esac
+    }
+    mds_file() {
+      case "$1" in
+        */watchtower-nftables) [[ "$attribute" == yes ]] && echo ruleset >"$2" ;;
         *) return 22 ;;
       esac
     }
@@ -470,6 +475,36 @@ guard_case metadata-answers 0 yes 0 2
 guard_case metadata-silent-keeps-what-is-on-disk 0 no 0 0
 guard_case a-rollback-stops-the-script 75 yes 0 2
 guard_case sshd-may-not-run-stops-the-script 1 yes 1 2
+
+# A retry on stdout leaves a stalled try's part in front of the whole: a named file.
+mds_file_args="$(curl() { printf '%s' "$*"; }; mds_file instance/attributes/a-file /tmp/a-file)"
+if [[ "$mds_file_args" == *"-o /tmp/a-file"* && "$mds_file_args" == *"/instance/attributes/a-file" ]]; then
+  pass "fetch mds_file: into a file by name"
+else
+  flunk "fetch mds_file: curl was asked: ${mds_file_args}"
+fi
+for attribute_file in watchtower-ruleset watchtower-nftables watchtower-alloy; do
+  if grep -qE "mds_file instance/attributes/${attribute_file} " startup.sh; then
+    pass "fetch ${attribute_file}: into a file by name"
+  else
+    flunk "fetch ${attribute_file}: not into a file by name"
+  fi
+done
+
+# teardown takes the temp file a reset in the middle of put leaves, which holds the key.
+teardown_dir="$(mktemp -d)"
+touch "${teardown_dir}/wg.conf" "${teardown_dir}/wg.conf.tmp" "${teardown_dir}/alloy"
+(
+  WG_CONF="${teardown_dir}/wg.conf"
+  ALLOY_CONFIG="${teardown_dir}/alloy"
+  systemctl() { return 1; }
+  teardown
+)
+if [[ -z "$(find "$teardown_dir" -mindepth 1 -print -quit)" ]]; then
+  pass "fetch teardown: takes the config, its temp file and Alloy's"
+else
+  flunk "fetch teardown: leaves: $(ls "$teardown_dir")"
+fi
 
 # --- ping: startup.sh's ping of its Healthchecks.io check ------------------------
 # A stand-in, the shape of a real one and nothing else's.
@@ -756,6 +791,7 @@ sha_marked="$(sha256sum "${rules}/marked" | cut -d' ' -f1)"
 # A bastion that has only ever had the package's ruleset, and no account.
 fresh() {
   rm -rf "$state_dir" "$dropbox"
+  rm -f /run/watchtower-ruleset.word
   rm -f "${stubs}/load-broken" "${stubs}/timer-broken" "${stubs}/install-broken" \
     "${stubs}/nft-broken" "${stubs}/at-load-disk-fails" "${stubs}/at-load-a-login" \
     "${stubs}/sshd-start-broken" "${stubs}/sshd-down" "${stubs}/sshd-runs-its-gate" "${stubs}/ruleset-path"
@@ -769,6 +805,7 @@ fresh() {
 # What a reboot does to all of it: nftables.service loads the file, the units
 # start afresh, /run empties.
 reboot_vm() {
+  rm -f /run/watchtower-ruleset.word
   nft flush ruleset
   [[ ! -e "${stubs}/load-broken" && -f /etc/nftables.conf ]] && nft --file /etc/nftables.conf 2>/dev/null
   rm -rf "$dropbox"
@@ -892,6 +929,26 @@ apply_ruleset a
 check "sshd doesn't stay up: says failed" state_is "$sha_a" failed
 rm -f "${stubs}/sshd-down"
 
+# A word the attribute lost stays lost for the boot, unless a login says it again.
+reboot_vm
+touch "${stubs}/attribute-broken"
+apply_ruleset a
+rm -f "${stubs}/attribute-broken"
+check "a lost word: nothing reached the attribute" test ! -s "${stubs}/attribute"
+check "a lost word: it did say so" reason_is 0
+confirm
+check "a lost word: a login says it again" state_is "$sha_a" confirmed
+# ... only while it's true.
+touch "${stubs}/sshd-down"
+confirm
+refute "a lost word: not with sshd down" state_is "$sha_a" confirmed
+rm -f "${stubs}/sshd-down"
+nft flush ruleset
+confirm
+refute "a lost word: not with the guard off" state_is "$sha_a" confirmed
+nft --file nftables.conf
+reboot_vm
+
 # A login from before the load shows nothing about the new ruleset, even when it
 # was queued behind apply's lock: the load takes its file with it.
 apply_ruleset b
@@ -962,6 +1019,9 @@ check "rejected: stays on the old one" same_file "${rules}/a" /etc/nftables.conf
 check "rejected: the guard is on" guard_on
 check "rejected: sshd runs" called "start ssh.service"
 refute "rejected: no reboot, so no loop" called "--no-block reboot"
+touch "${dropbox}/a-login"
+out="$(tool confirm 2>&1)"; rc=$?
+check "rejected: a login doesn't say confirmed over it" state_is "$sha_b" "rolled back"
 apply_ruleset b 1
 check "retry: tried again" state_is "$sha_b" pending
 fire
@@ -981,6 +1041,9 @@ reboot_vm
 # Files that never go on.
 apply_ruleset broken
 check "broken: refused" state_is "$sha_broken" refused
+touch "${dropbox}/a-login"
+out="$(tool confirm 2>&1)"; rc=$?
+check "broken: a login doesn't say confirmed over it" state_is "$sha_broken" refused
 check "broken: not installed" same_file "${rules}/c" /etc/nftables.conf
 check "broken: nothing pending" no_file "${state_dir}/pending"
 check "broken: sshd runs" called "start ssh.service"
@@ -1462,7 +1525,15 @@ update_trace() {
     log() { :; }
     die() { echo died; exit 1; }
     sleep() { :; }
-    compute() { echo "compute-$2"; [[ "$2" != "$failing" ]]; }
+    compute() {
+      if [[ "$2" == describe ]]; then
+        echo TERMINATED
+        # Not a bare return: in a trap, that gives the status from before the trap.
+        return 0
+      fi
+      echo "compute-$2"
+      [[ "$2" != "$failing" ]]
+    }
     bastion_attribute() {
       case "$1" in
         boot) echo boot-before ;;
@@ -1500,21 +1571,42 @@ update_case "the account refused: the exit trap starts it, and the failure stand
   "wait-after-nothing compute-stop compute-set-service-account compute-start exit 1" no yes set-service-account
 
 # The exit trap alone: the status it came with, whatever the start does.
+# trap_trace <in flight> <start's status> <polls still STOPPING before TERMINATED>
 trap_trace() {
-  local in_flight=$1 start_rc=$2
+  local in_flight=$1 start_rc=$2 stopping=${3:-0}
+  echo 0 >/tmp/trap-polls
   (
     cleanup=/tmp/update-trace-cleanup
     stop_in_flight="$in_flight"
-    compute() { echo "compute-$2"; return "$start_rc"; }
+    sleep() { echo slept; }
+    compute() {
+      if [[ "$2" == describe ]]; then
+        local polls
+        polls="$(($(cat /tmp/trap-polls) + 1))"
+        echo "$polls" >/tmp/trap-polls
+        if [[ "$polls" -gt "$stopping" ]]; then echo TERMINATED; else echo STOPPING; fi
+        # Not a bare return: in a trap, that gives the status from before the trap.
+        return 0
+      fi
+      echo "compute-$2"
+      return "$start_rc"
+    }
     trap bastion_on_exit EXIT
     exit 7
   ) 2>/dev/null
   echo "exit $?"
 }
-trap_is() { [[ "$(trap_trace "$2" "$3" | tr '\n' ' ')" == "$1 " ]]; }
+trap_is() { [[ "$(trap_trace "$2" "$3" "${4:-0}" | tr '\n' ' ')" == "$1 " ]]; }
 check "exit trap: a stop in flight: starts it, keeps the status" trap_is "compute-start exit 7" 1 0
 check "exit trap: the start fails too: keeps the status" trap_is "compute-start exit 7" 1 1
 check "exit trap: nothing in flight: leaves it alone" trap_is "exit 7" "" 0
+check "exit trap: still stopping: waits for that, then starts" trap_is "slept slept compute-start exit 7" 1 0 2
+trap_never="$(trap_trace 1 0 1000 | tr '\n' ' ')"
+if [[ "$trap_never" == "$(printf 'slept %.0s' {1..24})compute-start exit 7 " ]]; then
+  pass "ruleset: exit trap: never stopped: waits 2 minutes at most, then tries anyway"
+else
+  flunk "ruleset: exit trap: never stopped: ${trap_never}"
+fi
 
 # The last word before "Done".
 # final_is <want exit> <status> <boot it says> <ruleset attribute> <login attribute>
@@ -1772,7 +1864,15 @@ cat >"${recovery_bin}/curl" <<'STUB'
 #!/bin/bash
 if [[ "$*" == *instance/attributes/watchtower-ruleset* ]]; then
   [[ -e /stubs/tool-in-metadata ]] || exit 22
-  exec cat /stubs/tool-in-metadata
+  # By name only: on stdout a retry leaves a part in front of the whole.
+  args=("$@")
+  for ((i = 0; i < $#; i++)); do
+    if [[ "${args[i]}" == -o ]]; then
+      cp /stubs/tool-in-metadata "${args[i + 1]}"
+      exit 0
+    fi
+  done
+  exit 99
 fi
 exec /stubs/curl "$@"
 STUB

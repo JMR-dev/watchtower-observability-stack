@@ -35,10 +35,13 @@
 #   3. Records it as pending, on disk, and arms the 10-minute timer. The timer
 #      is enabled and conditional on the record, so a reboot while pending
 #      re-arms it even if the startup script never gets this far.
-#   4. Installs it, stops sshd and ends every login's sessions and processes, so
-#      nothing from before the load can confirm it, and loads it. One that won't
-#      load, or that has no guard after all, rolls back at once. A boot with no
-#      change touches no one's session.
+#   4. Installs it, stops sshd, and has the kernel kill everything under user.slice
+#      and under ssh.service, connections still in pre-auth among them, then anything
+#      else at a login's uid. So no login's process or connection from before the
+#      load is left to confirm it. Then it loads it. One that won't load, or that has
+#      no guard after all, rolls back at once. A boot with no change touches no one's
+#      session. This keeps out what's left of a login, not root: a root process
+#      outside those two groups could confirm, as it could do anything else.
 #
 # A rollback loads the old ruleset into the kernel first, which takes no disk,
 # then puts it back on disk. Only then does it clear the record and reboot: a
@@ -89,6 +92,8 @@ RETRY_SEEN="${STATE}/retry-seen"
 # ruleset.
 LOCK="/run/watchtower-ruleset.lock"
 DROPBOX="/run/watchtower-ruleset"
+# The last thing this boot said of its ruleset.
+LAST_WORD="/run/watchtower-ruleset.word"
 # systemd's own name for a mount there.
 DROPBOX_MOUNT='run-watchtower\x2druleset.mount'
 TOOL="/usr/local/sbin/watchtower-ruleset"
@@ -122,11 +127,13 @@ put_attribute() {
 
 # status <state> <sha>: what came of it. The boot's id tells scripts/bootstrap.sh
 # this boot's from an earlier one's, which the attribute outlasts. Telling it never
-# changes what came of it.
+# changes what came of it. The state is kept for this boot too, whether or not the
+# attribute took it, for cmd_confirm to know what it may say again.
 status() {
   local value
   value="$1 $2 at $(date +%s) boot $(boot_id)"
   say "ruleset ${value}"
+  printf '%s\n' "$1" >"$LAST_WORD" || true
   put_attribute ruleset "$value" || warn "could not put that in the guest attribute"
 }
 
@@ -392,7 +399,12 @@ end_logins() {
   systemctl stop ssh.service || warn "could not stop sshd"
   # Sessions and user managers, with root's shells among them.
   systemctl --no-block stop user.slice || warn "could not end the login sessions"
-  # Whatever is left, at once: a stop waits on each session's timeout.
+  # At once, by the kernel, so no chain of forks can outrun it. Debian's ssh.service
+  # has KillMode=process, so its stop leaves connections still in pre-auth running,
+  # and they can log in afterwards. No cgroup there (not a real boot) is nothing to do.
+  { echo 1 >/sys/fs/cgroup/user.slice/cgroup.kill; } 2>/dev/null || true
+  { echo 1 >/sys/fs/cgroup/system.slice/ssh.service/cgroup.kill; } 2>/dev/null || true
+  # Whatever is left at a login's uid, in any other cgroup.
   for _ in 1 2 3 4 5; do
     found=""
     for proc in /proc/[0-9]*; do
@@ -527,6 +539,23 @@ cmd_apply() {
   [[ -z "$confirmed_sha" ]] || status confirmed "$confirmed_sha"
 }
 
+# A word the attribute lost, at a boot or a confirmation, stays lost for the whole
+# boot unless something says it again. With nothing pending, the file on disk the
+# confirmed one, its guard on and sshd up, confirmed is still true. Never over a
+# rolled back or refused of this boot: that's about the file in metadata, and it has
+# to reach bootstrap.
+say_confirmed_again() {
+  local confirmed
+  confirmed="$(read_state "$CONFIRMED")"
+  [[ -n "$confirmed" && -f "$RULESET" && "$(sha_of "$RULESET")" == "$confirmed" ]] || return 0
+  case "$(read_state "$LAST_WORD")" in
+    "rolled back" | refused) return 0 ;;
+  esac
+  if guard_loaded && sshd_active; then
+    status confirmed "$confirmed"
+  fi
+}
+
 cmd_confirm() {
   local pending
   lock
@@ -547,6 +576,8 @@ cmd_confirm() {
     sync
     systemctl stop "$TIMER" || true
     say_confirmed "$pending"
+  elif [[ -z "$pending" ]]; then
+    say_confirmed_again
   fi
   # By name, never following anything a user left here.
   find "$DROPBOX" -mindepth 1 -delete 2>/dev/null || true

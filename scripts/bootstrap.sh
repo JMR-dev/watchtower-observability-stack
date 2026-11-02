@@ -313,10 +313,17 @@ stop_in_flight=""
 # On any way out, the exit status it came with. A failure between a stop and its
 # start must not leave break glass down, nor be reported as something else.
 bastion_on_exit() {
-  local rc=$?
+  local rc=$? status=""
   rm -f "$cleanup" "$attribute_error"
   if [[ -n "$stop_in_flight" ]]; then
     printf 'warning: %s was stopped by this run: starting it again\n' "$BASTION" >&2
+    # A stop goes on at GCE when gcloud is interrupted, and a start before it's done
+    # is refused, so wait for it: up to 2 minutes, then try anyway.
+    for _ in $(seq 24); do
+      status="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format 'value(status)' 2>/dev/null)" || status=""
+      [[ "$status" != TERMINATED ]] || break
+      sleep 5
+    done
     compute instances start "$BASTION" --zone "$BASTION_ZONE" ||
       printf 'warning: %s did not start, so break glass is down: gcloud compute instances start %s --zone %s --project %s\n' \
         "$BASTION" "$BASTION" "$BASTION_ZONE" "$GCP_PROJECT" >&2
@@ -592,7 +599,7 @@ bastion_ruleset_wait() {
     esac
     sleep 15
   done
-  die "${BASTION} reported nothing final for ruleset ${ruleset_sha:0:12} within 15 minutes, so it still runs as it did: see its serial output, and rerun.$(attribute_refusal)"
+  die "${BASTION} reported nothing final for ruleset ${ruleset_sha:0:12} within 15 minutes, so it still runs as it did: see its serial output. If it only lost its word on the way to the attribute, a login (${confirm_by_hand}) or a reset (gcloud compute instances reset ${BASTION} --zone ${BASTION_ZONE} --project ${GCP_PROJECT}) says it again. Then rerun.$(attribute_refusal)"
 }
 # bastion_login_wait <boot>: returns once a real login has reached that boot during
 # this wait, dispatching the job if none has. The account's boot needs this above

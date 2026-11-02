@@ -219,18 +219,27 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     its own, where nothing can see it: with the metadata server's addresses on `lo`
     and something listening, root must connect and a user must not. Then it keeps
     the old file, records the trial on disk, arms a 10-minute timer, and installs
-    it. It stops sshd and ends every login's sessions and processes, loads it, and
-    starts sshd. A reboot in those 10 minutes starts them again. A boot with no
-    change touches no one's session.
+    it. It stops sshd, has the kernel kill everything under `user.slice` and under
+    `ssh.service`, and kills anything else at a login's uid (1000 and up). Then it
+    loads it and starts sshd. A reboot in those 10 minutes starts them again. A boot
+    with no change touches no one's session.
   - Any login cancels it, no sudo needed: an interactive shell does so by
-    itself, or `touch /run/watchtower-ruleset/confirm`. Nothing from before the
-    load counts, as nothing from before it is left running. Bootstrap dispatches
+    itself, or `touch /run/watchtower-ruleset/confirm`. Nothing of a login's from
+    before the load counts, connections still in pre-auth included, as none of it is
+    left running. Root isn't held to that: a root process outside those two groups
+    could confirm, as it could do anything else. Bootstrap dispatches
     `bastion-confirm.yml` for the branch it's run from, which logs in as the
     deployer over IAP, and waits for `confirmed` in the guest attribute, which also
     means sshd is active. The account goes on only after that, and bootstrap
     reports success only if the boot it ends on has said `confirmed`. A login on a
     full disk isn't lost: it keeps trying every 5 seconds until there's room or the
     rollback fires.
+  - **The word didn't reach the attribute** (a network blip at that moment): the VM
+    is fine, and bootstrap stops with "reported nothing final". A login says
+    `confirmed` again, if that's still true: nothing pending, the file on disk the
+    confirmed one, the guard on and sshd active. So does a boot:
+    `gcloud compute instances reset watchtower-bastion --zone us-east1-b --project
+    watchtower-observe`. Then rerun bootstrap.
   - No login in time: `rolled back`, the old file back, the new one's sha256
     recorded as rejected so the next boot leaves it alone, and a reboot. Bootstrap
     stops there, with the VM on the old ruleset and, if it has no account yet,
