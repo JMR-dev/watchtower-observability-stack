@@ -53,9 +53,9 @@ PING_SECRET="projects/watchtower-observe/secrets/healthchecks-bastion-url"
 STARTUP_TOOL="/usr/local/sbin/watchtower-startup"
 TUNNEL_CIDR="10.8.0.0/24"
 WG_CONF="/etc/wireguard/wg-watchtower.conf"
-ALLOY_VERSION="1.21.2"
-# alloy-1.21.2-1.amd64.deb, from the release's SHA256SUMS.
-ALLOY_DEB_SHA256="80750b6740147ee6d9d860988989dd28bdb048ab0b27b7c02da7876ea5015dad"
+ALLOY_VERSION="1.21.3"
+# alloy-1.21.3-1.amd64.deb, from the release's SHA256SUMS.
+ALLOY_DEB_SHA256="dbbd705de8ab37dec0cbd6361a3fc7e754d6b2854b57ce672a83e6366199ba73"
 ALLOY_CONFIG="/etc/alloy/bastion.alloy"
 ALLOY_DROPIN="/etc/systemd/system/alloy.service.d/watchtower.conf"
 RULESET_TOOL="/usr/local/sbin/watchtower-ruleset"

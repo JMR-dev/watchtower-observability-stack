@@ -1,4 +1,4 @@
-// Grafana Alloy (v1.21.2) on the break-glass bastion, watchtower-bastion: its
+// Grafana Alloy (v1.21.3) on the break-glass bastion, watchtower-bastion: its
 // journal and host metrics into watchtower, as the agent peer `bastion`
 // (docs/client-telemetry.md). scripts/bootstrap.sh puts this file in the
 // VM's metadata (watchtower-alloy); config/bastion/startup.sh installs it as
