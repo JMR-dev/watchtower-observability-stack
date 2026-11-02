@@ -39,7 +39,14 @@ fail() { echo "scrub check: $*" >&2; exit 1; }
 
 work="$(mktemp -d)"
 pid=
-cleanup() { [[ -n "$pid" ]] && kill "$pid" 2>/dev/null; rm -rf "$work"; }
+# wait: Alloy still writing as it exits would make rm fail, and with it the check.
+cleanup() {
+  if [[ -n "$pid" ]]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  rm -rf "$work"
+}
 trap cleanup EXIT
 
 block="$(sed -n '/^\/\/ scrub: begin/,/^\/\/ scrub: end/p' "$config")"
