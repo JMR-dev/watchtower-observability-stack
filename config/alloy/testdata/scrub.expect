@@ -9,6 +9,9 @@ keep:312 systemd[1]: Started User Manager for UID [REDACTED-UID].
 keep:313 systemd[1]: Created slice user-[REDACTED-UID].slice - User Slice.
 keep:314 podman[3120]: stat /run/user/[REDACTED-UID]/containers: no such file
 keep:315 app[1]: uid=[REDACTED-UID] is the shortest that goes
+keep:316 systemd[1]: Started user@[REDACTED-UID].service - User Manager for UID [REDACTED-UID].
+keep:317 systemd[1]: Starting user-runtime-dir@[REDACTED-UID].service - User Runtime Directory /run/user/[REDACTED-UID]...
+keep:318 systemd[1]: user@[REDACTED-UID].service: Consumed 1.234s CPU time.
 keep:320 pushed with [REDACTED-TOKEN] now
 keep:321 called with [REDACTED-TOKEN] now # nosemgrep: generic.secrets.security.detected-google-oauth-access-token.detected-google-oauth-access-token
 keep:322 signed by [REDACTED-TOKEN] now

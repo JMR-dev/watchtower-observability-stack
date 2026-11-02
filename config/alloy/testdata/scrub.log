@@ -271,4 +271,9 @@ same:186 sshd[12]: userauth_pubkey: key type ssh-rsa not in PubkeyAcceptedAlgori
 same:187 sshd[12]: host keys are ssh-ed25519, ssh-rsa and ecdsa-sha2-nistp256
 same:188 app[1]: prefix ghp_ or ya29. or AKIA is no token, nor is AKIAONLYSHORT
 same:189 app[1]: blob eyJmYWtlIjoiZGF0YSJ9 has no dot
+keep:316 systemd[1]: Started user@3141592650.service - User Manager for UID 3141592651.
+keep:317 systemd[1]: Starting user-runtime-dir@3141592652.service - User Runtime Directory /run/user/3141592659...
+keep:318 systemd[1]: user@1000000000.service: Consumed 1.234s CPU time.
+same:190 systemd[1]: Started user-runtime-dir@1000.service - User Runtime Directory /run/user/1000.
+same:191 systemd[1]: user@999999999.service: Consumed 1.234s CPU time.
 same:59 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series

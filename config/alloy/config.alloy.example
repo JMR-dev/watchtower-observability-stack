@@ -327,10 +327,11 @@ loki.process "scrub" {
 	}
 
 	// OS Login uids, which stand for their users and run to 10 digits: pam's
-	// uid= (auid= and euid= hold the same text), systemd's "UID <n>" and its
-	// user-<n>.slice, and /run/user/<n>. root and other small uids stay.
+	// uid= (auid= and euid= hold the same text), systemd's "UID <n>", its
+	// user-<n>.slice, user@<n>.service and user-runtime-dir@<n>.service, and
+	// /run/user/<n>. The unit's name stays. root and other small uids stay.
 	stage.replace {
-		expression = `uid=(\d{10,})\b|\bUID (\d{10,})\b|\buser-(\d{10,})\.slice|/run/user/(\d{10,})\b`
+		expression = `uid=(\d{10,})\b|\bUID (\d{10,})\b|\buser-(\d{10,})\.slice|\buser(?:-runtime-dir)?@(\d{10,})\.service|/run/user/(\d{10,})\b`
 		replace    = "[REDACTED-UID]"
 	}
 
@@ -399,15 +400,24 @@ loki.process "scrub" {
 		drop_counter_reason = "secret"
 	}
 
-	// A login's user manager is user@<uid>.service in the unit label (the
-	// relabel rule above sets it), and an OS Login uid in a label is a stream
-	// per user. stage.replace only touches the line, so this rewrites the label.
-	// Last, so a service's own rules still see the unit as it came.
+	// A login's user manager and runtime directory are user@<uid>.service and
+	// user-runtime-dir@<uid>.service in the unit label (the relabel rule above
+	// sets it), and an OS Login uid in a label is a stream per user. stage.replace
+	// only touches the line, so these rewrite the label. Last, so a service's own
+	// rules still see the unit as it came.
 	stage.match {
 		selector = `{unit=~"user@[0-9]+\\.service"}`
 
 		stage.static_labels {
 			values = {unit = "user@.service"}
+		}
+	}
+
+	stage.match {
+		selector = `{unit=~"user-runtime-dir@[0-9]+\\.service"}`
+
+		stage.static_labels {
+			values = {unit = "user-runtime-dir@.service"}
 		}
 	}
 }
