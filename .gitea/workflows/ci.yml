@@ -206,3 +206,5 @@ jobs:
       # in every shape the sinks send.
       - name: The GCP pull holds back the PII in its fixture, and only that
         run: scripts/check-gcppull-scrub.sh
+      - name: The GCP pull's metrics carry no pod name or NAT address, and its own health comes out
+        run: scripts/check-gcppull-metrics.sh

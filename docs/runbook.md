@@ -465,7 +465,14 @@ Alloy on every node (`roles/gcppull`, unit `gcppull`) pulls the subscription
 `watchtower-logs-pull` in `gitea-496920` and `gitea-ci-781388`, and `watchtower-3`
 lists their Cloud Monitoring series, as `watchtower-gcp-reader@`
 (docs/client-telemetry.md). It writes straight to the nodes' Loki and Mimir, in the
-tenant `jasonmross`. Without the key the role does nothing, so a deploy passes.
+tenant `jasonmross`. Without the key the role does nothing, so a deploy passes. A
+failed install warns (`WARNING: installing Alloy`) and the deploy goes on.
+
+**During an outage of Loki:** everything past Alloy's queue waits in Pub/Sub, for up
+to 7 days. But an entry is acknowledged when `loki.write`'s queue takes it, so a restart
+or a crash during the outage loses the queue, about 10 MiB a node. Loki can also refuse
+an entry more than about an hour behind the newest in its stream, which a long catch-up
+can produce: `loki_write_dropped_entries_total{service="gitea-ci"}` shows it.
 
 **Turning it on,** in this order:
 

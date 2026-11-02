@@ -70,6 +70,23 @@
       vars:
         watchtower_gcp_reader_key_file: "{{ gcppull_test_file.path }}"
 
+# A path under a regular file can't be made by any user. Without the rescue, this
+# fails the play, and so the job.
+- name: With a key, a failed install warns, and the deploy would go on
+  hosts: watchtower-1
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    watchtower_gcp_reader_key_file: "{{ gcppull_test_file.path }}"
+    watchtower_data: "{{ gcppull_test_file.path }}/under-a-file"
+    watchtower_config: "{{ gcppull_test_file.path }}/under-a-file"
+    watchtower_image_tags: {alloy: made-up-for-this-test}
+  tasks:
+    - name: The role, with nowhere to install
+      ansible.builtin.include_role:
+        name: gcppull
+
     - name: Remove the temp file
       ansible.builtin.file:
         path: "{{ gcppull_test_file.path }}"

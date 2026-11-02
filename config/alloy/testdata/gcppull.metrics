@@ -1,0 +1,6 @@
+# Made up, for scripts/check-gcppull-metrics.sh: a page shaped like what
+# prometheus.exporter.gcp serves, with a pod's name and a NAT address in its labels.
+stackdriver_k8s_container_kubernetes_io_container_restart_count{namespace_name="gitea-jobs",container_name="job",pod_name="gitea-job-abc"} 1
+stackdriver_k8s_container_kubernetes_io_container_restart_count{namespace_name="gitea-jobs",container_name="job",pod_name="gitea-job-def"} 2
+stackdriver_nat_gateway_router_googleapis_com_nat_allocated_ports{nat_ip="198.51.100.17",gateway_name="gitea-runners-nat"} 5
+stackdriver_pubsub_subscription_pubsub_googleapis_com_subscription_num_undelivered_messages{subscription_id="watchtower-logs-pull"} 0

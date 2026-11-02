@@ -299,7 +299,8 @@ reads a secret's value or SSHes anywhere.
 
 - `build/alloy/`: our own Alpine image from the release binary (arm64,
   tagged, Trivy-gated), in the images matrices. The binary is linked against
-  glibc, so the image carries `gcompat`.
+  glibc, so the image carries `gcompat`. v1.21.3 here, the newest stable; the
+  contract above still says what the services pin.
 - `ansible/roles/gcppull`: `loki.source.gcplog` pulling both subscriptions
   (`watchtower-logs-pull` in `gitea-496920` and in `gitea-ci-781388`, one a
   project) on all three nodes; `__gcp_*` relabelled to `project`, `resource_type`,
@@ -317,28 +318,70 @@ reads a secret's value or SSHes anywhere.
 As built:
 
 - **Labels:** `service="gitea-ci"`, `host="gcp"` and `env="production"` on all of
-  it. `host` is the one value, not the pulling node, which would split every
-  stream three ways.
+  it but Alloy's own metrics. `host` is the one value, not the pulling node, which
+  would split every stream three ways. Every other label has a known value: anything
+  else is dropped (below).
 - **The shared block is as in the example, byte for byte,** taken from it when the
   config renders, and this pipeline's own rules are a `loki.process "gcp"` of their
   own in front of it, since they rebuild each line.
-- **Default deny.** `use_full_line` brings in the whole log entry, and only the
-  fields each kind names go out, so `remoteIp`, `userAgent`, `referer`, a flow's
-  addresses and a request's query string never ship; a line still holding the raw
-  entry is dropped. A resource and log not in the sinks' filters, a namespace other
-  than the allowed ones and a runner's line that doesn't start `time=` are dropped
-  too. This is in `loki.process`: on this source a relabel rule that drops an entry
-  only strips its labels, and the entry still ships.
+- **Default deny.** A resource and log not in the sinks' filters, or a project,
+  cluster, namespace, container or function other than the allowed ones, is dropped.
+  This is in `loki.process`: on this source a relabel rule that drops an entry only
+  strips its labels, and the entry still ships.
+- **What ships of each kind.** `use_full_line` brings in the whole log entry, and a
+  line still holding it is dropped. Each kind rebuilds its line:
+  - NAT flow: status, gateway, region, VM, protocol, destination port. Never an
+    address.
+  - Autoscaler: the pool's name, counts and Google's reason codes. Never the rest of
+    the payload.
+  - Cloud Run request: status and latency, and the method and path only as `POST` and
+    `/`, which is all the two functions serve. Anyone who can reach the webhook's
+    URL writes those, so anything else is the word `other`.
+  - slog record: `msg`, `level`, `event`, `delivery`, `reason`, `error`, `topic`,
+    `attributes`, `build`, `context`, `sha`, `state`, `status`, `current`, `code` and
+    `message`, the keys `webhook.go` and `status.go` write. A key they add later needs
+    adding in `config.alloy.j2`, or it doesn't ship.
+- **Free text is the exception.** A runner's line, a pod event's message, the slog
+  `reason`, `error` and `attributes`, and a stderr line that isn't JSON (a Go panic)
+  have no fields to name. Only this pipeline's replace rules and the shared block
+  stand behind them. Among what they can still hold: branch names, image references
+  and the repo names a runner logs.
+- **Runner lines:** only `time="<date>…" level=<word> msg=`, one line of it, from the
+  `runner` container. This stops stray output, not a line in that same format, which
+  a runner at `log.level: debug` might write around a job's output, or a job could
+  forge if its output reached this log. What keeps job output out is the runner's
+  `log.level: info` and the sink's filter.
+- **Pod names:** in structured metadata, which nothing scrubs, so only a name with no
+  `@` or dot gets there. Any other entry ships without a pod.
 - **Logins:** `author …` and `pusher … is not allowed`, as well as `head is in …`
   and `delivery for "…"`, which name a fork's owner or another repo.
+- **Clients:** `remoteIp`, `serverIp`, `userAgent` and `referer`, if free text holds
+  them under those names, as a JSON key or `key=value`, and a user agent (`user-agent`,
+  `user_agent`, `User-Agent`, `userAgent`) as a header too.
+- **In an outage:** Alloy acknowledges an entry to Pub/Sub when `loki.write`'s queue
+  takes it, not when Loki does (`pull_target.go`, v1.21.3). So everything past the
+  queue waits in Pub/Sub, for up to 7 days, but a restart or a crash during the outage
+  loses the queue, about 10 MiB a node. With `use_incoming_timestamp`, Loki can also
+  refuse an entry more than about an hour behind the newest in its stream, which a
+  long catch-up can produce.
+- **Its own health:** `prometheus.exporter.self` on every node, `job="alloy"`,
+  `service="gitea-ci"`, `env="production"` and `host` the node's own name. Each drop
+  rule has its own `reason` on `loki_process_dropped_lines_total`.
+- **A failed install warns and the deploy goes on,** since the nodes go one at a time
+  and telemetry from CI must not stop a deploy of watchtower. `watchtower-health`
+  alerts on a unit that stays down.
 - **Metrics:** a pod's name is never a label, so `pod_name` becomes a `pod_slot` of
   1024: dropping it alone would make a namespace's pods one series, whose samples
   Mimir refuses as duplicates. `nat_ip` goes too. Prefixes are named one by one in
-  `config.alloy.j2`, enough for W4's backlog, NAT drops and Cloud Run 5xx.
-- **Fixture test:** `scripts/check-gcppull-scrub.sh` runs the rendered config over
+  `config.alloy.j2`, enough for W4's backlog, NAT drops and Cloud Run 5xx. Samples
+  carry Cloud Monitoring's own times, and the scrape comes every 5 minutes, so an
+  instant query or a short `rate()` can be empty: use windows of 15 minutes or more.
+- **Fixture tests:** `scripts/check-gcppull-scrub.sh` runs the rendered config over
   `config/alloy/testdata/gcppull.log`, made-up entries in every shape and some that
   must not ship, through the real source in push mode. `<fixture>.expect` holds
   everything that may come out, labels and metadata too.
+  `scripts/check-gcppull-metrics.sh` does the same for the metrics half, over
+  `gcppull.metrics`.
 - **Owner's steps,** in order: gitea's change first (`make ci-up`, merge, its infra
   deploy; the runbook's "Gitea CI's logs and metrics"), then `scripts/bootstrap.sh`
   from this branch, `scripts/rotate-gcp-key.sh reader`, and a deploy.
@@ -429,20 +472,22 @@ host `H`:
 {service="silverbullet"} |~ `"uri":"/([^.<"]|\.(fs|revisions|proxy)/[^<"])|\[uri \\"/([^.<\\]|\.(fs|revisions|proxy)/[^<\\])|[?&]from=[^<]|Proxying to [^<]`
 {service="gitea-ci"} |~ "(?:^|[^0-9])(?:\\d{1,3}\\.){3}\\d{1,3}(?:$|[^0-9])"
 {service="gitea-ci"} |~ `[\p{L}\p{N}._%+'!#$*^~-]+(?:@|%40|%2540|\\u0040)[\p{L}\p{N}.-]+\.[A-Za-z]{2,}`
-{service="gitea-ci"} |~ `(?i)(remote_?ip|server_?ip|user_?agent|referr?er)\\*"?\s*[:=]\s*\\*"?[^\[\s\\"]`
+{service="gitea-ci"} |~ `(?i)(remote_?ip|server_?ip|user[-_ ]?agent|referr?er)\\*"?\s*[:=]\s*\\*"?[^\[\s\\"]`
 {service="gitea-ci"} |~ `\b(author|pusher) [^\[]+ is not allowed|\bhead is in [^\[]|\bdelivery for \\*"[^\[]`
 {service="gitea-ci"} |~ `"(logName|insertId|httpRequest|protoPayload)"\s*:`
 {service="gitea-ci"} |= "cloudaudit"
 {service="gitea-ci"} |= "eyJ"
 {service="gitea-ci", resource_type="k8s_container", namespace!="gitea-runner"}
-{service="gitea-ci", resource_type="k8s_container"} !~ `^time=`
+{service="gitea-ci", resource_type="k8s_container", container!="runner"}
+{service="gitea-ci", resource_type="k8s_container"} !~ `^time="\d{4}-[^"]+" level=\w+ msg=`
 {service="gitea-ci", resource_type="k8s_pod", namespace!~"gitea-jobs|gitea-jobs-arm64"}
+{service="gitea-ci", project!~"gitea-496920|gitea-ci-781388"}
 {service="gitea-ci", pod=~".+"}
 ```
 
 The last query looks in stream labels only, and `pod` belongs in structured
-metadata, so it stays empty. In Mimir, `count({service="gitea-ci", pod_name!=""})`
-and `count({service="gitea-ci", nat_ip!=""})` are empty too.
+metadata, so it stays empty. In Mimir, `count(count_over_time({service="gitea-ci",
+pod_name!=""}[15m]))` and the same with `nat_ip!=""` are empty too.
 
 The email query skips a line that names an instantiated systemd unit
 (`wg-quick@wg-watchtower.service`), so an address on the same line as one goes
@@ -465,7 +510,13 @@ Gitea CI: a pull request somewhere shows in `{service="gitea-ci",
 namespace="gitea-runner"}` within about a minute; the subscription backlog
 stays near 0; `{service="gitea-ci"} |= "cloudaudit"` is empty. It has no host of
 its own to check: `{service="gitea-ci"}` by `project` shows both projects' logs,
-`stackdriver_pubsub_subscription_pubsub_googleapis_com_subscription_num_undelivered_messages`
-one series a project, and `journalctl -u gcppull` on any node why not.
+`max_over_time(stackdriver_pubsub_subscription_pubsub_googleapis_com_subscription_num_undelivered_messages{service="gitea-ci"}[15m])`
+one series a project, and `journalctl -u gcppull` on any node why not. Cloud
+Monitoring's series come every 5 minutes with its own timestamps, so query them over
+15 minutes or more: an instant query or a short `rate()` can be empty. Alloy's own
+metrics are ordinary, under `job="alloy"` and each node's name:
+`sum by (reason) (rate(loki_process_dropped_lines_total{service="gitea-ci"}[15m]))`
+says what is being dropped and why, and
+`rate(loki_write_dropped_entries_total{service="gitea-ci"}[15m])` stays 0.
 
 Traces: a Tempo search finds nothing, so nothing exports OTLP by mistake.

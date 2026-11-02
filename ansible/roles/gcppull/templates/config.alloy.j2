@@ -1,4 +1,4 @@
-// Managed by Ansible (roles/gcppull). Grafana Alloy (v1.21.2) on {{ inventory_hostname }}:
+// Managed by Ansible (roles/gcppull). Grafana Alloy (v1.21.3) on {{ inventory_hostname }}:
 // Gitea CI's logs and metrics, pulled from GCP as watchtower-gcp-reader
 // (docs/client-telemetry.md). The key is a file, in GOOGLE_APPLICATION_CREDENTIALS.
 //
@@ -69,9 +69,12 @@ loki.relabel "gcp" {
 		target_label  = "cloud_run_service"
 	}
 
-	// Moved to structured metadata below: a pod's name is never a label.
+	// Moved to structured metadata below: a pod's name is never a label. Nothing
+	// scrubs structured metadata, so only a name of the shape our pods have gets
+	// this far: no @, and no dot, so no address of either kind. Any other has no pod.
 	rule {
 		source_labels = ["__gcp_resource_labels_pod_name"]
+		regex         = "([a-z0-9][-a-z0-9]{0,252})"
 		target_label  = "pod"
 	}
 
@@ -83,12 +86,21 @@ loki.relabel "gcp" {
 		target_label  = "gcp_log"
 		replacement   = "$1;$2"
 	}
+
+	// The cluster, the same way: it ships in no label.
+	rule {
+		source_labels = ["__gcp_resource_labels_cluster_name"]
+		target_label  = "gcp_cluster"
+	}
 }
 
-// This pipeline's own rules. Default deny: a resource and log the sink doesn't name,
-// or a namespace it doesn't, is dropped whatever the filter in the gitea repo lets
-// through, and of what stays only the fields named here ship, so a field GCP adds
-// later doesn't. Each kind of entry rebuilds its line in gcp_out.
+// This pipeline's own rules. Default deny: a resource, log, project, cluster, namespace,
+// container or function the sinks don't name is dropped whatever the filters in the
+// gitea repo let through, so every label left has a known value. Of what stays, each
+// kind rebuilds its line in gcp_out from fields named here, so a field GCP or a function
+// adds later doesn't ship. The one exception is free text: a runner's line, a pod event's
+// message, and a stderr line that isn't JSON (a Go panic), which only the rules at the
+// end of this block and the shared block stand behind.
 loki.process "gcp" {
 	forward_to = [loki.process.scrub.receiver]
 
@@ -101,13 +113,33 @@ loki.process "gcp" {
 		drop_counter_reason = "gcp_log"
 	}
 
+	stage.match {
+		selector            = `{service="gitea-ci", project!~"{{ gcppull_sources | map(attribute='project') | join('|') }}"}`
+		action              = "drop"
+		drop_counter_reason = "gcp_project"
+	}
+{% raw %}
+	// All three Kubernetes kinds come from the one cluster.
+	stage.match {
+		selector            = `{service="gitea-ci", resource_type=~"k8s_container|k8s_pod|k8s_cluster", gcp_cluster!="gitea-runners"}`
+		action              = "drop"
+		drop_counter_reason = "gcp_cluster"
+	}
+
 	// Containers in the runners' namespace only: anything from a job's namespace is
-	// whatever that job printed. Pod events from the jobs' namespaces only. Nothing
-	// else has a namespace at all.
+	// whatever that job printed. The runner's own container only: not its dockerd.
+	// Pod events from the jobs' namespaces only. Nothing else has a namespace or a
+	// container at all.
 	stage.match {
 		selector            = `{service="gitea-ci", resource_type="k8s_container", namespace!="gitea-runner"}`
 		action              = "drop"
 		drop_counter_reason = "gcp_namespace"
+	}
+
+	stage.match {
+		selector            = `{service="gitea-ci", resource_type="k8s_container", container!="runner"}`
+		action              = "drop"
+		drop_counter_reason = "gcp_container"
 	}
 
 	stage.match {
@@ -123,6 +155,12 @@ loki.process "gcp" {
 	}
 
 	stage.match {
+		selector            = `{service="gitea-ci", resource_type!="k8s_container", container!=""}`
+		action              = "drop"
+		drop_counter_reason = "gcp_container"
+	}
+
+	stage.match {
 		selector            = `{service="gitea-ci", resource_type="cloud_run_revision", cloud_run_service!~"gitea-webhook|build-status"}`
 		action              = "drop"
 		drop_counter_reason = "gcp_service"
@@ -130,58 +168,84 @@ loki.process "gcp" {
 
 	// Every field that can ship, and nothing else: not httpRequest.remoteIp,
 	// userAgent, referer or serverIp, not a flow's addresses, not the entry's own
-	// labels and ids.
+	// labels and ids. The slog keys are the ones cicd/relay's webhook.go and status.go
+	// write in the gitea repo; a key they add later needs adding here.
 	stage.json {
 		expressions = {
-			gcp_text          = "textPayload",
-			gcp_payload       = "jsonPayload",
-			gcp_severity      = "severity",
-			gcp_slog_level    = "jsonPayload.level",
-			gcp_event_type    = "jsonPayload.type",
-			gcp_event_reason  = "jsonPayload.reason",
-			gcp_event_message = "jsonPayload.message",
-			gcp_nat_status    = "jsonPayload.allocation_status",
-			gcp_nat_gateway   = "jsonPayload.gateway_identifiers.gateway_name",
-			gcp_nat_region    = "jsonPayload.gateway_identifiers.region",
-			gcp_nat_vm        = "jsonPayload.endpoint.vm_name",
-			gcp_nat_protocol  = "jsonPayload.connection.protocol",
-			gcp_nat_dest_port = "jsonPayload.connection.dest_port",
-			gcp_http_method   = "httpRequest.requestMethod",
-			gcp_http_status   = "httpRequest.status",
-			gcp_http_url      = "httpRequest.requestUrl",
-			gcp_http_latency  = "httpRequest.latency",
+			gcp_text            = "textPayload",
+			gcp_severity        = "severity",
+			gcp_slog_msg        = "jsonPayload.msg",
+			gcp_slog_level      = "jsonPayload.level",
+			gcp_slog_event      = "jsonPayload.event",
+			gcp_slog_delivery   = "jsonPayload.delivery",
+			gcp_slog_reason     = "jsonPayload.reason",
+			gcp_slog_error      = "jsonPayload.error",
+			gcp_slog_topic      = "jsonPayload.topic",
+			gcp_slog_attributes = "jsonPayload.attributes",
+			gcp_slog_build      = "jsonPayload.build",
+			gcp_slog_context    = "jsonPayload.context",
+			gcp_slog_sha        = "jsonPayload.sha",
+			gcp_slog_state      = "jsonPayload.state",
+			gcp_slog_status     = "jsonPayload.status",
+			gcp_slog_current    = "jsonPayload.current",
+			gcp_slog_code       = "jsonPayload.code",
+			gcp_slog_message    = "jsonPayload.message",
+			gcp_event_type      = "jsonPayload.type",
+			gcp_event_reason    = "jsonPayload.reason",
+			gcp_event_message   = "jsonPayload.message",
+			gcp_scale_up_migs   = "jsonPayload.decision.scaleUp.increasedMigs[].mig.name",
+			gcp_scale_up_nodes  = "jsonPayload.decision.scaleUp.increasedMigs[].requestedNodes",
+			gcp_scale_up_pods   = "jsonPayload.decision.scaleUp.triggeringPodsTotalCount",
+			gcp_scale_down      = "jsonPayload.decision.scaleDown.nodesToBeRemoved[].node.name",
+			gcp_no_up_reason    = "jsonPayload.noDecisionStatus.noScaleUp.reason.messageId",
+			gcp_no_up_pods      = "jsonPayload.noDecisionStatus.noScaleUp.unhandledPodGroupsTotalCount",
+			gcp_no_down_reason  = "jsonPayload.noDecisionStatus.noScaleDown.reason.messageId",
+			gcp_no_down_nodes   = "jsonPayload.noDecisionStatus.noScaleDown.nodesTotalCount",
+			gcp_scale_errors    = "jsonPayload.resultInfo.results[].errorMsg.messageId",
+			gcp_nat_status      = "jsonPayload.allocation_status",
+			gcp_nat_gateway     = "jsonPayload.gateway_identifiers.gateway_name",
+			gcp_nat_region      = "jsonPayload.gateway_identifiers.region",
+			gcp_nat_vm          = "jsonPayload.endpoint.vm_name",
+			gcp_nat_protocol    = "jsonPayload.connection.protocol",
+			gcp_nat_dest_port   = "jsonPayload.connection.dest_port",
+			gcp_http_method     = "httpRequest.requestMethod",
+			gcp_http_status     = "httpRequest.status",
+			gcp_http_url        = "httpRequest.requestUrl",
+			gcp_http_latency    = "httpRequest.latency",
 		}
 		drop_malformed = true
 	}
 
-	// A runner's own log, and its dockerd's: time=… level=… msg=….
+	// A runner's own log: time=… level=… msg=…. Without the newline Cloud Logging
+	// may leave on the end; one anywhere else is refused below.
 	stage.match {
 		selector = `{gcp_log=~"k8s_container;.*"}`
 
 		stage.template {
 			source   = "gcp_out"
-			template = `{{ '{{' }} .gcp_text {{ '}}' }}`
+			template = `{{ trimSuffix "\n" (or .gcp_text "") }}`
 		}
 	}
 
-	// A job pod started, was evicted, or failed to schedule. What it printed is
-	// not in an event.
+	// A job pod started, was evicted, or failed to schedule. What it printed isn't in
+	// an event, but for a failed probe's output, which is free text like the rest.
 	stage.match {
 		selector = `{gcp_log="k8s_pod;events"}`
 
 		stage.template {
 			source   = "gcp_out"
-			template = `{{ '{{' }} if .gcp_event_message {{ '}}' }}{{ '{{' }} .gcp_event_type {{ '}}' }} {{ '{{' }} .gcp_event_reason {{ '}}' }}: {{ '{{' }} .gcp_event_message {{ '}}' }}{{ '{{' }} end {{ '}}' }}`
+			template = `{{ if .gcp_event_message }}{{ or .gcp_event_type "" }} {{ or .gcp_event_reason "" }}: {{ .gcp_event_message }}{{ end }}`
 		}
 	}
 
-	// Why a pool did or did not scale: pod and group names, no person.
+	// Why a pool did or did not scale: its name, counts and Google's own reason
+	// codes. Never the rest of the payload, which names pods and controllers.
 	stage.match {
 		selector = `{resource_type="k8s_cluster"}`
 
 		stage.template {
 			source   = "gcp_out"
-			template = `{{ '{{' }} if .gcp_payload {{ '}}' }}{{ '{{' }} .gcp_payload {{ '}}' }}{{ '{{' }} end {{ '}}' }}`
+			template = `{{ with .gcp_scale_up_migs }}scale_up migs={{ . }} nodes={{ or $.gcp_scale_up_nodes "" }} pods={{ or $.gcp_scale_up_pods "" }}{{ else }}{{ with .gcp_scale_down }}scale_down nodes={{ . }}{{ else }}{{ with .gcp_no_up_reason }}no_scale_up reason={{ . }} pods={{ or $.gcp_no_up_pods "" }}{{ else }}{{ with .gcp_no_down_reason }}no_scale_down reason={{ . }} nodes={{ or $.gcp_no_down_nodes "" }}{{ else }}{{ with .gcp_scale_errors }}scale_result errors={{ . }}{{ end }}{{ end }}{{ end }}{{ end }}{{ end }}`
 		}
 	}
 
@@ -191,11 +255,14 @@ loki.process "gcp" {
 
 		stage.template {
 			source   = "gcp_out"
-			template = `{{ '{{' }} if .gcp_nat_status {{ '}}' }}allocation_status={{ '{{' }} .gcp_nat_status {{ '}}' }} gateway={{ '{{' }} .gcp_nat_gateway {{ '}}' }} region={{ '{{' }} .gcp_nat_region {{ '}}' }} vm={{ '{{' }} .gcp_nat_vm {{ '}}' }} protocol={{ '{{' }} .gcp_nat_protocol {{ '}}' }} dest_port={{ '{{' }} .gcp_nat_dest_port {{ '}}' }}{{ '{{' }} end {{ '}}' }}`
+			template = `{{ if .gcp_nat_status }}allocation_status={{ .gcp_nat_status }} gateway={{ or .gcp_nat_gateway "" }} region={{ or .gcp_nat_region "" }} vm={{ or .gcp_nat_vm "" }} protocol={{ or .gcp_nat_protocol "" }} dest_port={{ or .gcp_nat_dest_port "" }}{{ end }}`
 		}
 	}
 
-	// A Cloud Run request: the path alone from its URL, so no query string.
+	// A Cloud Run request. Anyone who can reach gitea-webhook's URL writes its method
+	// and path, so those ship only as what the functions really serve: POST to their
+	// URL's root (the webhook's own URL, and the push subscription's), and "other" for
+	// the rest. Not their text, and never a query string.
 	stage.match {
 		selector = `{gcp_log="cloud_run_revision;run.googleapis.com%2Frequests"}`
 
@@ -206,17 +273,18 @@ loki.process "gcp" {
 
 		stage.template {
 			source   = "gcp_out"
-			template = `{{ '{{' }} if .gcp_http_status {{ '}}' }}method={{ '{{' }} .gcp_http_method {{ '}}' }} status={{ '{{' }} .gcp_http_status {{ '}}' }} path={{ '{{' }} .gcp_http_path {{ '}}' }} latency={{ '{{' }} .gcp_http_latency {{ '}}' }}{{ '{{' }} end {{ '}}' }}`
+			template = `{{ if .gcp_http_status }}method={{ if eq (or .gcp_http_method "") "POST" }}POST{{ else }}other{{ end }} status={{ if regexMatch "^[1-5][0-9][0-9]$" .gcp_http_status }}{{ .gcp_http_status }}{{ else }}other{{ end }} path={{ if eq (or .gcp_http_path "") "/" }}/{{ else }}other{{ end }} latency={{ if regexMatch "^[0-9.]+s$" (or .gcp_http_latency "") }}{{ .gcp_http_latency }}{{ else }}other{{ end }}{{ end }}`
 		}
 	}
 
-	// A function's slog record, or a line that isn't JSON (a Go panic).
+	// A function's slog record, as logfmt from the named keys, or a line that isn't
+	// JSON (a Go panic), which has no fields to name.
 	stage.match {
 		selector = `{gcp_log="cloud_run_revision;run.googleapis.com%2Fstderr"}`
 
 		stage.template {
 			source   = "gcp_out"
-			template = `{{ '{{' }} or .gcp_payload .gcp_text "" {{ '}}' }}`
+			template = `{{ if .gcp_text }}{{ .gcp_text }}{{ else }}{{ with .gcp_slog_msg }}msg={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_level }} level={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_event }} event={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_delivery }} delivery={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_reason }} reason={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_error }} error={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_topic }} topic={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_attributes }} attributes={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_build }} build={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_context }} context={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_sha }} sha={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_state }} state={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_status }} status={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_current }} current={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_code }} code={{ printf "%q" . }}{{ end }}{{ with .gcp_slog_message }} message={{ printf "%q" . }}{{ end }}{{ end }}`
 		}
 	}
 
@@ -224,11 +292,20 @@ loki.process "gcp" {
 		source = "gcp_out"
 	}
 
-	// A runner's line that isn't time=… could be anything: docs/runners.md in the
-	// gitea repo says a job's output doesn't reach the runner's log at info, and this
-	// holds if that ever changes.
+	// Only a line in the runner's own format, one line of it. This stops stray output:
+	// a build's plain text, a stack trace, anything several lines long. It can't stop
+	// a line in that same format, which is what a runner at log.level debug might write
+	// around a job's output, or a job could forge if its output ever reached this log.
+	// What keeps job output out is the runner's log.level info and the sink's filter
+	// (docs/runners.md in the gitea repo); this only limits the damage if those change.
 	stage.match {
-		selector            = `{gcp_log=~"k8s_container;.*"} !~ "^time="`
+		selector            = `{gcp_log=~"k8s_container;.*"} !~ "^time=\"\\d{4}-[^\"]+\" level=\\w+ msg="`
+		action              = "drop"
+		drop_counter_reason = "gcp_not_runner"
+	}
+
+	stage.match {
+		selector            = `{gcp_log=~"k8s_container;.*"} |~ "[\\r\\n]"`
 		action              = "drop"
 		drop_counter_reason = "gcp_not_runner"
 	}
@@ -240,8 +317,14 @@ loki.process "gcp" {
 		drop_counter_reason = "gcp_shape"
 	}
 
-	stage.logfmt {
-		mapping = {gcp_logfmt_level = "level"}
+	// The runner's level, on its lines alone: other lines hold text that could look
+	// like one.
+	stage.match {
+		selector = `{gcp_log=~"k8s_container;.*"}`
+
+		stage.logfmt {
+			mapping = {gcp_logfmt_level = "level"}
+		}
 	}
 
 	// A login. The webhook names the author or pusher it refuses, and the owner of a
@@ -261,15 +344,21 @@ loki.process "gcp" {
 		replace    = "[REDACTED-USER]"
 	}
 
-	// A client's address and user agent, if a line ever holds them under their own
-	// names: the requests above never ship these fields.
+	// A client's address and user agent, if free text ever holds them under their own
+	// names: as a JSON key, as key=value, and an agent as a header, to the end of the
+	// line or its quote. The requests above never ship these fields.
 	stage.replace {
-		expression = `(?i)\\*"(?:remote_?ip|server_?ip|user_?agent|referr?er)\\*"\s*:\s*\\*"((?:[^"\\]|\\[^"])*)\\*"`
+		expression = `(?i)\\*"(?:remote_?ip|server_?ip|user[-_ ]?agent|referr?er)\\*"\s*:\s*\\*"((?:[^"\\]|\\[^"])*)\\*"`
 		replace    = "[REDACTED-CLIENT]"
 	}
 
 	stage.replace {
-		expression = `(?i)\b(?:remote_?ip|server_?ip|user_?agent|referr?er)=("[^"]*"|\S+)`
+		expression = `(?i)\b(?:remote_?ip|server_?ip|user[-_ ]?agent|referr?er)=(\\"(?:[^"\\]|\\[^"])*\\"|"[^"]*"|[^\s"\\]+)`
+		replace    = "[REDACTED-CLIENT]"
+	}
+
+	stage.replace {
+		expression = `(?i)\buser[-_ ]?agent\s*:\s*([^"\\\r\n]+)`
 		replace    = "[REDACTED-CLIENT]"
 	}
 
@@ -277,7 +366,7 @@ loki.process "gcp" {
 	// isn't a word for a label.
 	stage.template {
 		source   = "gcp_level"
-		template = `{{ '{{' }} $l := ToLower (or .gcp_logfmt_level .gcp_slog_level .gcp_severity "") {{ '}}' }}{{ '{{' }} if regexMatch "^(?:debug|info|notice|warn|warning|error|critical|alert|emergency|fatal|panic|default)$" $l {{ '}}' }}{{ '{{' }} $l {{ '}}' }}{{ '{{' }} else {{ '}}' }}unknown{{ '{{' }} end {{ '}}' }}`
+		template = `{{ $l := ToLower (or .gcp_logfmt_level .gcp_slog_level .gcp_severity "") }}{{ if regexMatch "^(?:debug|info|notice|warn|warning|error|critical|alert|emergency|fatal|panic|default)$" $l }}{{ $l }}{{ else }}unknown{{ end }}`
 	}
 
 	stage.labels {
@@ -289,33 +378,66 @@ loki.process "gcp" {
 	}
 
 	stage.label_drop {
-		values = ["gcp_log"]
+		values = ["gcp_log", "gcp_cluster"]
 	}
 }
-
+{% endraw +%}
 {{ gcppull_scrub_block }}
 
 // Straight to the nodes' own Loki, over the mesh, not through Caddy.
+//
+// During an outage: Alloy acknowledges an entry to Pub/Sub when this component's queue
+// takes it, not when Loki does (pull_target.go, v1.21.3). So everything past the queue
+// waits in Pub/Sub, for up to 7 days, but a restart or a crash during the outage loses
+// the queue, about 10 MiB a node. And with use_incoming_timestamp, Loki can refuse an
+// entry more than about an hour behind the newest in its stream, which a long catch-up
+// can produce.
 loki.write "watchtower" {
 	endpoint {
 		url     = "http://loki.internal:{{ watchtower_ports.loki.http }}/loki/api/v1/push"
 		headers = {"X-Scope-OrgID" = "{{ watchtower_agent_tenant }}"}
 
-		// Keep retrying through a Loki restart (about a day at most); what isn't
-		// acknowledged waits in Pub/Sub meanwhile.
+		// Keep retrying through a Loki restart (about a day at most).
 		max_backoff_period  = "5m"
 		max_backoff_retries = 300
 		retry_on_http_429   = true
 	}
 }
-{% if inventory_hostname == gcppull_metrics_host %}
 
 // ============================================================
 // METRICS  ──► Mimir
 // ============================================================
 
-// This node alone: two would write the same series. Each prefix is only what's
-// asked of it, and each filter holds it to Gitea CI's own.
+// This Alloy's own health, from every node, under the node's name: what it dropped and
+// why (loki_process_dropped_lines_total), what it couldn't write
+// (loki_write_dropped_entries_total), and what it pulled.
+prometheus.exporter.self "alloy" { }
+
+discovery.relabel "alloy" {
+	targets = prometheus.exporter.self.alloy.targets
+
+	rule {
+		target_label = "job"
+		replacement  = "alloy"
+	}
+
+	rule {
+		target_label = "host"
+		replacement  = "{{ inventory_hostname }}"
+	}
+}
+
+prometheus.scrape "alloy" {
+	targets         = discovery.relabel.alloy.output
+	forward_to      = [prometheus.remote_write.watchtower.receiver]
+	scrape_interval = "60s"
+}
+{% if inventory_hostname == gcppull_metrics_host %}
+
+// Cloud Monitoring, from this node alone: two would write the same series. Each prefix
+// is only what's asked of it, and each filter holds it to Gitea CI's own. Samples carry
+// Cloud Monitoring's own times, and a scrape comes every 5 minutes, so an instant query
+// or a short rate() can come back empty: query over 15 minutes or more.
 prometheus.exporter.gcp "gitea_ci" {
 	project_ids = [{% for source in gcppull_sources %}"{{ source.project }}"{{ ", " if not loop.last }}{% endfor %}]
 
@@ -335,9 +457,9 @@ prometheus.exporter.gcp "gitea_ci" {
 
 	extra_filters = [
 		"kubernetes.io:resource.labels.cluster_name=\"gitea-runners\"",
-		"kubernetes.io/container:resource.labels.namespace_name=one_of(\"gitea-runner\",\"gitea-jobs\",\"gitea-jobs-arm64\")",
+		"kubernetes.io/container:resource.labels.namespace_name=monitoring.regex.full_match(\"gitea-runner|gitea-jobs|gitea-jobs-arm64\")",
 		"pubsub.googleapis.com/subscription:resource.labels.subscription_id=\"{{ gcppull_subscription }}\"",
-		"run.googleapis.com:resource.labels.service_name=one_of(\"gitea-webhook\",\"build-status\")",
+		"run.googleapis.com:resource.labels.service_name=monitoring.regex.full_match(\"gitea-webhook|build-status\")",
 	]
 
 	// Cloud Monitoring can take minutes to show a sample, longer than a scrape.
@@ -350,6 +472,11 @@ discovery.relabel "gcp" {
 	rule {
 		target_label = "job"
 		replacement  = "integrations/gcp"
+	}
+
+	rule {
+		target_label = "host"
+		replacement  = "gcp"
 	}
 }
 
@@ -386,12 +513,12 @@ prometheus.relabel "gcp" {
 		action = "labeldrop"
 	}
 }
+{% endif %}
 
 prometheus.remote_write "watchtower" {
 	endpoint {
 		url     = "http://mimir.internal:{{ watchtower_ports.mimir.http }}/api/v1/push"
 		headers = {"X-Scope-OrgID" = "{{ watchtower_agent_tenant }}"}
 	}
-	external_labels = {service = "gitea-ci", host = "gcp", env = "production"}
+	external_labels = {service = "gitea-ci", env = "production"}
 }
-{% endif %}

@@ -17,9 +17,9 @@ ARG ALPINE=docker.io/library/alpine:3.24
 
 FROM ${ALPINE} AS download
 ARG TARGETARCH
-ARG ALLOY_VERSION=1.21.2
-ARG ALLOY_SHA256_ARM64=3722a7494bce5ff100c18f0051e63799ad9e89546ca75022cb1dc8dc676af401
-ARG ALLOY_SHA256_AMD64=1eadb46a0640127184250173acd9b4145e4d590680db37ffe66fa8afd07f04cf
+ARG ALLOY_VERSION=1.21.3
+ARG ALLOY_SHA256_ARM64=ca2f383cc60491877b21aef50c54af6a198f6c861c2c4b80f41ec49ad73b1b93
+ARG ALLOY_SHA256_AMD64=50d23af2d0f98c00beac6ce9a365693e60f87fb76b6cad6fe1d161e80588af6d
 
 RUN apk add --no-cache curl unzip
 
@@ -35,7 +35,7 @@ RUN case "${TARGETARCH}" in \
  && install -m 0755 "alloy-linux-${TARGETARCH}" /usr/local/bin/alloy
 
 FROM ${ALPINE}
-LABEL org.opencontainers.image.version="1.21.2"
+LABEL org.opencontainers.image.version="1.21.3"
 LABEL watchtower.image.revision="1"
 LABEL org.opencontainers.image.source="https://github.com/grafana/alloy"
 

@@ -19,7 +19,7 @@
 # not a container); the Caddyfile, patroni.yml and the GCP pull's Alloy config
 # where their images are built (scripts/build-image.sh): only our own images
 # carry the modules and binaries they need. CI's alloy job also runs that
-# config over a fixture (scripts/check-gcppull-scrub.sh).
+# config over fixtures (scripts/check-gcppull-scrub.sh, check-gcppull-metrics.sh).
 #
 # Images are the same pinned digests the hosts run (group_vars/all/images.yml).
 # Files go into each container with `cp`, not a bind mount: on the Gitea

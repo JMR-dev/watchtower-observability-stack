@@ -1,0 +1,4 @@
+stackdriver_k8s_container_kubernetes_io_container_restart_count{container_name="job",host="gcp",job="integrations/gcp",namespace_name="gitea-jobs",pod_slot="204"}
+stackdriver_k8s_container_kubernetes_io_container_restart_count{container_name="job",host="gcp",job="integrations/gcp",namespace_name="gitea-jobs",pod_slot="804"}
+stackdriver_nat_gateway_router_googleapis_com_nat_allocated_ports{gateway_name="gitea-runners-nat",host="gcp",job="integrations/gcp"}
+stackdriver_pubsub_subscription_pubsub_googleapis_com_subscription_num_undelivered_messages{host="gcp",job="integrations/gcp",subscription_id="watchtower-logs-pull"}

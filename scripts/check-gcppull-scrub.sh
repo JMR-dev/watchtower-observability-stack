@@ -10,11 +10,12 @@
 #    config/alloy/testdata/gcppull.log)
 #
 # Like scripts/check-alloy-scrub.sh, with these differences: the source can't read a
-# file, and what it does with __gcp_* is part of what is tested, so the config runs
-# whole, with these changes only:
+# file, and what it does with __gcp_* is part of what is tested, so the logs half of
+# the config runs whole, with these changes only:
 #   - the first source pulls nothing: it takes Pub/Sub push messages on loopback,
 #     with the labels and settings the config gave it; the second is left out;
-#   - logs go to loki.echo, not Loki.
+#   - logs go to loki.echo, not Loki;
+#   - the metrics half is left out (scripts/check-gcppull-metrics.sh tests that).
 #
 # The fixture holds one LogEntry JSON a line, and # comments. Each goes in as a
 # Pub/Sub message.
@@ -26,7 +27,10 @@
 #                                   match, in a label, in metadata or in the line.
 #
 # Also checks: the shared scrub block is byte for byte the example's; both projects
-# are pulled; and the Cloud Monitoring exporter is on one node's config only.
+# are pulled; the Cloud Monitoring exporter is on one node's config only; and every
+# drop rule has a counter of its own, which watchtower sees through prometheus.exporter.self.
+# GCPPULL_SKIP_COUNTERS=1 leaves out that last one, for a fixture that doesn't
+# exercise every rule.
 #
 # SCRUB_SHOW=1 prints what came out. Needs alloy, jq and curl. Touches a temp
 # directory and loopback; no GCP, no credentials.
@@ -77,11 +81,14 @@ fi
 
 # --- The harness: the config with only the changes in the header.
 awk -v http="$push_port" '
-  # The second source and loki.write go, each up to its closing brace.
+  # The second source, loki.write and the metrics half go, each up to its closing
+  # brace, or at once for a block on one line.
   /^loki\.source\.gcplog / { sources++; if (sources > 1) { skip = 1; next } }
-  /^loki\.write / { skip = 1; next }
+  /^loki\.write / || /^prometheus\./ || /^discovery\./ {
+    if ($0 !~ /\{ *\}$/) skip = 1
+    next
+  }
   skip { if (/^}/) skip = 0; next }
-  /^prometheus\.|^discovery\./ { fail_exporter = 1 }
   # Push, not pull: no project, no subscription, no limit.
   /^\tpull \{$/ {
     print "\tpush {"
@@ -96,10 +103,9 @@ awk -v http="$push_port" '
   in_limit { if (/^\t\t\}$/) in_limit = 0; next }
   /^\tformat = "logfmt"$/ || /^\tformat +=/ { print "\tformat = \"json\""; next }
   { print }
-  END { if (fail_exporter) exit 3 }
 ' "$config" |
   sed -E 's/^([[:space:]]*forward_to[[:space:]]*=[[:space:]]*)\[loki\.write\.watchtower\.receiver\]$/\1[loki.echo.out.receiver]/' \
-    >"${work}/harness.alloy" || fail "give it a node's config without the exporter (watchtower-1)"
+    >"${work}/harness.alloy"
 printf '\nloki.echo "out" { }\n' >>"${work}/harness.alloy"
 
 alloy run --server.http.listen-addr="127.0.0.1:${http_port}" --storage.path="${work}/data" \
@@ -125,15 +131,11 @@ while IFS= read -r entry; do
   [[ "$code" == 204 ]] || { cat "${work}/answer" >&2; fail "entry ${total} was answered ${code}: ${entry}"; }
 done <"$fixture"
 
-# --- What came out: labels, structured metadata and line, a line each. A line that
-# is JSON gets its keys sorted, since Alloy writes them in no fixed order.
+# --- What came out: labels, structured metadata and line, a line each.
 out="${work}/out.txt"
 show() {
-  jq -r 'def sorted: walk(if type == "object" then to_entries | sort_by(.key) | from_entries else . end);
-    select(.component_id == "loki.echo.out")
-    | .entry as $line
-    | [.labels, .structured_metadata, (try ($line | fromjson | sorted | tojson) catch $line)]
-    | join("\t")' "${work}/alloy.log" 2>/dev/null >"$out" || true
+  jq -r 'select(.component_id == "loki.echo.out") | [.labels, .structured_metadata, .entry] | join("\t")' \
+    "${work}/alloy.log" 2>/dev/null >"$out" || true
 }
 last="$(tail -n 1 "$expect")"
 for _ in $(seq 60); do
@@ -161,5 +163,13 @@ while IFS= read -r pattern; do
     bad=1
   fi
 done <"$forbidden"
+# Each rule's own counter, on the page prometheus.exporter.self reads.
+if [[ -z "${GCPPULL_SKIP_COUNTERS:-}" ]]; then
+  curl -fsS "http://127.0.0.1:${http_port}/metrics" >"${work}/metrics.txt"
+  for reason in gcp_log gcp_project gcp_cluster gcp_namespace gcp_container gcp_service gcp_not_runner gcp_shape; do
+    grep -qE "^loki_process_dropped_lines_total\{.*reason=\"${reason}\"" "${work}/metrics.txt" ||
+      { echo "no drop counter with reason ${reason}"; bad=1; }
+  done
+fi
 [[ "$bad" -eq 0 ]] || fail "$(basename "$config") ships what it shouldn't (above)"
 echo "gcp pull check: $(wc -l <"$out") of ${total} entries out, all scrubbed"
