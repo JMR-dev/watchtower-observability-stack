@@ -26,7 +26,7 @@ gopass.
    scripts/secret.sh put hcloud-token
    scripts/secret.sh put healthchecks-pg-backup-url
    scripts/secret.sh put healthchecks-jasonmross-dev-api-key
-   scripts/healthchecks.sh   # a check per host and one for the deploy; stores their ping URLs
+   scripts/healthchecks.sh   # a check per host, one for the deploy, one for the bastion; stores their ping URLs
    for k in admin cluster; do
      scripts/secret.sh put "s3-$k-access-key"
      scripts/secret.sh put "s3-$k-secret-key"
@@ -139,9 +139,18 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     `breakGlassCidrs`, the only public SSH source the proxy admits.
   - It installs security updates daily and reboots at 04:00 UTC when one
     needs it.
+  - It pings its Healthchecks.io check, `watchtower-bastion`, after each boot and
+    at 05:00 UTC every day, once its guard is verified loaded and sshd is active.
+    One that didn't come back from a reboot, or is up without either, emails by
+    07:00. The daily ping is there because the reboot comes only when an update
+    needs it, and a check pinged only at boot would have nothing to go overdue by.
+    The ping URL is a secret, `healthchecks-bastion-url`, which root reads with
+    the VM's token and hands to curl on stdin. A failed ping logs one line and
+    touches nothing else.
   - It runs as `watchtower-bastion@`, which may read its own agent peer
-    (`wireguard-bastion-peer`) and nothing else, and ships its journal and
-    metrics to watchtower through `wg-watchtower` (docs/client-telemetry.md).
+    (`wireguard-bastion-peer`) and that ping URL and nothing else, and ships its
+    journal and metrics to watchtower through `wg-watchtower`
+    (docs/client-telemetry.md).
     Until its guard's ruleset is confirmed (below), it runs as no one and
     ships nothing. Only a missing or empty `wireguard-bastion-peer` takes that
     down: any other failure to read it warns and leaves the tunnel and Alloy
@@ -161,7 +170,7 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     at every boot.
   - Its startup script (`config/bastion/startup.sh`) sets all of this up
     at every boot; its output is in `journalctl -u google-startup-scripts`
-    and on the serial console, and never holds the peer config.
+    and on the serial console, and never holds the peer config or the ping URL.
 - **Who may use it:** you (project owner), and `watchtower-deployer`, which
   has OS Login on that VM and an IAP tunnel to its port 22, nothing more.
   The deploy uses it when dispatched with `ssh_via=bastion`: when wg-easy
@@ -229,12 +238,8 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     keeps running on it. The trial's file stays on disk with its record, nothing
     new goes on, and the rollback retries every minute with no reboot, then
     reboots once it works. A login can't confirm it now. A fixed file in metadata
-    can't help, as it needs the same disk. The way in is a startup script of your
-    own, which runs as root at the next boot: `gcloud compute instances
-    add-metadata watchtower-bastion --zone us-east1-b --metadata-from-file
-    startup-script=<a one-off that frees the disk>`, then `gcloud compute instances
-    reset watchtower-bastion --zone us-east1-b`. A rerun of bootstrap then puts the
-    real one back.
+    can't help, as it needs the same disk. The way in is a startup script that frees
+    the disk: "The bastion with SSH gone", below.
   - **The guard won't load at a boot with no change:** `failed`, and bootstrap
     stops. The floor came on before the network, or the startup script loads the
     old ruleset into the kernel, and sshd starts on that, so the VM stays guarded
@@ -243,11 +248,9 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     file again.
   - **nft loads nothing at all, not even the floor,** on a VM with an account:
     sshd stays down, since nothing may run with a token and no guard. The way back
-    is new metadata (rerun bootstrap with a ruleset that loads) or the serial
-    console (`gcloud compute instances add-metadata watchtower-bastion --zone
-    us-east1-b --metadata serial-port-enable=TRUE`, then `gcloud compute
-    connect-to-serial-port watchtower-bastion --zone us-east1-b`, and turn it off
-    again). `journalctl -u nftables -u ssh -u google-startup-scripts` says why.
+    is new metadata: rerun bootstrap with a ruleset that loads, or "The bastion
+    with SSH gone", below, which also says why it's down. The serial console only
+    reads.
 
 Every service is a quadlet: `/etc/containers/systemd/<name>.container`
 generates `<name>.service`.
@@ -260,6 +263,125 @@ podman ps
 
 Change a service through its role and a deploy, never by hand: the next
 deploy would put it back.
+
+### The bastion with SSH gone
+
+New metadata is the way in. The serial console is for reading only: the bastion
+has only OS Login users and no local password, so a console's login prompt has
+no credential to accept, and it isn't getting one. A startup script needs no
+login: GCE runs it as root at the next boot, and `gcloud` can put it there and
+reset the VM with no SSH at all. `config/bastion/recovery.sh` is that script, kept
+fixed and ready. It frees the disk if it's full, asks for sshd and says where
+everything ended up.
+
+**Written by reading the code, and not yet tried on the real VM.** Try it once
+during the first rollout ("To try it", below), then remove this line.
+
+Run these from a checkout of what the bastion last got from bootstrap.
+
+1. **Put the script in metadata and reset.** This replaces `startup-script` and no
+   other key. The reset is immediate; the disk and host key stay, and anyone on
+   the bastion is cut off.
+   ```bash
+   gcloud compute instances add-metadata watchtower-bastion --zone us-east1-b --project watchtower-observe \
+     --metadata-from-file startup-script=config/bastion/recovery.sh
+   gcloud compute instances reset watchtower-bastion --zone us-east1-b --project watchtower-observe
+   ```
+   The guard and the gate don't depend on the startup script: their units are on
+   disk, so that boot loads the guard and asks the gate as any other does.
+2. **Read what it says,** a minute or two after the reset. This needs no login and
+   no `serial-port-enable`. The output keeps earlier boots, so read from the last
+   `start:` line.
+   ```bash
+   gcloud compute instances get-serial-port-output watchtower-bastion --zone us-east1-b --project watchtower-observe --port 1 |
+     grep 'bastion-recovery:'
+   ```
+   With nothing full, you should see:
+   ```
+   bastion-recovery: start: 2026-11-02 04:10:11 UTC
+   bastion-recovery: disk: 41% of / used, 9% of its inodes
+   bastion-recovery: not full: removing nothing
+   bastion-recovery: guard: loaded
+   bastion-recovery: sshd: active
+   bastion-recovery: disk: 41% of / used, 9% of its inodes
+   bastion-recovery: done
+   ```
+3. **Log in.** That is the proof: anyone on the VM can put a line on the console,
+   though the reset has just put them out.
+   ```bash
+   gcloud compute ssh watchtower-bastion --zone us-east1-b --project watchtower-observe --tunnel-through-iap
+   sudo journalctl -b -u nftables -u ssh -u google-startup-scripts   # what happened
+   ```
+4. **Put the normal startup script back.** Until you do, every boot runs the fixed
+   script instead: harmless, but no new ruleset, peer or Alloy config reaches the
+   VM. What's running keeps running, and the daily ping goes on, from its copy on
+   disk.
+   ```bash
+   gcloud compute instances add-metadata watchtower-bastion --zone us-east1-b --project watchtower-observe \
+     --metadata-from-file startup-script=config/bastion/startup.sh
+   gcloud compute instances reset watchtower-bastion --zone us-east1-b --project watchtower-observe
+   gcloud compute instances get-guest-attributes watchtower-bastion --zone us-east1-b --project watchtower-observe \
+     --query-path watchtower/ruleset
+   ```
+   The attribute should say `confirmed`, with the sha256 of
+   `config/bastion/nftables.conf` and a time after the reset. The console should say
+   `bastion: pinged the Healthchecks.io check`. Or rerun bootstrap instead of those
+   commands: it sees the metadata differ, stops the VM, sets it, starts it and waits
+   for that word itself. After a rollback, rerun bootstrap either way: it's what
+   asks for the rejected file again.
+
+**A full disk** (`failed` in the guest attribute, "A rollback the disk won't take"
+above, or logins failing for want of room): the same four steps. Over 90% used, in
+blocks or inodes, the script empties apt's cache, old rotated logs and the journal
+past 64M, and says so:
+
+```
+bastion-recovery: disk: 100% of / used, 12% of its inodes
+bastion-recovery: over 90%: emptying apt's cache, old rotated logs and the journal past 64M
+bastion-recovery: disk: 58% of / used, 11% of its inodes
+```
+
+- **If a rollback was stuck,** it now finishes and the VM reboots:
+  `bastion: ruleset rolled back <sha256> at <epoch>`, then
+  `a rollback finished: rebooting, and this script runs once more`, and a second
+  run from `start:` to `done`. The rollback's own retry may get there first, and
+  then that second run comes without those two lines. Then step 3, step 4, and rerun
+  bootstrap.
+- **Still over 90%:** Alloy's buffer goes next, so what it hadn't shipped is lost,
+  and then the script lists the largest paths. It never removes a user's files.
+  Copy it, add a line that removes what you've read there, at the top of `main`,
+  and repeat from step 1 with the copy.
+- **No `bastion-recovery:` line at all after 5 minutes:** the guest agent writes the
+  script to disk before running it, so a disk with not a byte free may never run
+  it. Grow the disk, which needs no room on it and can't be undone (the free tier
+  covers 30 GB of standard disk), then read on from step 2. Debian's GCE image
+  should grow its root filesystem to fit at boot, and the `disk:` lines will show
+  whether it did; this is the least proven line here.
+  ```bash
+  gcloud compute disks resize watchtower-bastion --zone us-east1-b --project watchtower-observe --size 20GB
+  gcloud compute instances reset watchtower-bastion --zone us-east1-b --project watchtower-observe
+  ```
+
+**`sshd: NOT active`:** the lines under `why sshd isn't up:` hold `sshd -t` and the
+journal of `nftables` and `ssh`. The script has already reinstalled nftables once.
+For anything else, add the fix to a copy of the script and repeat from step 1. If it
+is `guard: NOT loaded`, because nft loads nothing at all, take the account off: on a
+VM with no token there's nothing to guard, so the gate lets sshd run. The tunnel and
+Alloy stay as they are, and the ping stops, so its check goes overdue. Once it's
+fixed, step 4 and a rerun of bootstrap, which attaches the account again over a
+confirmed ruleset.
+
+```bash
+gcloud compute instances stop watchtower-bastion --zone us-east1-b --project watchtower-observe
+gcloud compute instances set-service-account watchtower-bastion --zone us-east1-b --project watchtower-observe --no-service-account --no-scopes
+gcloud compute instances start watchtower-bastion --zone us-east1-b --project watchtower-observe
+```
+
+**To try it,** once, during the first rollout: after bootstrap has reported `Done`
+with the account attached, and not during a deploy with `ssh_via=bastion`, run steps
+1 to 4 on the healthy bastion. It should say `not full: removing nothing`, let you
+log in, and come back to `confirmed` and a ping. Then remove the "not yet tried"
+line above.
 
 ## WireGuard peers
 
@@ -447,7 +569,8 @@ It reports to the host's own Healthchecks.io check (`watchtower-proxy`,
 `scripts/healthchecks.sh` creates the checks (one per host from
 `nodeCount`; re-run it after changing that) and stores their ping URLs as
 `healthchecks-host-urls`. The deploy gives each host only its own URL. The
-same script creates `watchtower-deploy` (see "Our images").
+same script creates `watchtower-deploy` (see "Our images") and
+`watchtower-bastion` ("Break glass"), whose URL only the bastion reads.
 On a host, `watchtower-health check` prints what it sees now, without
 reporting. Every deploy's verify step runs it on each host.
 
@@ -582,6 +705,7 @@ copy. The hosts get it on the next deploy (push to main, or dispatch
 | Backup check's ping URL | a new check → `secret.sh put healthchecks-pg-backup-url` → deploy → delete the old check |
 | Healthchecks.io API key | a new key in the project's settings → `secret.sh put healthchecks-jasonmross-dev-api-key` → revoke the old one (only `scripts/healthchecks.sh` uses it) |
 | Hosts' ping URLs | delete a host's check, `scripts/healthchecks.sh` (it makes a new one), then deploy |
+| The bastion's ping URL | delete its check, `scripts/healthchecks.sh` (it makes a new one and stores the URL); the bastion reads it at its next boot or daily ping |
 | Agent peers' WireGuard keys | delete the client in the wg-easy UI, then deploy ("WireGuard peers") |
 
 Old versions stay in Secret Manager's history until destroyed:
@@ -602,6 +726,7 @@ Old versions stay in Secret Manager's history until destroyed:
 | Deploy: `S3Bucket ... expected non-nil error with nil state during Create` | Hetzner created the bucket, but it didn't show yet when the provider read it back, so Pulumi never recorded it | Adopt it, then rerun: `pulumi import minio:index/s3Bucket:S3Bucket <bucket> <bucket> --provider hetzner-s3=urn:pulumi:prod::watchtower-cloud::pulumi:providers:minio::hetzner-s3 --generate-code=false` from `infra/cloud` after `source scripts/env.sh` |
 | Healthchecks.io: a host's check is down | The host reported problems twice in a row, or stopped reporting (down, cut off from the internet, its timer dead) | The alert lists the problems. If it went silent: is the server up (Hetzner Console), and `systemctl status watchtower-health.timer` on it. `watchtower-health check` shows what it sees now |
 | Healthchecks.io: `watchtower-deploy` is down | A deploy job failed, or the 05:00 UTC run (Monday to Saturday) never came | The ping's body links the failed run; its log says which job. If `hosts` failed with "the tunnel to 10.8.0.1:22 never came up", wg-easy or the proxy is down: dispatch with `ssh_via=bastion`, which reinstalls the proxy without the VPN. No run at all: is Gitea's scheduler running, and is `deploy.yml` on main intact? Fix, then dispatch `deploy.yml` (or merge); the next success clears it |
+| Healthchecks.io: `watchtower-bastion` is down | No ping by 07:00 UTC: the bastion didn't come back from a reboot, is up without its guard or sshd, or couldn't reach Secret Manager or Healthchecks.io. A bastion you stopped does this too | `gcloud compute instances describe watchtower-bastion --zone us-east1-b --project watchtower-observe --format 'value(status)'`, then log in ("Break glass"). No login: "The bastion with SSH gone". Logged in: `sudo systemctl start watchtower-ping.service`, then `sudo journalctl -u watchtower-ping.service -n 5` says what stopped the ping |
 | Healthchecks.io: the backup check is down | The nightly backup failed or never ran | The alert carries the run's log; else `journalctl -u watchtower-pg-backup -n 50` on the leader. Usual causes: a cluster S3 key replaced but not yet deployed, no Patroni leader, or the volume not mounted. `systemctl start watchtower-pg-backup` on every node retries |
 | Tempo queries miss recent traces | A live-store or the Kafka path | `systemctl status 'tempo-*'` on each node; Kafka's under-replicated partitions |
 

@@ -91,6 +91,12 @@ every 90 days.
 | `healthchecks-host-urls` | One JSON object, host name to the ping URL of its Healthchecks.io check, written by `scripts/healthchecks.sh`. Each host gets only its own URL |
 | `healthchecks-deploy-url` | Ping URL of the Healthchecks.io check `watchtower-deploy`, written by `scripts/healthchecks.sh`. The deploy's last job pings it, or its `/fail` when a job failed. Anyone holding it can ping the check |
 
+### Read by the bastion
+
+| Id | What |
+|---|---|
+| `healthchecks-bastion-url` | Ping URL of the Healthchecks.io check `watchtower-bastion`, written by `scripts/healthchecks.sh`. The bastion reads it as `watchtower-bastion@`, as root through the metadata token, after each boot and every day, and pings only with its guard loaded and sshd active. Never granted to the deployer. Anyone holding it can ping the check |
+
 ### Owner only
 
 | Id | What |

@@ -317,7 +317,7 @@ reads a secret's value or SSHes anywhere.
 ### W3: here, the bastion
 
 - `scripts/bootstrap.sh` step 7: service account `watchtower-bastion@`,
-  reader of `wireguard-bastion-peer` only, and an in-place update (stop, set
+  reader of `wireguard-bastion-peer` and, as built, its ping URL only, and an in-place update (stop, set
   the account, metadata, start; the disk and host key stay).
 - The startup script: `wireguard-tools` and the Alloy `.deb` (checked
   against `SHA256SUMS`, apt with a lock timeout), a 192 MiB drop-in, the
@@ -363,6 +363,14 @@ does and admits only the settings an agent needs, in their shape, so a config
 with a stray character in a key is refused here rather than echoed by `wg` into
 the journal.
 
+The owner added two things to this (2026-11-01). The bastion pings a
+Healthchecks.io check of its own, `watchtower-bastion`, after each boot and every
+day, once the guard is loaded and sshd is active, with a URL kept in
+`healthchecks-bastion-url` that only it may read. And new metadata is the way in
+when SSH is gone, with `config/bastion/recovery.sh` ready to put there; the serial
+console only reads, and there is no local password user (the runbook's "The
+bastion with SSH gone").
+
 ### G2: gitea, the VM (after the Ansible cutover)
 
 - Pulumi: `gitea:watchtowerPeerSecret` as metadata, left out when unset, so
@@ -397,7 +405,9 @@ In order, each after the one before is verified:
 3. **V1**: a disposable cycle from its branch, then production.
 4. **G1** (the owner runs `make ci-up` from its branch), then **W2** (the
    owner runs `bootstrap.sh` and `rotate-gcp-key.sh reader`).
-5. **W3** (the owner runs `bootstrap.sh` from its branch).
+5. **W3** (the owner runs `healthchecks.sh`, then `bootstrap.sh`, from its branch,
+   then tries the recovery once, as the runbook's "The bastion with SSH gone"
+   says).
 6. **G2**, after the Gitea cutover.
 7. **W4**.
 

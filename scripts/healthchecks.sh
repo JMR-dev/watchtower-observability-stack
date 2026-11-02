@@ -11,6 +11,11 @@
 #     it at the end, /fail when a job failed, which emails at once; the
 #     scheduled run (05:00 UTC, Monday to Saturday) not reporting by 07:00
 #     emails too.
+#   - watchtower-bastion, as healthchecks-bastion-url: the break-glass bastion
+#     reads it itself (scripts/bootstrap.sh lets it, and nothing else), and pings
+#     after each boot and at 05:00 UTC every day, once its metadata guard is
+#     loaded and sshd is active (config/bastion/startup.sh). So one that didn't
+#     come back from its 04:00 reboot emails by 07:00.
 #
 #   scripts/healthchecks.sh
 #
@@ -30,6 +35,8 @@ TIMEOUT=300 # seconds between pings (watchtower-health.timer)
 GRACE=600   # then this long before a missed ping alerts
 DEPLOY_SCHEDULE="0 5 * * 1-6" # deploy.yml's schedule, in UTC
 DEPLOY_GRACE=7200             # a run takes well under an hour
+BASTION_TIMEOUT=86400         # seconds between pings (watchtower-ping.timer)
+BASTION_GRACE=7200            # then this long before a missed ping alerts
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 stack_file="${repo_root}/infra/cloud/Pulumi.prod.yaml"
@@ -82,3 +89,12 @@ jq -n --arg schedule "$DEPLOY_SCHEDULE" --argjson grace "$DEPLOY_GRACE" '{
 }' >"${work}/spec.json"
 upsert
 jq -r .ping_url "${work}/check.json" | "${repo_root}/scripts/secret.sh" put healthchecks-deploy-url
+
+jq -n --argjson timeout "$BASTION_TIMEOUT" --argjson grace "$BASTION_GRACE" '{
+  name: "watchtower-bastion", slug: "watchtower-bastion", tags: "observability watchtower bastion",
+  timeout: $timeout, grace: $grace, channels: "*",
+  desc: "The break-glass bastion: pinged after each boot and at 05:00 UTC every day, only with its metadata guard loaded and sshd active. A missed ping means it did not come back from a reboot, or is up without one of those. docs/runbook.md, \"The bastion with SSH gone\"."
+}' >"${work}/spec.json"
+upsert
+jq -r .ping_url "${work}/check.json" | "${repo_root}/scripts/secret.sh" put healthchecks-bastion-url
+echo "Run scripts/bootstrap.sh to let the bastion read its URL. Until it first pings, its check stays \"new\" and never alerts."

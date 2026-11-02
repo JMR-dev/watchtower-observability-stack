@@ -14,6 +14,10 @@
 #   fetch  only a missing or empty secret takes telemetry down: any other
 #          failure to read it, and a config that fails its checks, leave the
 #          tunnel and Alloy as they are.
+#   ping   startup.sh pings its Healthchecks.io check only with the guard loaded
+#          and sshd active, with a stand-in for the URL: it reaches curl on stdin,
+#          never an argument or any output, only a URL of Healthchecks.io's shape
+#          is sent, and no failure stops anything else.
 #   guard  nftables.conf checked, loaded twice (a reload, as at boot), and
 #          probed on 169.254.169.254 (on lo): root reaches it over HTTP,
 #          other uids are refused at once, and every uid still reaches its
@@ -27,6 +31,9 @@
 #          ruleset_state and bastion_ruleset_wait. Its units are checked by
 #          systemd-analyze verify. Cron refuses a user, and a crontab left from
 #          before is gone.
+#   recovery  recovery.sh, the one-off startup script for when SSH is gone: it
+#          changes nothing on a healthy bastion, frees a full disk without touching
+#          a user's files, and a rollback the disk held up then finishes.
 #
 #   scripts/check-bastion.sh            # docker; CONTAINER_RUNTIME=podman locally
 #
@@ -38,7 +45,9 @@
 # that the metadata server says 404 for a VM with no account, that it takes the
 # guest attribute from root, that the dropbox's tmpfs comes up, that a ruleset
 # that won't load brings the floor before the network, that polkit refuses a
-# user lingering, and that the real rollback reboots into the old ruleset.
+# user lingering, that the real rollback reboots into the old ruleset, that the
+# ping reaches Healthchecks.io and the timer fires, and that the guest agent runs
+# recovery.sh from metadata, on a full disk above all.
 #
 # Needs the network (apt, inside the container). Files go in with `cp`, not
 # a bind mount: on the Gitea runners the daemon is Docker-in-Docker and
@@ -56,7 +65,8 @@ cid=
 cleanup() { [[ -z "$cid" ]] || "$rt" rm -f "$cid" >/dev/null 2>&1 || true; rm -rf "$work"; }
 trap cleanup EXIT
 
-cp "${repo_root}/config/bastion/startup.sh" "${repo_root}/config/bastion/nftables.conf" "${repo_root}/config/bastion/ruleset.sh" "$work/"
+cp "${repo_root}/config/bastion/startup.sh" "${repo_root}/config/bastion/nftables.conf" "${repo_root}/config/bastion/ruleset.sh" \
+  "${repo_root}/config/bastion/recovery.sh" "$work/"
 # The attribute bootstrap.sh stops the VM on, which run.sh checks main sends.
 grep -qF 'bastion_attribute settled' "${repo_root}/scripts/bootstrap.sh" || {
   echo "FAIL  bootstrap.sh doesn't wait for the settled attribute"
@@ -344,12 +354,14 @@ main_order="$(
   apt_install() { echo apt; }
   fetch_peer() { peer_state=none; }
   teardown() { echo teardown; }
+  ping_setup() { :; }
+  ping_if_up() { echo ping; }
   # The attribute's PUT, which comes with the line.
   curl() { [[ "$*" == *guest-attributes/watchtower/settled* ]] && echo settled-attribute; }
   main 2>/dev/null | tr '\n' ' '
 )"
-if [[ "$main_order" == "guard bastion: metadata guard loaded updates apt bastion: settled settled-attribute teardown " ]]; then
-  pass "apt: main says settled only after the guard and apt, and the guard goes first"
+if [[ "$main_order" == "guard bastion: metadata guard loaded updates apt bastion: settled settled-attribute ping teardown " ]]; then
+  pass "apt: main says settled only after the guard and apt, the guard goes first, and the ping comes before anything of telemetry"
 else
   flunk "apt: main's order is: ${main_order}"
 fi
@@ -397,6 +409,8 @@ main_case() {
     teardown() { echo teardown; }
     health() { :; }
     report_settled() { :; }
+    ping_setup() { :; }
+    ping_if_up() { :; }
     main 2>/dev/null
   )"
   rc=$?
@@ -448,6 +462,108 @@ guard_case metadata-answers 0 yes 0 2
 guard_case metadata-silent-keeps-what-is-on-disk 0 no 0 0
 guard_case a-rollback-stops-the-script 75 yes 0 2
 guard_case sshd-may-not-run-stops-the-script 1 yes 1 2
+
+# --- ping: startup.sh's ping of its Healthchecks.io check ------------------------
+# A stand-in, the shape of a real one and nothing else's.
+ping_stand_in='https://hc-ping.com/stand-in-for-the-ping-url'
+ping_b64="$(printf '%s' "$ping_stand_in" | base64 -w0)"
+# ping_case <name> <pinged, failed or none> <guard up or down> <sshd up or down>
+# <token code> <secret code> <the secret's body> [curl's exit status]. Whatever
+# comes of it, it must return 0 and hold the URL back from everything but curl's
+# stdin. curl's own words hold it here too, as they might.
+ping_case() {
+  local name=$1 want=$2 guard_state=$3 sshd_state=$4 token=$5 secret=$6 body=$7 curl_rc=${8:-0} out rc got=none
+  rm -f /tmp/ping-args /tmp/ping-stdin
+  out="$(
+    work="$(mktemp -d)"
+    guard_loaded() { [[ "$guard_state" == up ]]; }
+    systemctl() { [[ "$*" == "is-active --quiet ssh.service" && "$sshd_state" == up ]]; }
+    get() {
+      case "$1" in
+        */token) echo '{"access_token":"x"}' >"$2"; echo "$token" ;;
+        *healthchecks-bastion-url/versions/latest:access) cat >/dev/null; printf '%s' "$body" >"$2"; echo "$secret" ;;
+      esac
+    }
+    curl() {
+      printf '%s' "$*" >/tmp/ping-args
+      cat >/tmp/ping-stdin
+      echo "curl: (22) ${ping_stand_in} said no" >&2
+      return "$curl_rc"
+    }
+    ping_if_up 2>&1
+  )"
+  rc=$?
+  if [[ -e /tmp/ping-stdin ]]; then
+    if grep -q 'pinged the Healthchecks.io check' <<<"$out"; then got=pinged; else got=failed; fi
+  fi
+  if [[ "$got" != "$want" || "$rc" != 0 ]]; then
+    flunk "ping ${name}: ${got}, return ${rc}; want ${want}, return 0"
+  elif [[ "$out" == *stand-in-for* ]]; then
+    flunk "ping ${name}: the URL is in its output"
+  elif [[ -e /tmp/ping-args && "$(cat /tmp/ping-args)" == *stand-in-for* ]]; then
+    flunk "ping ${name}: the URL is in curl's arguments"
+  elif [[ "$got" != none && "$(cat /tmp/ping-stdin)" != "url = \"${ping_stand_in}\"" ]]; then
+    flunk "ping ${name}: curl's stdin isn't the URL alone"
+  elif [[ "$got" != none && "$(cat /tmp/ping-args)" != *"-K -"* ]]; then
+    flunk "ping ${name}: curl doesn't read its config from stdin"
+  elif [[ -z "$out" ]]; then
+    flunk "ping ${name}: says nothing"
+  else
+    pass "ping ${name}: ${got}"
+  fi
+}
+ping_ok="{\"payload\":{\"data\":\"${ping_b64}\"}}"
+ping_case all-up pinged up up 200 200 "$ping_ok"
+ping_case no-guard none down up 200 200 "$ping_ok"
+ping_case no-sshd none up down 200 200 "$ping_ok"
+ping_case neither none down down 200 200 "$ping_ok"
+ping_case no-account none up up 404 200 "$ping_ok"
+ping_case no-token none up up 500 200 "$ping_ok"
+ping_case metadata-down none up up 000 200 "$ping_ok"
+ping_case no-secret-version none up up 200 404 '{"error":{"code":404}}'
+ping_case permission-denied none up up 200 403 '{"error":{"code":403}}'
+ping_case secret-manager-down none up up 200 000 ''
+ping_case empty-secret none up up 200 200 '{"payload":{}}'
+ping_case malformed-answer none up up 200 200 'not json'
+ping_case not-base64 none up up 200 200 '{"payload":{"data":"!!!"}}'
+ping_case another-host none up up 200 200 "{\"payload\":{\"data\":\"$(printf 'https://example.com/stand-in-for' | base64 -w0)\"}}"
+ping_case plain-http none up up 200 200 "{\"payload\":{\"data\":\"$(printf 'http://hc-ping.com/stand-in-for' | base64 -w0)\"}}"
+ping_case a-value-adding-to-curls-config none up up 200 200 "{\"payload\":{\"data\":\"$(printf 'https://hc-ping.com/x"\noutput = "/etc/stand-in-for' | base64 -w0)\"}}"
+ping_case ping-fails failed up up 200 200 "$ping_ok" 22
+ping_case ping-times-out failed up up 200 200 "$ping_ok" 28
+
+# No failure stops the boot, and the timer's way in does the ping and nothing else.
+ping_main="$(
+  updates() { :; }
+  guard() { echo guard; }
+  guard_loaded() { return 0; }
+  installed() { return 0; }
+  report_settled() { :; }
+  systemctl() { [[ "$1" == is-active ]]; }
+  # Nothing answers, and put dies, as it does on a full disk.
+  get() { echo 000; }
+  put() { die "no room"; }
+  fetch_peer() { peer_state=none; }
+  teardown() { echo teardown; }
+  main 2>&1
+  echo "main returned $?"
+)"
+if grep -qx teardown <<<"$ping_main" && grep -qx 'main returned 0' <<<"$ping_main"; then
+  pass "ping: the daily ping's setup and a ping that fail stop nothing else"
+else
+  flunk "ping: a failure stopped the boot: ${ping_main//$'\n'/ }"
+fi
+for said in 'could not set up the daily ping' 'could not ping the Healthchecks.io check'; do
+  if grep -qF "$said" <<<"$ping_main"; then pass "ping: says \"${said}\""; else flunk "ping: doesn't say \"${said}\""; fi
+done
+ping_only="$(
+  guard() { echo guard; }
+  updates() { echo updates; }
+  fetch_peer() { echo fetch; }
+  ping_if_up() { echo ping; }
+  main ping 2>&1 | tr '\n' ' '
+)"
+if [[ "$ping_only" == "ping " ]]; then pass "ping: main ping does the ping alone"; else flunk "ping: main ping does: ${ping_only}"; fi
 set -e
 
 # --- guard: nftables.conf ----------------------------------------------------
@@ -526,6 +642,8 @@ case "$*" in
     [[ ! -e /stubs/load-broken ]] && nft --file /etc/nftables.conf 2>/dev/null ;;
   "restart watchtower-ruleset-rollback.timer")
     [[ ! -e /stubs/timer-broken ]] ;;
+  "is-active --quiet ssh.service")
+    [[ ! -e /stubs/sshd-down ]] ;;
 esac
 STUB
 cat >"${stubs}/curl" <<'STUB'
@@ -680,7 +798,7 @@ apply_ruleset a
 check "gate: apply exits 1 when sshd may not run" reason_is 1
 check "gate: apply stops sshd" called "stop ssh.service"
 refute "gate: apply doesn't start sshd" called "start ssh.service"
-if grep -q 'serial console' <<<"$out"; then pass "ruleset: gate: says the way back"; else flunk "ruleset: gate: doesn't say the way back"; fi
+if grep -q 'the way back is new metadata' <<<"$out"; then pass "ruleset: gate: says the way back"; else flunk "ruleset: gate: doesn't say the way back"; fi
 rm -f "${stubs}/nft-broken"
 echo 404 >"${stubs}/account-code"
 
@@ -1189,6 +1307,245 @@ check "units: a login asks" test -n "$(find "$dropbox" -mindepth 1 -print -quit)
 rm -rf "$dropbox"
 as_user sh -c 'set -e; . /etc/profile.d/watchtower-ruleset.sh; true'
 check "units: a login with no directory is unharmed" test "$?" = 0
+
+# --- ping, through the real script: real curl's place taken, nothing else's ------
+# The metadata server, Secret Manager and Healthchecks.io, as curl would find them.
+ping_bin="${stubs}/ping-bin"
+mkdir -p "$ping_bin"
+chmod 0755 "$ping_bin"
+cat >"${ping_bin}/curl" <<'STUB'
+#!/bin/bash
+# Every argument it's given goes in a file: the test looks for the URL there.
+printf '%s\n' "$*" >>/tmp/ping-all-args
+out=/dev/null
+url=""
+config=""
+args=("$@")
+for ((i = 0; i < $#; i++)); do
+  case "${args[i]}" in
+    -o) out="${args[i + 1]}" ;;
+    -K) config="$(cat)"; printf '%s\n' "$config" >>/tmp/ping-all-stdin ;;
+    http*) url="${args[i]}" ;;
+  esac
+done
+case "$url" in
+  */token)
+    echo '{"access_token":"stand-in-for-the-token"}' >"$out"
+    printf 200
+    ;;
+  */healthchecks-bastion-url/versions/latest:access)
+    printf '{"payload":{"data":"%s"}}' "$(base64 -w0 </tmp/ping-secret-value)" >"$out"
+    printf 200
+    ;;
+  "")
+    # The ping itself: its URL only in the config.
+    [[ ! -e /tmp/ping-broken ]]
+    ;;
+esac
+STUB
+chmod 0755 "${ping_bin}/curl"
+printf '%s' "$ping_stand_in" >/tmp/ping-secret-value
+# ping_tool [as_user]: the timer's way in. Sets out and rc.
+ping_tool() {
+  rm -f /tmp/ping-all-args /tmp/ping-all-stdin
+  out="$("$@" env PATH="${ping_bin}:${stubs}:${PATH}" bash /check/startup.sh ping 2>&1)"
+  rc=$?
+}
+held_back() { [[ "$out" != *stand-in-for* && "$(cat /tmp/ping-all-args 2>/dev/null)" != *stand-in-for* ]]; }
+said() { grep -qF -- "$1" <<<"$out"; }
+fresh
+nft --file nftables.conf
+ping_tool
+check "ping, real script: exit 0" reason_is 0
+check "ping, real script: says so" said 'pinged the Healthchecks.io check'
+check "ping, real script: curl gets the URL on stdin" grep -qxF "url = \"${ping_stand_in}\"" /tmp/ping-all-stdin
+check "ping, real script: and the token" grep -qxF 'header = "Authorization: Bearer stand-in-for-the-token"' /tmp/ping-all-stdin
+check "ping, real script: neither in an argument or the output" held_back
+touch /tmp/ping-broken
+ping_tool
+rm -f /tmp/ping-broken
+check "ping, real script, it fails: exit 0" reason_is 0
+check "ping, real script, it fails: says so" said 'could not ping the Healthchecks.io check'
+check "ping, real script, it fails: the URL stays out" held_back
+touch "${stubs}/sshd-down"
+ping_tool
+rm -f "${stubs}/sshd-down"
+check "ping, real script, sshd down: exit 0" reason_is 0
+check "ping, real script, sshd down: says so" said "sshd isn't active"
+refute "ping, real script, sshd down: reads no secret" test -e /tmp/ping-all-args
+# A user: the guard's own test above shows the metadata server refuses them, and
+# this that it never gets that far.
+ping_tool setpriv --reuid=65534 --regid=65534 --clear-groups
+check "ping, a user: exit 0" reason_is 0
+refute "ping, a user: reads no secret" test -e /tmp/ping-all-args
+check "ping, a user: says why" said 'no metadata guard'
+nft flush ruleset
+ping_tool
+check "ping, real script, no guard: exit 0" reason_is 0
+check "ping, real script, no guard: says so" said 'no metadata guard'
+refute "ping, real script, no guard: reads no secret" test -e /tmp/ping-all-args
+
+# ... its units, as systemd reads them, and nothing stops if they can't be written.
+fresh
+ping_units_out="$(work="$(mktemp -d)"; PATH="${stubs}:${PATH}" ping_setup 2>&1)"
+check "ping units: this file, on disk" same_file startup.sh /usr/local/sbin/watchtower-startup
+check "ping units: the timer's on" called "enable --now --quiet watchtower-ping.timer"
+check "ping units: an hour after the 04:00 reboot" grep -qx 'OnCalendar=\*-\*-\* 05:00:00 UTC' /etc/systemd/system/watchtower-ping.timer
+check "ping units: run this file with ping" grep -qx 'ExecStart=/usr/local/sbin/watchtower-startup ping' /etc/systemd/system/watchtower-ping.service
+ping_verify="$(systemd-analyze verify --man=no watchtower-ping.timer watchtower-ping.service 2>&1)"
+vrc=$?
+if [[ "$vrc" == 0 && -z "$(grep 'watchtower' <<<"$ping_verify")" ]]; then
+  pass "ping units: systemd-analyze verify"
+else
+  flunk "ping units: systemd-analyze verify: ${ping_verify}"
+fi
+refute "ping units: nothing of sshd waits on it" grep -qs 'watchtower-ping' /etc/systemd/system/ssh.service.d/watchtower-guard.conf
+check "ping units: says nothing when all goes well" test -z "$ping_units_out"
+
+# --- recovery: recovery.sh, the one-off startup script for when SSH is gone -------
+recovery_bin="${stubs}/recovery-bin"
+mkdir -p "$recovery_bin"
+chmod 0755 "$recovery_bin"
+# df says what /stubs/disk-percent holds, and vacuuming the journal is what frees
+# the room, when /stubs/disk-frees says it's to, and with that the install works.
+cat >"${recovery_bin}/df" <<'STUB'
+#!/bin/bash
+echo 'Use%'
+cat /stubs/disk-percent
+STUB
+cat >"${recovery_bin}/journalctl" <<'STUB'
+#!/bin/bash
+echo "journalctl $*" >>/stubs/calls
+if [[ "$*" == *--vacuum-size=* && -e /stubs/disk-frees ]]; then
+  echo ' 58%' >/stubs/disk-percent
+  rm -f /stubs/install-broken
+fi
+exit 0
+STUB
+cat >"${recovery_bin}/apt-get" <<'STUB'
+#!/bin/bash
+echo "apt-get $*" >>/stubs/calls
+STUB
+cat >"${recovery_bin}/dpkg" <<'STUB'
+#!/bin/bash
+echo "dpkg $*" >>/stubs/calls
+STUB
+cat >"${recovery_bin}/du" <<'STUB'
+#!/bin/bash
+echo '9.0G /home/stand-in-user'
+STUB
+chmod 0755 "${recovery_bin}/df" "${recovery_bin}/journalctl" "${recovery_bin}/apt-get" "${recovery_bin}/dpkg" "${recovery_bin}/du"
+recovery() {
+  out="$(PATH="${recovery_bin}:${stubs}:${PATH}" bash /check/recovery.sh 2>&1)"
+  rc=$?
+}
+# fixture_files: what it may remove, and what it never may.
+fixture_files() {
+  mkdir -p /var/lib/alloy/data/wal /home/stand-in-user
+  touch /var/lib/alloy/data/wal/000001 /home/stand-in-user/a-file /var/log/stand-in.log /var/log/stand-in.log.1 /var/log/stand-in.log.2.gz
+}
+full_disk() { echo "$1%" | sed 's/^/ /' >"${stubs}/disk-percent"; }
+rm -f "${stubs}/disk-frees"
+
+# Healthy: it changes nothing.
+fresh
+apply_ruleset a
+confirm
+fixture_files
+full_disk 41
+: >"${stubs}/calls"
+recovery
+check "recovery, healthy: exit 0" reason_is 0
+check "recovery, healthy: says not full" said 'not full: removing nothing'
+check "recovery, healthy: done" said 'bastion-recovery: done'
+check "recovery, healthy: the guard" said 'bastion-recovery: guard: loaded'
+check "recovery, healthy: sshd" said 'bastion-recovery: sshd: active'
+check "recovery, healthy: an old log stays" test -e /var/log/stand-in.log.1
+check "recovery, healthy: Alloy's buffer stays" test -e /var/lib/alloy/data/wal/000001
+refute "recovery, healthy: apt's cache stays" called "apt-get clean"
+refute "recovery, healthy: no reboot" called "--no-block reboot"
+check "recovery, healthy: the ruleset stays" same_file "${rules}/a" /etc/nftables.conf
+check "recovery, healthy: still confirmed" test -z "$(cat "${state_dir}/pending" 2>/dev/null)"
+
+# Full, with a rollback the disk held up: room, and then the rollback finishes.
+fresh
+apply_ruleset a
+touch "${stubs}/install-broken"
+fire
+check "recovery, full disk: the rollback is stuck" state_is "$sha_a" failed
+check "recovery, full disk: on its record" test -e "${state_dir}/pending"
+fixture_files
+full_disk 100
+touch "${stubs}/disk-frees"
+: >"${stubs}/calls"
+recovery
+rm -f "${stubs}/disk-frees"
+check "recovery, full disk: exit 0" reason_is 0
+check "recovery, full disk: apt's cache goes" called "apt-get clean"
+check "recovery, full disk: the journal's trimmed" called "journalctl --vacuum-size=64M"
+refute "recovery, full disk: an old log goes" test -e /var/log/stand-in.log.1
+refute "recovery, full disk: and a gzipped one" test -e /var/log/stand-in.log.2.gz
+check "recovery, full disk: today's log stays" test -e /var/log/stand-in.log
+check "recovery, full disk: a user's file stays" test -e /home/stand-in-user/a-file
+check "recovery, full disk: enough room, so Alloy's buffer stays" test -e /var/lib/alloy/data/wal/000001
+check "recovery, full disk: the rollback finishes" state_is "$sha_a" "rolled back"
+check "recovery, full disk: the old ruleset back on disk" same_file "${rules}/package" /etc/nftables.conf
+refute "recovery, full disk: off the record" test -e "${state_dir}/pending"
+check "recovery, full disk: and it reboots" called "--no-block reboot"
+check "recovery, full disk: says it will run again" said 'this script runs once more'
+# The boot after it.
+reboot_vm
+full_disk 58
+recovery
+check "recovery, the next boot: exit 0" reason_is 0
+check "recovery, the next boot: done" said 'bastion-recovery: done'
+refute "recovery, the next boot: no reboot, so no loop" called "--no-block reboot"
+check "recovery, the next boot: the guard, from the floor" said 'bastion-recovery: guard: loaded'
+check "recovery, the next boot: sshd" called "start ssh.service"
+
+# Too full for that: Alloy's buffer goes, and it names what's left to you.
+fresh
+apply_ruleset a
+confirm
+fixture_files
+full_disk 100
+: >"${stubs}/calls"
+recovery
+check "recovery, still full: exit 0" reason_is 0
+refute "recovery, still full: Alloy's buffer goes" test -e /var/lib/alloy/data/wal/000001
+check "recovery, still full: its directory stays" test -d /var/lib/alloy/data
+check "recovery, still full: a user's file stays" test -e /home/stand-in-user/a-file
+check "recovery, still full: Alloy back up" called "start alloy.service"
+check "recovery, still full: the largest paths" said '/home/stand-in-user'
+check "recovery, still full: sshd still asked for" called "start ssh.service"
+check "recovery, still full: done" said 'bastion-recovery: done'
+
+# nft loads nothing, on a VM with an account: reinstalled once, and then it says so.
+fresh
+full_disk 41
+echo 200 >"${stubs}/account-code"
+touch "${stubs}/nft-broken" "${stubs}/sshd-down"
+: >"${stubs}/calls"
+recovery
+rm -f "${stubs}/nft-broken" "${stubs}/sshd-down"
+echo 404 >"${stubs}/account-code"
+check "recovery, nft broken: exit 0" reason_is 0
+check "recovery, nft broken: reinstalls it" called "apt-get -q -o DPkg::Lock::Timeout=120 install -y --reinstall --no-install-recommends nftables"
+refute "recovery, nft broken: the gate holds, so no sshd" called "start ssh.service"
+check "recovery, nft broken: says the guard's off" said 'bastion-recovery: guard: NOT loaded'
+check "recovery, nft broken: says sshd's off" said 'bastion-recovery: sshd: NOT active'
+check "recovery, nft broken: says why" said "why sshd isn't up"
+check "recovery, nft broken: done" said 'bastion-recovery: done'
+
+# No tool at all: what's left is to start them.
+fresh
+full_disk 41
+mv /usr/local/sbin/watchtower-ruleset /usr/local/sbin/watchtower-ruleset.away
+recovery
+mv /usr/local/sbin/watchtower-ruleset.away /usr/local/sbin/watchtower-ruleset
+check "recovery, no tool: exit 0" reason_is 0
+check "recovery, no tool: starts sshd" called "start ssh.service"
+check "recovery, no tool: starts the guard" called "start nftables.service"
 exit "$fail"
 RUN
 

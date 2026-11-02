@@ -23,7 +23,8 @@
 #      watchtower-gcp-reader, with no role here and no key: gitea's own
 #      stacks let it pull Gitea CI's logs and metrics. And
 #      watchtower-bastion, the bastion's own identity, with no key: it may
-#      read the bastion's agent peer (step 6) and nothing else.
+#      read the bastion's agent peer and its Healthchecks.io ping URL (step 6)
+#      and nothing else.
 #   5. Creates the Artifact Registry repo `watchtower` (europe-west3, docker,
 #      immutable tags, keeps the 10 newest versions of each image) for the
 #      caddy and patroni images, plus two service accounts scoped to that one
@@ -41,7 +42,9 @@
 #      (deploy_read_back), never the owner's. The rest are the agent peers
 #      of the services that ship telemetry here (docs/client-telemetry.md):
 #      each one's config is readable by one identity of that service, in
-#      its own project (agent_readers), and by nothing else.
+#      its own project (agent_readers), and by nothing else. The bastion's
+#      ping URL (bastion_readable) is made here too, empty, for
+#      scripts/healthchecks.sh to fill; the bastion alone may read it.
 #   7. Creates the break-glass bastion watchtower-bastion: an e2-micro in
 #      us-east1 (the free tier) on a network of its own, with no external
 #      address, reachable only through IAP TCP forwarding (SSH from
@@ -279,7 +282,7 @@ zone_admin watchtower-deployer
 ensure_sa watchtower-caddy-dns01 "Caddy on the proxy answers ACME DNS-01 for ${DOMAIN}; key in the caddy-dns-key secret"
 zone_admin watchtower-caddy-dns01
 ensure_sa watchtower-gcp-reader "Watchtower pulls Gitea CI's logs and metrics as this (Pub/Sub, Cloud Monitoring); granted in gitea's stacks, no role here"
-ensure_sa watchtower-bastion "The break-glass bastion runs as this: it reads its own agent peer, wireguard-bastion-peer, at boot; no key"
+ensure_sa watchtower-bastion "The break-glass bastion runs as this: it reads its own agent peer, wireguard-bastion-peer, and its Healthchecks.io ping URL, healthchecks-bastion-url; no key"
 # googleclouddns finds its zone by LISTING the project's zones, a
 # project-level permission no zone binding confers (gitea pkg/dns/dns.go).
 # dns.reader is read-only; every write stays scoped to the zone.
@@ -370,6 +373,15 @@ for pair in "${agent_readers[@]}"; do
   retry_iam gcloud secrets add-iam-policy-binding "${pair%%=*}" --project "$GCP_PROJECT" \
     --member "serviceAccount:${pair#*=}" --role roles/secretmanager.secretAccessor
 done
+# What the bastion reads besides its peer: its Healthchecks.io ping URL, which
+# scripts/healthchecks.sh stores. It may read that one secret, and the deployer
+# may not. A Go test keeps this list equal to names.BastionSecrets.
+bastion_readable=(healthchecks-bastion-url)
+"${repo_root}/scripts/secret.sh" ensure "${bastion_readable[@]}"
+for id in "${bastion_readable[@]}"; do
+  retry_iam gcloud secrets add-iam-policy-binding "$id" --project "$GCP_PROJECT" \
+    --member "serviceAccount:$(sa_email watchtower-bastion)" --role roles/secretmanager.secretAccessor
+done
 
 # ---------------------------------------------------------------------------
 log "7/7 Break-glass bastion ${BASTION} (${BASTION_ZONE}), through IAP only"
@@ -400,8 +412,8 @@ exists routers nats describe "$BASTION" --router "$BASTION" --region "$BASTION_R
 
 # What it runs (config/bastion/startup.sh): the metadata guard, under its
 # rollback (ruleset.sh); security updates every day, rebooting at 04:00 UTC
-# when one needs it; its agent peer and Alloy. The other three files it reads
-# from its metadata at boot.
+# when one needs it; a ping of its Healthchecks.io check, at boot and daily; its
+# agent peer and Alloy. The other three files it reads from its metadata at boot.
 bastion_dir="${repo_root}/config/bastion"
 bastion_alloy="${repo_root}/config/alloy/bastion.alloy"
 bastion_files="startup-script=${bastion_dir}/startup.sh,watchtower-nftables=${bastion_dir}/nftables.conf,watchtower-ruleset=${bastion_dir}/ruleset.sh,watchtower-alloy=${bastion_alloy}"

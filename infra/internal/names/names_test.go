@@ -195,6 +195,13 @@ func TestWorkflowReadsEverySecret(t *testing.T) {
 		}
 		ownerOnly[id] = true
 	}
+	// Read by the bastion, never by the deploy: as off limits to it as those.
+	for _, id := range BastionSecrets {
+		if !known[id] {
+			t.Errorf("bastion secret %s is not in Secrets()", id)
+		}
+		ownerOnly[id] = true
+	}
 	written := map[string]bool{}
 	for _, id := range DeployWrittenSecrets {
 		if !known[id] {
@@ -326,6 +333,39 @@ func TestBastionReadsItsOwnPeer(t *testing.T) {
 	m := regexp.MustCompile(`(?m)^PEER_SECRET="([^"]*)"$`).FindStringSubmatch(string(b))
 	if want == "" || m == nil || m[1] != want {
 		t.Errorf("startup.sh PEER_SECRET = %v, want %q", m, want)
+	}
+}
+
+// The bastion pings with the secret scripts/healthchecks.sh stores its check's
+// URL in, and scripts/bootstrap.sh makes that secret and lets the bastion read it:
+// under another name, the ping fails quietly and the check never starts.
+func TestBastionReadsItsOwnPingURL(t *testing.T) {
+	startup, err := os.ReadFile("../../../config/bastion/startup.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "projects/" + GCPProject + "/secrets/" + SecretHealthchecksBastionURL
+	m := regexp.MustCompile(`(?m)^PING_SECRET="([^"]*)"$`).FindStringSubmatch(string(startup))
+	if m == nil || m[1] != want {
+		t.Errorf("startup.sh PING_SECRET = %v, want %q", m, want)
+	}
+	healthchecks, err := os.ReadFile("../../../scripts/healthchecks.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(healthchecks), `secret.sh" put `+SecretHealthchecksBastionURL) {
+		t.Errorf("healthchecks.sh does not store %s", SecretHealthchecksBastionURL)
+	}
+	bootstrap, err := os.ReadFile("../../../scripts/bootstrap.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = regexp.MustCompile(`(?m)^bastion_readable=\(([a-z0-9 -]*)\)$`).FindStringSubmatch(string(bootstrap))
+	if m == nil {
+		t.Fatal("bootstrap.sh has no bastion_readable=(...) list")
+	}
+	if got := strings.Fields(m[1]); !reflect.DeepEqual(got, BastionSecrets) {
+		t.Errorf("bootstrap.sh bastion_readable = %v, want %v", got, BastionSecrets)
 	}
 }
 

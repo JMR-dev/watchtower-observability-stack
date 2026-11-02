@@ -375,7 +375,7 @@ cmd_apply() {
     systemctl start ssh.service
   else
     systemctl stop ssh.service || true
-    say "error: sshd stays down: the way back is the serial console or new metadata (docs/runbook.md)"
+    say "error: sshd stays down: the way back is new metadata; the serial console only shows this (docs/runbook.md, \"The bastion with SSH gone\")"
     exit 1
   fi
 }

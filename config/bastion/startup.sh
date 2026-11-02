@@ -15,19 +15,28 @@
 #   2. Security updates every day, rebooting at 04:00 UTC when one needs it.
 #   3. Says so in a guest attribute once apt is done: scripts/bootstrap.sh stops
 #      the VM for its account only after that.
-#   4. Its agent peer (docs/client-telemetry.md), read from Secret Manager
+#   4. Pings its Healthchecks.io check, once the guard is loaded and sshd is
+#      active, so a bastion that didn't come back from a reboot gets noticed.
+#      A timer does the same at 05:00 UTC every day, as the VM reboots only
+#      when an update needs it and a check pinged only at boot would have
+#      nothing to go overdue by: this file, kept on disk, run with `ping`. No
+#      failure here touches anything else, and the URL never reaches an argument
+#      or any output.
+#   5. Its agent peer (docs/client-telemetry.md), read from Secret Manager
 #      with that token, checked and normalised, as wg-quick@wg-watchtower. A
 #      missing or empty secret, and nothing else, takes the tunnel and Alloy
 #      down: stopped and disabled, and their config removed. Any other failure
 #      to read it, or a config that fails the checks, warns and leaves them
 #      running as they are. Revoking a peer is done by deleting its client in
 #      wg-easy.
-#   5. Grafana Alloy from the release's .deb, pinned by sha256, run with the
+#   6. Grafana Alloy from the release's .deb, pinned by sha256, run with the
 #      config from metadata, capped at 192 MiB, and only with the tunnel.
-#   6. Warns, never fails, when Alloy isn't ready or the tunnel has no
+#   7. Warns, never fails, when Alloy isn't ready or the tunnel has no
 #      handshake within 2 minutes.
 #
-# scripts/check-bastion.sh tests the peer checks, the guard and the rollback.
+# scripts/check-bastion.sh tests the peer checks, the ping, the guard and the
+# rollback. When SSH is gone, config/bastion/recovery.sh takes this one's place
+# in metadata for a boot (docs/runbook.md, "The bastion with SSH gone").
 
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -37,6 +46,11 @@ SECRETS_API="https://secretmanager.googleapis.com/v1"
 # The bastion's agent peer, the one secret its service account may read. A
 # Go test keeps it equal to names.AgentPeers.
 PEER_SECRET="projects/watchtower-observe/secrets/wireguard-bastion-peer"
+# Its Healthchecks.io check's ping URL (scripts/healthchecks.sh), the other one.
+# A Go test keeps it equal to names.SecretHealthchecksBastionURL.
+PING_SECRET="projects/watchtower-observe/secrets/healthchecks-bastion-url"
+# This file, kept on disk for the daily ping.
+STARTUP_TOOL="/usr/local/sbin/watchtower-startup"
 TUNNEL_CIDR="10.8.0.0/24"
 WG_CONF="/etc/wireguard/wg-watchtower.conf"
 ALLOY_VERSION="1.21.2"
@@ -156,6 +170,104 @@ report_settled() {
     warn "could not put that in the guest attribute"
 }
 
+# latest_secret <secret> <token.json> <out>: Secret Manager's answer for the
+# secret's latest version into out, read with the token, which it then removes;
+# prints the HTTP status. The token goes to curl on stdin, never on its command
+# line: any user here may read any process's arguments.
+latest_secret() {
+  local code
+  code="$(jq -r '"header = \"Authorization: Bearer \(.access_token)\""' "$2" |
+    get "${SECRETS_API}/$1/versions/latest:access" "$3" -K -)" || code=000
+  rm -f "$2"
+  printf '%s\n' "$code"
+}
+
+# ping_url_read: the ping URL into ping_url, or false, saying nothing of it. Only
+# a URL of Healthchecks.io's own shape: a wrong value goes nowhere, and can't add
+# to the config it's written into below.
+ping_url_read() {
+  local code
+  ping_url=""
+  code="$(get "${MDS}/instance/service-accounts/default/token" "${work}/ping-token.json" -H 'Metadata-Flavor: Google')"
+  if [[ "$code" != 200 ]]; then
+    rm -f "${work}/ping-token.json"
+    return 1
+  fi
+  code="$(latest_secret "$PING_SECRET" "${work}/ping-token.json" "${work}/ping.json")"
+  if [[ "$code" != 200 ]]; then
+    rm -f "${work}/ping.json"
+    return 1
+  fi
+  ping_url="$(jq -r '.payload.data // empty' "${work}/ping.json" 2>/dev/null | base64 -d 2>/dev/null)" || ping_url=""
+  rm -f "${work}/ping.json"
+  [[ "$ping_url" =~ ^https://hc-ping\.com/[A-Za-z0-9_/-]+$ ]]
+}
+
+# Pings the check: the URL to curl on stdin, and curl's own words nowhere, in case
+# any of them holds it. The caller says what came of it.
+ping_send() {
+  ping_url_read || { ping_url=""; return 1; }
+  printf 'url = "%s"\n' "$ping_url" |
+    curl -fs -o /dev/null --max-time 20 --retry 3 --retry-connrefused -K - 2>/dev/null
+  local rc=$?
+  ping_url=""
+  return "$rc"
+}
+
+# Pings the check if the guard is in the kernel and sshd is active, and otherwise
+# doesn't, so that the check goes overdue. Never fails, and changes nothing here:
+# what it says is all it does, whatever comes of it.
+ping_if_up() {
+  if ! guard_loaded; then
+    log "no ping of the Healthchecks.io check: no metadata guard"
+  elif ! systemctl is-active --quiet ssh.service; then
+    log "no ping of the Healthchecks.io check: sshd isn't active"
+  elif ping_send; then
+    log "pinged the Healthchecks.io check"
+  else
+    warn "could not ping the Healthchecks.io check"
+  fi
+  return 0
+}
+
+# The daily ping: this file on disk, and a timer for it, an hour after the 04:00
+# reboot. A subshell, as put dies on a failure: a failure here costs the daily
+# ping alone. The check's timeout and grace are in scripts/healthchecks.sh.
+ping_setup() {
+  (
+    put "${BASH_SOURCE[0]}" "$STARTUP_TOOL" 0755 root || true
+    cat >"${work}/watchtower-ping.service" <<UNIT || exit 1
+# config/bastion/startup.sh: only with the guard loaded and sshd active.
+[Unit]
+Description=Ping the bastion's Healthchecks.io check, if its guard and sshd are up
+After=network-online.target nftables.service ssh.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${STARTUP_TOOL} ping
+TimeoutStartSec=5min
+UNIT
+    cat >"${work}/watchtower-ping.timer" <<'UNIT' || exit 1
+# config/bastion/startup.sh: the VM reboots only when an update needs it, so this
+# is what keeps its check from going overdue while all is well.
+[Unit]
+Description=Ping the bastion's Healthchecks.io check every day
+
+[Timer]
+OnCalendar=*-*-* 05:00:00 UTC
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
+UNIT
+    put "${work}/watchtower-ping.service" /etc/systemd/system/watchtower-ping.service 0644 root || true
+    put "${work}/watchtower-ping.timer" /etc/systemd/system/watchtower-ping.timer 0644 root || true
+    systemctl daemon-reload || exit 1
+    systemctl enable --now --quiet watchtower-ping.timer || exit 1
+  ) || warn "could not set up the daily ping"
+}
+
 # check_peer <in> <out>: writes the config wg-quick may run, or fails saying
 # why. Only its own words reach the output, never the config's. wg deletes all
 # whitespace from a line, reads keys in any case and drops # comments, and
@@ -246,11 +358,7 @@ fetch_peer() {
     warn "the metadata server answered ${code} for the token; the tunnel stays as it is"
     return 0
   fi
-  # The token goes to curl on stdin, never on its command line: any user
-  # here may read any process's arguments.
-  code="$(jq -r '"header = \"Authorization: Bearer \(.access_token)\""' "${work}/token.json" |
-    get "${SECRETS_API}/${PEER_SECRET}/versions/latest:access" "${work}/peer.json" -K -)" || code=000
-  rm -f "${work}/token.json"
+  code="$(latest_secret "$PEER_SECRET" "${work}/token.json" "${work}/peer.json")"
   case "$code" in
     200) ;;
     404) warn "${PEER_SECRET} has no version"; peer_state=none; return 0 ;;
@@ -329,6 +437,12 @@ main() {
   work="$(mktemp -d)"
   trap 'rm -rf "$work"' EXIT
 
+  # The daily timer's way in.
+  if [[ "${1:-}" == ping ]]; then
+    ping_if_up
+    return 0
+  fi
+
   guard
   if guard_loaded; then
     log "metadata guard loaded"
@@ -339,6 +453,8 @@ main() {
   updates
   installed wireguard-tools jq || apt_install --no-install-recommends wireguard-tools jq
   report_settled
+  ping_setup
+  ping_if_up
   fetch_peer "${work}/peer.in"
   case "$peer_state" in
     have) ;;
