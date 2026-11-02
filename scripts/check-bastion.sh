@@ -467,7 +467,10 @@ if [[ -n "$v6" ]]; then
 else
   echo "skip  guard: no IPv6 here, so fd20:ce::254 is only nft --check'ed"
 fi
-if nft list chain inet metadata_guard metadata | grep -Eq 'counter packets [1-9]'; then
+# Not piped: grep -q stops reading at its match, and pipefail then takes nft's
+# failed write for a failed check.
+guard_chain="$(nft list chain inet metadata_guard metadata)"
+if grep -Eq 'counter packets [1-9]' <<<"$guard_chain"; then
   pass "guard: refusals counted"
 else
   flunk "guard: no refusal counted"
