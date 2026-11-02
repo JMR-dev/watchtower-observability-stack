@@ -44,8 +44,8 @@ scripts/secret.sh check
 - **The hosts** get theirs from Ansible, as podman secrets (root-only, out
   of unit files and container listings): the cluster S3 key, the LUKS key,
   the pull key, Grafana's, Postgres's and Patroni's passwords, wg-easy's
-  first-start password, Caddy's DNS-01 key and the Healthchecks.io ping
-  URLs (the backup's, and the host's own). A new value reaches them on
+  first-start password, Caddy's DNS-01 key, the GCP reader's key and the
+  Healthchecks.io ping URLs (the backup's, and the host's own). A new value reaches them on
   the next deploy, and only the containers that use it restart.
 
 Why a long-lived key: the Gitea runner cluster keeps Actions jobs away from
@@ -78,7 +78,7 @@ every 90 days.
 | `ssh-private-key` | ed25519, root on the hosts (public half: `watchtower:sshPublicKey`); Ansible connects with it |
 | `s3-cluster-access-key`, `s3-cluster-secret-key` | Hetzner S3 credential `cluster`: Loki, Mimir, Tempo, Fluent Bit and the Postgres backup. The cloud program reads the access key ID too, for the bucket policies |
 | `luks-passphrase` | Encrypts every host's data volume. **Losing it loses the volumes' data** |
-| `gar-pull-key` | JSON key of `watchtower-image-puller@`, reader on the `watchtower` repo; the hosts pull our images (Caddy, wg-easy, Patroni) with it. `scripts/rotate-gcp-key.sh puller` |
+| `gar-pull-key` | JSON key of `watchtower-image-puller@`, reader on the `watchtower` repo; the hosts pull our images (Caddy, wg-easy, Patroni, Alloy) with it. `scripts/rotate-gcp-key.sh puller` |
 | `grafana-admin-password` | Grafana's `admin`; `scripts/onboard-tenant.sh` reads the gopass copy |
 | `grafana-secret-key` | The same on all three Grafanas: it encrypts datasource secrets in the shared database |
 | `grafana-db-password` | Grafana's Postgres role |
@@ -86,6 +86,7 @@ every 90 days.
 | `patroni-restapi-password` | Patroni's REST API (switchover, restart) |
 | `wg-easy-password` | wg-easy's first-start admin password |
 | `caddy-dns-key` | JSON key of `watchtower-caddy-dns01@` (DNS-01); `scripts/rotate-gcp-key.sh caddy` |
+| `gcp-telemetry-reader-key` | JSON key of `watchtower-gcp-reader@`, which pulls Gitea CI's logs and metrics (granted in the gitea repo's stacks); `scripts/rotate-gcp-key.sh reader`. A podman secret, mounted 0400 for Alloy's user on the nodes (`roles/gcppull`). Optional: `?@` in `deploy.yml`, and `roles/gcppull` skips itself without it. `secret.sh check` reports it empty until then |
 | `healthchecks-pg-backup-url` | Ping URL of the Healthchecks.io check of the nightly backup (docs/runbook.md, "First deploy"). The nightly backup pings it, or its `/fail` when a run fails. Anyone holding it can ping the check |
 | `healthchecks-host-urls` | One JSON object, host name to the ping URL of its Healthchecks.io check, written by `scripts/healthchecks.sh`. Each host gets only its own URL |
 | `healthchecks-deploy-url` | Ping URL of the Healthchecks.io check `watchtower-deploy`, written by `scripts/healthchecks.sh`. The deploy's last job pings it, or its `/fail` when a job failed. Anyone holding it can ping the check |

@@ -19,6 +19,7 @@ watchtower_memory:
   patroni: 1024
   grafana: 512
   fluentbit: 256
+  gcppull: 384
   caddy: 512
   wg_easy: 512
 

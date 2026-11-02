@@ -376,7 +376,7 @@ hours of traces for the block builder to catch up on.
 
 ## Our images
 
-`build/<name>/` holds each of our images: Caddy and wg-easy on Alpine,
+`build/<name>/` holds each of our images: Alloy, Caddy and wg-easy on Alpine,
 Patroni on the Postgres image. An Alpine image's tag is its version, the
 Alpine release, its revision and the day it was built, e.g.
 `15.5.0-alpine3.24.3-r2-20261025`. Patroni's tag is just version and
@@ -459,6 +459,44 @@ Loki's compactor processes deletes after 2 hours. The record goes to
 `gdpr-audit/` in the log archive. Mimir and Tempo have no per-record delete;
 their 90- and 30-day retention is the erasure window.
 
+## Gitea CI's logs and metrics
+
+Alloy on every node (`roles/gcppull`, unit `gcppull`) pulls the subscription
+`watchtower-logs-pull` in `gitea-496920` and `gitea-ci-781388`, and `watchtower-3`
+lists their Cloud Monitoring series, as `watchtower-gcp-reader@`
+(docs/client-telemetry.md). It writes straight to the nodes' Loki and Mimir, in the
+tenant `jasonmross`. Without the key the role does nothing, so a deploy passes.
+
+**Turning it on,** in this order:
+
+1. The gitea repo first (its `docs/cicd.md`, "Logs and metrics to Watchtower"): `make
+   ci-up` from the commit that sets `watchtowerReader`, then merge, and let its infra
+   deploy make the app project's half. The reader's account must exist by then:
+   `scripts/bootstrap.sh` has made it since before this.
+2. Here, from this change's branch or main: `source scripts/env.sh &&
+   scripts/bootstrap.sh`. It creates the secret, lets the deployer read it, and enables
+   the Pub/Sub and Monitoring APIs here.
+3. `scripts/rotate-gcp-key.sh reader`. `scripts/secret.sh check` reports the secret
+   empty until this.
+4. A deploy (merge this, or dispatch `deploy.yml`). The first with the key installs
+   Alloy, a node at a time.
+5. The checks under "Verification" in docs/client-telemetry.md, the PII queries for
+   `service="gitea-ci"` above all, over the first hour.
+
+**If it doesn't flow:** `journalctl -u gcppull` on a node. `PERMISSION_DENIED` naming
+an API means it's off in the project named; on a subscription, gitea's half isn't
+applied. A bad key has the unit restarting, which `watchtower-health` reports.
+
+**Moving the metrics:** `gcppull_metrics_host` in
+`ansible/inventory/group_vars/all/placement.yml`, and a deploy. Only one node may list
+them; if `watchtower-3` is down for long, logs keep flowing from the other two.
+
+**Turning it off:** a deploy leaves a running pull alone when the key is missing, since
+a failed read looks the same. So on each node `systemctl stop gcppull`, `rm
+/etc/containers/systemd/gcppull.container`, `podman secret rm
+gcp-telemetry-reader-key`, `systemctl daemon-reload`; then delete the account's key and
+destroy the secret's versions. Gitea's half goes the way its `docs/cicd.md` says.
+
 ## Credential rotation
 
 Every secret but `GCP_DEPLOYER_KEY` is stored with `scripts/secret.sh put
@@ -472,6 +510,7 @@ copy. The hosts get it on the next deploy (push to main, or dispatch
 | Caddy DNS-01 key | `scripts/rotate-gcp-key.sh caddy`, then deploy |
 | Image push key | `scripts/rotate-gcp-key.sh pusher` (updates `GAR_PUSH_KEY` too) |
 | Image pull key | `scripts/rotate-gcp-key.sh puller`, then deploy |
+| GCP reader key | `scripts/rotate-gcp-key.sh reader`, then deploy, soon: it deletes the old key, and Alloy holds it until the deploy restarts it (every 90 days) |
 | Hetzner token | new token in the Console → `secret.sh put hcloud-token` → delete the old one (only Pulumi uses it) |
 | Cluster S3 key | new key → `secret.sh put s3-cluster-access-key` and `-secret-key` → deploy (the bucket policies and every service follow) → delete the old key |
 | Admin S3 key | new key → `secret.sh put s3-admin-access-key` and `-secret-key` → `source scripts/env.sh && scripts/bootstrap.sh` (state bucket policy) → deploy → delete the old key |

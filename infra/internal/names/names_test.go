@@ -291,6 +291,40 @@ func TestBootstrapMakesTheReader(t *testing.T) {
 	}
 }
 
+// The reader's key goes from scripts/rotate-gcp-key.sh, as that account, to the
+// deploy, which reads it as optional: a deploy before the owner's steps must
+// skip the pull, not fail. Not in the setup assert's watchtower_secret either,
+// which fails on any value that is empty.
+func TestReaderKeyIsWiredAndOptional(t *testing.T) {
+	read := func(path string) string {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	rotate := `(?m)^\s+reader\) SA_ID=` + ReaderSA + ` SECRET=` + SecretGCPTelemetryReaderKey + ` ;;$`
+	if !regexp.MustCompile(rotate).MatchString(read("../../../scripts/rotate-gcp-key.sh")) {
+		t.Errorf("rotate-gcp-key.sh does not map reader to %s and %s", ReaderSA, SecretGCPTelemetryReaderKey)
+	}
+	line := `(?m)^\s+\?@GCP_TELEMETRY_READER_KEY_FILE=` + SecretGCPTelemetryReaderKey + `$`
+	if !regexp.MustCompile(line).MatchString(read("../../../.gitea/workflows/deploy.yml")) {
+		t.Errorf("deploy.yml does not read %s as optional", SecretGCPTelemetryReaderKey)
+	}
+	secrets := read("../../../ansible/inventory/group_vars/all/secrets.yml")
+	block := regexp.MustCompile(`(?ms)^watchtower_secret:\n(.*?)^\S`).FindStringSubmatch(secrets)
+	if block == nil {
+		t.Fatal("secrets.yml has no watchtower_secret block followed by another key")
+	}
+	if strings.Contains(block[1], "GCP_TELEMETRY_READER_KEY_FILE") {
+		t.Error("the reader key is in watchtower_secret, so site.yml fails a deploy without it")
+	}
+	if !strings.Contains(secrets, "GCP_TELEMETRY_READER_KEY_FILE") {
+		t.Error("secrets.yml does not read the reader key's file")
+	}
+}
+
 // ci.yml and deploy.yml build every image in build/ and nothing else: an
 // image missing from deploy.yml would never reach the registry, and the
 // hosts job would install a tag that isn't there.

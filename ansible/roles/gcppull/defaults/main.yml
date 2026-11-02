@@ -1,0 +1,26 @@
+---
+# What the gitea repo's two stacks make for watchtower (their pkg/telemetry):
+# one pull subscription of this name in each project. `id` names the component
+# in Alloy, which allows no dash.
+gcppull_subscription: watchtower-logs-pull
+gcppull_sources:
+  # The runner cluster: its runners' own logs, job pod events, the autoscaler
+  # and Cloud NAT.
+  - {id: runners, project: gitea-496920}
+  # The two Cloud Run functions, gitea-webhook and build-status.
+  - {id: cicd, project: gitea-ci-781388}
+
+# GOMEMLIMIT, inside the cap in group_vars/all/sizing.yml.
+gcppull_gomemlimit: 300MiB
+
+# The role does anything only with a key, a file holding something. Tests the
+# path first, so no key means no read. Never prints the value.
+gcppull_enabled: >-
+  {{ watchtower_gcp_reader_key_file is file
+     and (lookup('ansible.builtin.file', watchtower_gcp_reader_key_file) | length) > 0 }}
+
+# The shared scrub block, out of the client example as it stands, so this
+# config can't drift from what every service copies.
+gcppull_scrub_block: >-
+  {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../config/alloy/config.alloy.example')
+     | regex_search('(?ms)^// scrub: begin.*^// scrub: end$') }}

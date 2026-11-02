@@ -52,7 +52,8 @@ Typical bases:
 | Pulumi state | Hetzner Object Storage, fsn1 |
 | DNS records | Google Cloud DNS (global; no personal data) |
 | Credentials (API tokens, keys, passwords) | Google Secret Manager, payloads replicated to europe-west3 only (no personal data) |
-| Our container images (Caddy, wg-easy, Patroni) | Google Artifact Registry, europe-west3 (no personal data) |
+| Our container images (Caddy, wg-easy, Patroni, Alloy) | Google Artifact Registry, europe-west3 (no personal data) |
+| Gitea CI's logs, before they are stored | Unlike the services' below, not scrubbed where they start: they wait in Pub/Sub as Cloud Logging wrote them, then the nodes in fsn1 pull them and keep only named fields, scrubbed, before anything is stored: remote IPs, user agents and logins go |
 | Our services' telemetry, in transit | Scrubbed on each service's host in Google Compute Engine, us-east1, then sent over WireGuard to fsn1; nothing stored on the way. Gitea CI's logs wait in Pub/Sub (gitea projects, up to 7 days) until pulled. Personal data is scrubbed before it leaves the host: IPs and emails in full, credentials, cookies, OS Login usernames; Vaultwarden ships only allow-listed lines |
 | Break-glass SSH sessions | Relayed by the bastion in Google Compute Engine, us-east1 (the free tier exists only in US regions). It relays SSH end to end encrypted to the proxy, holds no key for it and stores nothing. Used only when the VPN is down or the proxy is rebuilt |
 

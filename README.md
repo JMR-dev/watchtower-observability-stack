@@ -27,6 +27,7 @@ reachable only through WireGuard at the private endpoint
 | `infra/cloud/` | Pulumi: Hetzner network, hosts, volumes, firewalls, buckets; Cloud DNS records; the Ansible inventory |
 | `infra/internal/` | Shared names, the config reader, Secret Manager reads, the mock runtime the tests use |
 | `ansible/` | Everything on the hosts: one role per service, `playbooks/site.yml`, `playbooks/render.yml` |
+| `build/alloy/` | Grafana Alloy for the nodes, which pulls Gitea CI's logs and metrics from GCP |
 | `build/caddy/` | The proxy image: Caddy + Coraza WAF + Cloud DNS DNS-01 |
 | `build/patroni/` | Patroni + PostgreSQL 18 for the nodes, built with uv |
 | `build/wg-easy/` | The client VPN and its UI, on Alpine with nftables-backed iptables |
@@ -65,7 +66,7 @@ CONTAINER_RUNTIME=podman scripts/check-configs.sh
 renders every host's configs from the sample inventory and checks each with
 the program that reads it (quadlet, Loki, Mimir, Tempo, Fluent Bit;
 shellcheck for the host scripts), as CI's `configs` job does. `scripts/build-image.sh` checks the Caddyfile,
-`patroni.yml` and wg-easy's tools with the images it builds.
+`patroni.yml`, wg-easy's tools and the GCP pull's Alloy config with the images it builds, and `scripts/check-gcppull-scrub.sh` runs that config over made-up log entries.
 
 ## Documentation
 

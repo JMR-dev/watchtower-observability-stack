@@ -12,6 +12,9 @@
 #                                        #    the Gitea Actions secret GAR_PUSH_KEY
 #   scripts/rotate-gcp-key.sh puller     # -> secret gar-pull-key; the next deploy
 #                                        #    logs the hosts in with it
+#   scripts/rotate-gcp-key.sh reader     # -> secret gcp-telemetry-reader-key; the
+#                                        #    next deploy hands it to Alloy on the
+#                                        #    nodes (roles/gcppull)
 #
 # Run every 90 days (runbook). Needs gcloud as the project owner, jq, curl,
 # an unlocked gopass, and for `deployer` and `pusher` a Gitea token with
@@ -23,14 +26,16 @@
 # none. The deployer can write records in the one zone
 # watchtower.jasonmross.dev and read the stack's secrets; Caddy's key can
 # only write records in that zone; the pusher can only write to, and the
-# puller only read from, the one Artifact Registry repo.
+# puller only read from, the one Artifact Registry repo; the reader can only
+# pull Gitea CI's two log subscriptions and list its Cloud Monitoring series
+# (granted in the gitea repo's stacks).
 #
 # The key and the token never appear on a command line (`ps` shows those):
 # they move through files in a 0700 temp dir that is shredded on exit.
 
 set -euo pipefail
 
-usage() { echo "usage: $0 deployer|caddy|pusher|puller" >&2; exit 1; }
+usage() { echo "usage: $0 deployer|caddy|pusher|puller|reader" >&2; exit 1; }
 [[ $# -eq 1 ]] || usage
 # SECRET is where the key goes in Secret Manager; the deployer's own key is
 # the one that can't live there (it is the key to it).
@@ -39,6 +44,7 @@ case "$1" in
   caddy) SA_ID=watchtower-caddy-dns01 SECRET=caddy-dns-key ;;
   pusher) SA_ID=watchtower-image-pusher SECRET=gar-push-key ;;
   puller) SA_ID=watchtower-image-puller SECRET=gar-pull-key ;;
+  reader) SA_ID=watchtower-gcp-reader SECRET=gcp-telemetry-reader-key ;;
   *) usage ;;
 esac
 

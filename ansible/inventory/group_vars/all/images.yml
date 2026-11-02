@@ -31,3 +31,4 @@ watchtower_own_image_repo: "{{ watchtower_registry }}/watchtower-observe/watchto
 watchtower_image_tags: {}
 caddy_image: "{{ watchtower_own_image_repo }}/caddy:{{ watchtower_image_tags['caddy'] | default('unset') }}"
 patroni_image: "{{ watchtower_own_image_repo }}/patroni:{{ watchtower_image_tags['patroni'] | default('unset') }}"
+alloy_image: "{{ watchtower_own_image_repo }}/alloy:{{ watchtower_image_tags['alloy'] | default('unset') }}"

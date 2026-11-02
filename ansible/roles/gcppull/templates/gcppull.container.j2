@@ -1,0 +1,38 @@
+# Managed by Ansible (roles/gcppull).
+[Unit]
+Description=Alloy (pulls Gitea CI's logs and metrics from GCP)
+Wants=network-online.target wg-quick@wg1.service
+After=network-online.target wg-quick@wg1.service
+RequiresMountsFor={{ watchtower_data }}
+
+[Container]
+Image={{ alloy_image }}
+ContainerName=gcppull
+Network=host
+User=473
+Group=473
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+LogDriver=journald
+Volume={{ watchtower_data }}/gcppull:/var/lib/alloy/data:Z
+Volume={{ watchtower_config }}/gcppull:/etc/alloy:ro,Z
+# A file for its user alone, never type=env: `podman inspect` shows a container's
+# environment. The variable below holds only the path.
+Secret=gcp-telemetry-reader-key,type=mount,target=/etc/gcp-telemetry/key.json,uid=473,mode=0400
+Environment=GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp-telemetry/key.json
+Environment=GOMEMLIMIT={{ gcppull_gomemlimit }}
+{% for ip in watchtower_node_ips_local_first %}
+AddHost=loki.internal:{{ ip }}
+AddHost=mimir.internal:{{ ip }}
+{% endfor %}
+Exec=run --server.http.listen-addr=127.0.0.1:{{ watchtower_ports.gcppull }} --storage.path=/var/lib/alloy/data --disable-reporting /etc/alloy/config.alloy
+PodmanArgs=--memory={{ watchtower_memory.gcppull }}m --authfile={{ watchtower_config }}/registry-auth.json
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

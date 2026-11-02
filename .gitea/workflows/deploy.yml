@@ -13,7 +13,7 @@
 #                      break-glass bastion, when wg-easy is down or the proxy
 #                      is being rebuilt
 #
-#   guard ─ images (caddy, patroni, wg-easy) ─ cloud ─ hosts ─ report
+#   guard ─ images (alloy, caddy, patroni, wg-easy) ─ cloud ─ hosts ─ report
 #
 # Every run ends by pinging the Healthchecks.io check watchtower-deploy
 # (scripts/healthchecks.sh): /fail as soon as any job failed, which alerts
@@ -100,7 +100,7 @@ jobs:
       # Every build/<name>/; a Go test keeps this list and ci.yml's equal to
       # those directories.
       matrix:
-        image: [caddy, patroni, wg-easy]
+        image: [alloy, caddy, patroni, wg-easy]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.gitea/actions/setup
@@ -203,6 +203,9 @@ jobs:
             # None before the first deploy makes it (a fresh environment
             # deploys with ssh_via=bastion).
             ?@WIREGUARD_DEPLOY_PEER_FILE=wireguard-deploy-peer
+            # None until the owner runs scripts/rotate-gcp-key.sh reader:
+            # roles/gcppull skips itself without it.
+            ?@GCP_TELEMETRY_READER_KEY_FILE=gcp-telemetry-reader-key
       - name: Inventory and pinned host keys from the cloud stack
         working-directory: infra/cloud
         run: |

@@ -39,6 +39,8 @@
       - {src: pgbackup/templates/watchtower-pg-backup.service.j2, dest: watchtower-pg-backup.service}
       - {src: pgbackup/templates/watchtower-pg-backup-failed.service.j2, dest: watchtower-pg-backup-failed.service}
       - {src: pgbackup/templates/watchtower-pg-backup.timer.j2, dest: watchtower-pg-backup.timer}
+      - {src: gcppull/templates/config.alloy.j2, dest: gcppull/config.alloy}
+      - {src: gcppull/templates/gcppull.container.j2, dest: quadlets/gcppull.container}
     per_proxy:
       - {src: edge/templates/Caddyfile.j2, dest: caddy/Caddyfile}
       - {src: edge/templates/caddy.container.j2, dest: quadlets/caddy.container}
@@ -52,14 +54,14 @@
     - name: Role defaults the templates use
       ansible.builtin.include_vars:
         file: "{{ playbook_dir }}/../roles/{{ item }}/defaults/main.yml"
-      loop: [tempo, health]
+      loop: [tempo, health, gcppull]
 
     - name: Output directories
       ansible.builtin.file:
         path: "{{ render_dir }}/{{ item }}"
         state: directory
         mode: "0755"
-      loop: [quadlets, fluent-bit, loki, mimir, kafka, patroni, grafana, caddy, tempo]
+      loop: [quadlets, fluent-bit, loki, mimir, kafka, patroni, grafana, caddy, tempo, gcppull]
 
     - name: Templates every host renders
       ansible.builtin.template:

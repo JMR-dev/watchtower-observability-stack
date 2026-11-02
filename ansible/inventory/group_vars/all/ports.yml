@@ -23,6 +23,8 @@ watchtower_ports:
   postgres: 5432
   grafana: {http: 3000, alerting: 9094}
   fluentbit: 2020
+  # Alloy's UI (roles/gcppull), on the node's loopback only.
+  gcppull: 12345
   # wg-easy's UI, on the proxy's loopback; Caddy serves it on :51821.
   wg_easy_ui: 51822
   # Caddy's listeners, on the tunnel address 10.8.0.1 only.

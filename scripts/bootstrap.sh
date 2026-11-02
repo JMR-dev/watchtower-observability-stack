@@ -54,7 +54,8 @@
 #      infra/cloud/Pulumi.prod.yaml (breakGlassCidrs, bastionHostKey), never
 #      to the terminal; commit the change and deploy.
 #
-# Keys are made by scripts/rotate-gcp-key.sh.
+# Keys are made by scripts/rotate-gcp-key.sh, watchtower-gcp-reader's too
+# (`reader`, into the secret gcp-telemetry-reader-key that step 6 creates).
 #
 # Costs: the bastion is free-tier; Cloud NAT and its address about $4-5 a
 # month.
@@ -151,8 +152,11 @@ s3 s3api put-bucket-policy --bucket "$STATE_BUCKET" --policy "$policy"
 # ---------------------------------------------------------------------------
 log "3/7 Cloud DNS zone ${ZONE} (${DOMAIN}.), delegated from ${PARENT_ZONE}"
 # ---------------------------------------------------------------------------
+# Pub/Sub and Monitoring because a request made with a service account's key
+# can count against that account's project, wherever the subscription is: the
+# reader's calls into gitea's projects may need them on here too.
 gcloud services enable dns.googleapis.com iam.googleapis.com secretmanager.googleapis.com \
-  artifactregistry.googleapis.com --project "$GCP_PROJECT"
+  artifactregistry.googleapis.com pubsub.googleapis.com monitoring.googleapis.com --project "$GCP_PROJECT"
 
 shard() { tr ';,' '\n' | sed -n 's/^ns-cloud-\([a-e]\)[0-9].*/\1/p' | sort -u; }
 parent_ns="$(gcloud dns managed-zones describe "$PARENT_ZONE" --project "$PARENT_PROJECT" --format='value(nameServers)')"
@@ -449,5 +453,6 @@ Next (docs/runbook.md, "First deploy"):
      scripts/rotate-gcp-key.sh caddy       # secret caddy-dns-key
      scripts/rotate-gcp-key.sh pusher      # secret gar-push-key + Gitea GAR_PUSH_KEY
      scripts/rotate-gcp-key.sh puller      # secret gar-pull-key
+     scripts/rotate-gcp-key.sh reader      # secret gcp-telemetry-reader-key, after gitea's stacks (docs/client-telemetry.md)
   3. scripts/secret.sh check               # every secret has a value
 EOF

@@ -76,6 +76,8 @@
     - grafana
     # After grafana, which creates the database it dumps.
     - pgbackup
+    # After Loki and Mimir, which it writes to. Skips itself without its key.
+    - gcppull
     # Last: a node starts reporting once everything on it is installed.
     - health
   post_tasks:

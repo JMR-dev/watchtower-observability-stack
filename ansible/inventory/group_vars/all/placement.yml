@@ -16,3 +16,7 @@ tempo_frontend_ips: >-
   {{ ([mesh_ip] if inventory_hostname in tempo_query_frontend_hosts else [])
      + (tempo_query_frontend_hosts | reject('equalto', inventory_hostname) | reverse
         | map('extract', hostvars, 'mesh_ip') | list) }}
+
+# The one node that lists Gitea CI's Cloud Monitoring series (roles/gcppull):
+# two would write the same series. Every node pulls its logs.
+gcppull_metrics_host: watchtower-3

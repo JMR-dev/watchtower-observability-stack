@@ -2,8 +2,8 @@
 # nothing here can reach Hetzner, GCP or the hosts. Deploys are deploy.yml.
 #
 # Require these checks in the branch protection for main (Settings ->
-# Branches): go, ansible, configs, images (caddy), images (patroni),
-# images (wg-easy), semgrep, shell, alloy.
+# Branches): go, ansible, configs, images (alloy), images (caddy),
+# images (patroni), images (wg-easy), semgrep, shell, alloy.
 #
 # Runs on the GKE runners (gitea-496920/gitea-runners; the gitea repo's
 # docs/runners.md):
@@ -63,13 +63,16 @@ jobs:
         run: |
           set -euo pipefail
           ansible-galaxy collection install -r requirements.yml -p .collections >/dev/null
-          for playbook in playbooks/site.yml playbooks/render.yml playbooks/test-peer-check.yml; do
+          for playbook in playbooks/site.yml playbooks/render.yml playbooks/test-peer-check.yml playbooks/test-gcppull-skip.yml; do
             ansible-playbook -i inventory/hosts.sample.yml "$playbook" --syntax-check
           done
           ansible-lint
       - name: The publish check on an agent's config refuses what it must
         working-directory: ansible
         run: ansible-playbook -i inventory/hosts.sample.yml playbooks/test-peer-check.yml
+      - name: The GCP pull skips itself without its key
+        working-directory: ansible
+        run: ansible-playbook -i inventory/hosts.sample.yml playbooks/test-gcppull-skip.yml
       - name: Render every host's firewall and check it with nft
         working-directory: ansible
         run: |
@@ -117,7 +120,7 @@ jobs:
       # Every build/<name>/; a Go test keeps this list and deploy.yml's equal
       # to those directories.
       matrix:
-        image: [caddy, patroni, wg-easy]
+        image: [alloy, caddy, patroni, wg-easy]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.gitea/actions/setup
@@ -179,7 +182,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.gitea/actions/setup
         with:
-          tools: alloy
+          tools: alloy ansible
       - name: The client example is formatted and valid
         run: |
           set -euo pipefail
@@ -188,3 +191,18 @@ jobs:
       # Nothing on watchtower scrubs: the client's rules are all there is.
       - name: Its scrub rules hold back the PII in the fixture, and only that
         run: scripts/check-alloy-scrub.sh
+      - name: Render the GCP pull's config
+        working-directory: ansible
+        run: ansible-playbook -i inventory/hosts.sample.yml playbooks/render.yml >/dev/null
+      - name: The GCP pull's config is formatted and valid on each kind of node
+        run: |
+          set -euo pipefail
+          for host in watchtower-1 watchtower-3; do
+            config="ansible/.render/${host}/gcppull/config.alloy"
+            diff -u "$config" <(alloy fmt "$config")
+            alloy validate "$config"
+          done
+      # Through Alloy's real GCP source, in push mode, with made-up log entries
+      # in every shape the sinks send.
+      - name: The GCP pull holds back the PII in its fixture, and only that
+        run: scripts/check-gcppull-scrub.sh

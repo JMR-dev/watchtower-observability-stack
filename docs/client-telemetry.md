@@ -298,18 +298,50 @@ reads a secret's value or SSHes anywhere.
 ### W2: here, GCP pull (after G1 and the reader key)
 
 - `build/alloy/`: our own Alpine image from the release binary (arm64,
-  tagged, Trivy-gated), in the images matrices.
+  tagged, Trivy-gated), in the images matrices. The binary is linked against
+  glibc, so the image carries `gcompat`.
 - `ansible/roles/gcppull`: `loki.source.gcplog` pulling both subscriptions
-  on all three nodes; `__gcp_*` relabelled to `project`, `resource_type`,
+  (`watchtower-logs-pull` in `gitea-496920` and in `gitea-ci-781388`, one a
+  project) on all three nodes; `__gcp_*` relabelled to `project`, `resource_type`,
   `namespace`, `container`, `cloud_run_service` (pod in structured
   metadata); the runner's own level via `stage.logfmt`; Cloud Run's slog
   via `stage.json`; the scrub; writes to `loki.internal` and
   `mimir.internal` with `X-Scope-OrgID: jasonmross`.
-  `prometheus.exporter.gcp` on `watchtower-3` only, scraped every 5 m, with
-  `extra_filters` for cluster `gitea-runners` and the runner namespaces. A
-  384 MiB cap. The role skips itself without the key.
+  `prometheus.exporter.gcp` on `watchtower-3` only (`gcppull_metrics_host`),
+  scraped every 5 m, with `extra_filters` for cluster `gitea-runners` and the
+  runner namespaces. A 384 MiB cap. The role skips itself without the key: no
+  file, no image pull, no failure.
 - Secret `gcp-telemetry-reader-key` (setup action `?@`, a podman secret);
   `scripts/rotate-gcp-key.sh reader`.
+
+As built:
+
+- **Labels:** `service="gitea-ci"`, `host="gcp"` and `env="production"` on all of
+  it. `host` is the one value, not the pulling node, which would split every
+  stream three ways.
+- **The shared block is as in the example, byte for byte,** taken from it when the
+  config renders, and this pipeline's own rules are a `loki.process "gcp"` of their
+  own in front of it, since they rebuild each line.
+- **Default deny.** `use_full_line` brings in the whole log entry, and only the
+  fields each kind names go out, so `remoteIp`, `userAgent`, `referer`, a flow's
+  addresses and a request's query string never ship; a line still holding the raw
+  entry is dropped. A resource and log not in the sinks' filters, a namespace other
+  than the allowed ones and a runner's line that doesn't start `time=` are dropped
+  too. This is in `loki.process`: on this source a relabel rule that drops an entry
+  only strips its labels, and the entry still ships.
+- **Logins:** `author …` and `pusher … is not allowed`, as well as `head is in …`
+  and `delivery for "…"`, which name a fork's owner or another repo.
+- **Metrics:** a pod's name is never a label, so `pod_name` becomes a `pod_slot` of
+  1024: dropping it alone would make a namespace's pods one series, whose samples
+  Mimir refuses as duplicates. `nat_ip` goes too. Prefixes are named one by one in
+  `config.alloy.j2`, enough for W4's backlog, NAT drops and Cloud Run 5xx.
+- **Fixture test:** `scripts/check-gcppull-scrub.sh` runs the rendered config over
+  `config/alloy/testdata/gcppull.log`, made-up entries in every shape and some that
+  must not ship, through the real source in push mode. `<fixture>.expect` holds
+  everything that may come out, labels and metadata too.
+- **Owner's steps,** in order: gitea's change first (`make ci-up`, merge, its infra
+  deploy; the runbook's "Gitea CI's logs and metrics"), then `scripts/bootstrap.sh`
+  from this branch, `scripts/rotate-gcp-key.sh reader`, and a deploy.
 
 ### W3: here, the bastion
 
@@ -395,7 +427,22 @@ host `H`:
 {host="H"} |~ `(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9-]+)\s+AAAA`
 {service="silverbullet"} |~ `/\.fs/[^<"\\]`
 {service="silverbullet"} |~ `"uri":"/([^.<"]|\.(fs|revisions|proxy)/[^<"])|\[uri \\"/([^.<\\]|\.(fs|revisions|proxy)/[^<\\])|[?&]from=[^<]|Proxying to [^<]`
+{service="gitea-ci"} |~ "(?:^|[^0-9])(?:\\d{1,3}\\.){3}\\d{1,3}(?:$|[^0-9])"
+{service="gitea-ci"} |~ `[\p{L}\p{N}._%+'!#$*^~-]+(?:@|%40|%2540|\\u0040)[\p{L}\p{N}.-]+\.[A-Za-z]{2,}`
+{service="gitea-ci"} |~ `(?i)(remote_?ip|server_?ip|user_?agent|referr?er)\\*"?\s*[:=]\s*\\*"?[^\[\s\\"]`
+{service="gitea-ci"} |~ `\b(author|pusher) [^\[]+ is not allowed|\bhead is in [^\[]|\bdelivery for \\*"[^\[]`
+{service="gitea-ci"} |~ `"(logName|insertId|httpRequest|protoPayload)"\s*:`
+{service="gitea-ci"} |= "cloudaudit"
+{service="gitea-ci"} |= "eyJ"
+{service="gitea-ci", resource_type="k8s_container", namespace!="gitea-runner"}
+{service="gitea-ci", resource_type="k8s_container"} !~ `^time=`
+{service="gitea-ci", resource_type="k8s_pod", namespace!~"gitea-jobs|gitea-jobs-arm64"}
+{service="gitea-ci", pod=~".+"}
 ```
+
+The last query looks in stream labels only, and `pod` belongs in structured
+metadata, so it stays empty. In Mimir, `count({service="gitea-ci", pod_name!=""})`
+and `count({service="gitea-ci", nat_ip!=""})` are empty too.
 
 The email query skips a line that names an instantiated systemd unit
 (`wg-quick@wg-watchtower.service`), so an address on the same line as one goes
@@ -416,6 +463,9 @@ counter rises.
 
 Gitea CI: a pull request somewhere shows in `{service="gitea-ci",
 namespace="gitea-runner"}` within about a minute; the subscription backlog
-stays near 0; `{service="gitea-ci"} |= "cloudaudit"` is empty.
+stays near 0; `{service="gitea-ci"} |= "cloudaudit"` is empty. It has no host of
+its own to check: `{service="gitea-ci"}` by `project` shows both projects' logs,
+`stackdriver_pubsub_subscription_pubsub_googleapis_com_subscription_num_undelivered_messages`
+one series a project, and `journalctl -u gcppull` on any node why not.
 
 Traces: a Tempo search finds nothing, so nothing exports OTLP by mistake.

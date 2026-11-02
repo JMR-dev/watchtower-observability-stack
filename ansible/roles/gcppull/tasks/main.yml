@@ -1,0 +1,20 @@
+---
+# Gitea CI's logs and metrics, pulled from GCP (docs/client-telemetry.md): Cloud
+# Run has no host for an agent, and a VPN key in the CI cluster would be in reach
+# of DinD jobs. Alloy on every node pulls the log subscriptions; watchtower-3
+# alone lists Cloud Monitoring.
+#
+# Without the reader's key (scripts/rotate-gcp-key.sh reader, run by the owner)
+# it does nothing at all: no image pulled, no file written, nothing failed. That
+# also leaves a running pull as it is, since the deploy reads the key as optional
+# and any failed read looks the same as no key. To turn the pull off, see "Gitea
+# CI's logs and metrics" in docs/runbook.md.
+
+- name: No reader key yet, so nothing to do
+  ansible.builtin.debug:
+    msg: no gcp-telemetry-reader-key; roles/gcppull changes nothing
+  when: not (gcppull_enabled | bool)
+
+- name: Install the pull
+  ansible.builtin.include_tasks: install.yml
+  when: gcppull_enabled | bool

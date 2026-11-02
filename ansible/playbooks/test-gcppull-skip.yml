@@ -1,0 +1,76 @@
+---
+# roles/gcppull does nothing without the reader's key, for CI's ansible job: a
+# deploy before the owner's steps must change nothing and fail nothing. Any task
+# past the skip would fail here: it writes under /etc and calls podman and
+# systemd, and this runs on no host. The values are made up. Touches a temp file
+# on the runner, no cloud and no VM.
+#
+#   ansible-playbook -i inventory/hosts.sample.yml playbooks/test-gcppull-skip.yml
+
+- name: The GCP pull skips itself without its key
+  hosts: watchtower-1
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    # Empty when GCP_TELEMETRY_READER_KEY_FILE is unset, as secrets.yml reads it.
+    watchtower_gcp_reader_key_file: ""
+    watchtower_config: "{{ playbook_dir }}/../.test-gcppull/config"
+  tasks:
+    - name: A deploy's assert over the secrets never sees this one
+      ansible.builtin.assert:
+        that: "'gcp_telemetry_reader_key' not in watchtower_secret"
+        quiet: true
+
+    - name: With no key the role runs, and skips
+      ansible.builtin.include_role:
+        name: gcppull
+        # So the tasks below can ask the role's own question.
+        public: true
+
+    - name: It wrote nothing
+      ansible.builtin.stat:
+        path: "{{ watchtower_config }}/gcppull"
+      register: gcppull_test_dir
+
+    - name: Check that
+      ansible.builtin.assert:
+        that: not gcppull_test_dir.stat.exists
+        quiet: true
+
+    - name: A temp file to stand in for a key
+      ansible.builtin.tempfile:
+        state: file
+      register: gcppull_test_file
+
+    - name: An empty file is no key
+      ansible.builtin.assert:
+        that: not (gcppull_enabled | bool)
+        quiet: true
+      vars:
+        watchtower_gcp_reader_key_file: "{{ gcppull_test_file.path }}"
+
+    - name: A path with nothing there is no key
+      ansible.builtin.assert:
+        that: not (gcppull_enabled | bool)
+        quiet: true
+      vars:
+        watchtower_gcp_reader_key_file: "{{ gcppull_test_file.path }}.missing"
+
+    - name: Something in it
+      ansible.builtin.copy:
+        content: '{"type": "made up for this test"}'
+        dest: "{{ gcppull_test_file.path }}"
+        mode: "0600"
+
+    - name: A file holding something is a key, so the skip isn't all the role does
+      ansible.builtin.assert:
+        that: gcppull_enabled | bool
+        quiet: true
+      vars:
+        watchtower_gcp_reader_key_file: "{{ gcppull_test_file.path }}"
+
+    - name: Remove the temp file
+      ansible.builtin.file:
+        path: "{{ gcppull_test_file.path }}"
+        state: absent

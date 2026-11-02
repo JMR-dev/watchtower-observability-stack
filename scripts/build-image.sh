@@ -31,6 +31,10 @@
 #   wg-easy  iptables is the nftables backend (legacy needs kernel modules
 #            an nftables host doesn't load), wg-quick's tools are there, and
 #            libsql's native binding loads.
+#   alloy    the release binary runs on Alpine, at the version the Dockerfile
+#            says, as the quadlet runs it (UID 473, read-only root, no
+#            capabilities), and `alloy validate` passes both nodes' rendered
+#            configs (watchtower-3 has the exporter too).
 #
 # Trivy fails the build on any fixable HIGH/CRITICAL finding in what we
 # control: the image's Alpine (or Debian) packages and everything we compile.
@@ -63,6 +67,12 @@ needs() { [[ -f "$1" ]] || { echo "no ${1}; run ansible/playbooks/render.yml fir
 case "$what" in
   caddy) needs "${render}/watchtower-proxy/caddy/Caddyfile" ;;
   patroni) needs "${render}/watchtower-1/patroni/patroni.yml" ;;
+  alloy)
+    needs "${render}/watchtower-1/gcppull/config.alloy"
+    needs "${render}/watchtower-3/gcppull/config.alloy"
+    # Around Grafana's release binary.
+    gate=os
+    ;;
 esac
 
 build_args=()
@@ -122,6 +132,19 @@ case "$what" in
       test -f /app/server/index.mjs
       cd /app/server && node -e "require(\"libsql\")"
       echo "ok: $(iptables -V), $(wg --version | cut -d" " -f1-2), node $(node --version)"'
+    ;;
+  alloy)
+    want="v$(sed -n 's/^LABEL org\.opencontainers\.image\.version="\([^"]*\)".*/\1/p' "${repo_root}/build/alloy/Dockerfile")"
+    echo "==> Checking ${ref} runs Alloy ${want}"
+    version="$(docker run --rm --network none "$ref" --version)"
+    grep -qF "version ${want} " <<<"$version" || { echo "$version" >&2; echo "not Alloy ${want}" >&2; exit 1; }
+    for host in watchtower-1 watchtower-3; do
+      echo "==> Validating ${host}'s Alloy config with ${ref} as the quadlet runs it"
+      docker run --rm -i --network none --read-only --user 473:473 \
+        --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp \
+        --entrypoint sh "$ref" -c 'cat >/tmp/config.alloy && exec alloy validate /tmp/config.alloy' \
+        <"${render}/${host}/gcppull/config.alloy"
+    done
     ;;
   *)
     echo "build-image.sh has no checks for ${what}; add them before shipping it" >&2

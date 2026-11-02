@@ -1,0 +1,92 @@
+---
+# Only with the reader's key (tasks/main.yml). The key is a podman secret, mounted
+# 0400 for Alloy's user alone and never in the environment, where `podman inspect`
+# would show it. The deploy runs -vvv, so nothing here that holds it may print.
+
+- name: The pull needs its image's tag
+  ansible.builtin.assert:
+    that: watchtower_image_tags['alloy'] | default('') | length > 0
+    fail_msg: pass -e @image-tags.json from scripts/image-tag.sh --vars (the deploy workflow does)
+    quiet: true
+
+- name: Alloy's state, for its 473 user
+  ansible.builtin.file:
+    path: "{{ watchtower_data }}/gcppull"
+    state: directory
+    mode: "0750"
+    owner: "473"
+    group: "473"
+
+# Mounted whole into a container that runs as a non-root user: 0755. It holds no
+# secrets.
+- name: Alloy's config directory
+  ansible.builtin.file:
+    path: "{{ watchtower_config }}/gcppull"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Alloy's config
+  ansible.builtin.template:
+    src: config.alloy.j2
+    dest: "{{ watchtower_config }}/gcppull/config.alloy"
+    mode: "0644"
+  register: gcppull_config
+
+# no_log on the include for its arguments, and apply for what it includes: the
+# role's own tasks hide the value, and this hides the rest of them too.
+- name: The reader's key
+  ansible.builtin.include_role:
+    name: quadlet
+    tasks_from: secrets
+    apply:
+      no_log: true
+  vars:
+    quadlet_secrets:
+      - {name: gcp-telemetry-reader-key, value: "{{ lookup('ansible.builtin.file', watchtower_gcp_reader_key_file) }}"}
+  no_log: true
+
+- name: Pull Alloy
+  containers.podman.podman_image:
+    name: "{{ alloy_image }}"
+    auth_file: "{{ watchtower_config }}/registry-auth.json"
+
+- name: Alloy's quadlet
+  ansible.builtin.template:
+    src: gcppull.container.j2
+    dest: /etc/containers/systemd/gcppull.container
+    mode: "0644"
+  register: gcppull_unit
+
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# Pub/Sub redelivers what a stopped pull hadn't acknowledged.
+- name: Restart Alloy when something of its changed
+  ansible.builtin.systemd_service:
+    name: gcppull
+    state: restarted
+  when: quadlet_secrets_changed | bool or gcppull_config.changed or gcppull_unit.changed
+
+- name: Start Alloy
+  ansible.builtin.systemd_service:
+    name: gcppull
+    state: started
+
+# Warn only, as the contract says: watchtower-health alerts on a unit that stays
+# down, and telemetry from CI must never fail a deploy of watchtower.
+- name: Alloy answers ready
+  ansible.builtin.uri:
+    url: http://127.0.0.1:{{ watchtower_ports.gcppull }}/-/ready
+  register: gcppull_ready
+  until: gcppull_ready.status | default(0) == 200
+  retries: 12
+  delay: 5
+  failed_when: false
+
+- name: Warn if it doesn't
+  ansible.builtin.debug:
+    msg: "WARNING: Alloy on {{ inventory_hostname }} is not ready; see journalctl -u gcppull"
+  when: gcppull_ready.status | default(0) != 200

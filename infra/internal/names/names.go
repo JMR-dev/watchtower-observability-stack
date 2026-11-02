@@ -53,7 +53,8 @@ const ProxyName = "watchtower-proxy"
 
 // ReaderSA is the service account watchtower reads Gitea CI's logs and
 // metrics from GCP as (Pub/Sub and Cloud Monitoring, granted in gitea's own
-// stacks). scripts/bootstrap.sh makes it, with no roles here and no key.
+// stacks). scripts/bootstrap.sh makes it, with no roles here;
+// scripts/rotate-gcp-key.sh reader makes its key (SecretGCPTelemetryReaderKey).
 const ReaderSA = "watchtower-gcp-reader"
 
 // The break-glass bastion, made by scripts/bootstrap.sh, not Pulumi: a GCE
@@ -118,6 +119,10 @@ const (
 	SecretPatroniRESTAPIPassword      = "patroni-restapi-password"
 	SecretWGEasyPassword              = "wg-easy-password"
 	SecretCaddyDNSKey                 = "caddy-dns-key"
+	// SecretGCPTelemetryReaderKey is ReaderSA's JSON key, a podman secret on
+	// the nodes (ansible/roles/gcppull). Optional in the deploy (`?@`): until
+	// the owner fills it, the role skips itself and nothing changes.
+	SecretGCPTelemetryReaderKey = "gcp-telemetry-reader-key"
 	// The Healthchecks.io ping URL of the nightly Postgres backup
 	// (ansible/roles/pgbackup): pinged on success, /fail on failure.
 	SecretHealthchecksPGBackupURL = "healthchecks-pg-backup-url"
@@ -210,6 +215,7 @@ func Secrets() []string {
 		SecretHealthchecksDeployURL,
 		SecretGARPushKey, SecretHealthchecksAPIKey,
 		SecretWireGuardOwnerPeer, SecretWireGuardDeployPeer,
+		SecretGCPTelemetryReaderKey,
 	}
 	out = append(out, agentSecrets()...)
 	for _, k := range append([]string{KeyAdmin}, Keys...) {
