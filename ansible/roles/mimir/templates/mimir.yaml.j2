@@ -30,6 +30,14 @@ server:
   grpc_listen_port: {{ watchtower_ports.mimir.grpc }}
   log_level: info
 
+# Monolithic Mimir looks for its own scheduler on 127.0.0.1 unless told where it
+# is, and gRPC above listens only on the mesh address. Without these, no querier
+# connects and every query hangs, though /ready and the rings look healthy.
+frontend:
+  scheduler_address: {{ mesh_ip }}:{{ watchtower_ports.mimir.grpc }}
+frontend_worker:
+  scheduler_address: {{ mesh_ip }}:{{ watchtower_ports.mimir.grpc }}
+
 # Classic architecture: Kafka-based ingest storage crashes monolithic 3.2.3
 # (mimir#13468).
 ingest_storage:
