@@ -68,9 +68,10 @@ RULESET_TOOL="/usr/local/sbin/watchtower-ruleset"
 TOOL_LAST_GOOD="/usr/local/sbin/watchtower-ruleset.last-good"
 # ruleset.sh's record of a trial that is pending: nothing is promoted while it's there.
 PENDING_TRIAL="/var/lib/watchtower-bastion/pending"
-# ruleset.sh's last word on its ruleset at this boot (its LAST_WORD), cleared before
-# each apply here: confirmed there is the apply's own proof it went through to the end.
-RULESET_WORD="/run/watchtower-ruleset.word"
+# ruleset.sh's marker that its apply went through to its end with its ruleset
+# confirmed, as `confirmed <sha256 of the tool>` (its APPLIED, written by cmd_apply
+# alone), cleared before each apply here: the apply's own proof for tool_proved.
+RULESET_APPLIED="/run/watchtower-ruleset.applied"
 # The watchtower/tool word report_tool said at this boot, kept for ruleset.sh to say
 # again after a login: root's alone, and only once this boot's apply ended well.
 TOOL_WORD="/run/watchtower-ruleset.tool"
@@ -322,19 +323,23 @@ stop_ungated_sshd() {
 }
 
 # tool_proved: what this boot's apply has shown of the tool, beyond its self-check:
-# that apply itself went through to the end and said its ruleset is confirmed (its word
-# at this boot, which run_tool clears before it; sshd up and the guard on may be the
-# boot's doing, from the tool before, so they prove nothing on their own); sshd active,
-# through the gate as it stands now (the guard in the kernel, or no account and so no
-# token); and no ruleset trial pending, whose confirmation or rollback the tool hasn't
-# run yet. A tool whose apply ends at once, saying nothing, shows none of it. Says why
+# that apply itself went through to its end with its ruleset confirmed (its marker,
+# which run_tool clears before it and cmd_apply alone writes, for this tool's own code;
+# sshd up and the guard on may be the boot's doing, from the tool before, and
+# ruleset.sh's word on its ruleset is a login's confirm's too, so none of those proves
+# anything here); sshd active, through the gate as it stands now (the guard in the
+# kernel, or no account and so no token); and no ruleset trial pending, whose
+# confirmation or rollback the tool hasn't run yet. A tool whose apply ends at once,
+# saying nothing, shows none of it, even with a login confirming meanwhile. Says why
 # not.
 tool_proved() {
+  local sha
   if [[ -e "$PENDING_TRIAL" ]]; then
     warn "a ruleset trial is pending, so ${RULESET_TOOL} isn't kept as the last good copy before a boot after it"
     return 1
   fi
-  if [[ "$(cat "$RULESET_WORD" 2>/dev/null)" != confirmed ]]; then
+  sha="$(sha256sum <"$RULESET_TOOL" 2>/dev/null | cut -d' ' -f1)" || sha=""
+  if [[ -z "$sha" || "$(cat "$RULESET_APPLIED" 2>/dev/null)" != "confirmed ${sha}" ]]; then
     warn "${RULESET_TOOL}'s apply didn't end with its ruleset confirmed at this boot, so it isn't kept as the last good copy"
     return 1
   fi
@@ -368,8 +373,8 @@ promote_tool() {
 # timeout ends the tool's whole process group, so nothing of it keeps that lock.
 run_tool() {
   local rc=0
-  # Only this apply's word counts for tool_proved.
-  rm -f "$RULESET_WORD"
+  # Only this apply's marker counts for tool_proved.
+  rm -f "$RULESET_APPLIED"
   # Without its timer no trial starts, so a failure here costs only that.
   timeout -k 10s "$TOOL_TIMEOUT" "$RULESET_TOOL" setup || warn "could not set up ${RULESET_TOOL}'s units"
   if [[ -n "$1" ]]; then

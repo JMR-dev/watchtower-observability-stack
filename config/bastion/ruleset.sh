@@ -115,11 +115,14 @@ LAST_WORD="/run/watchtower-ruleset.word"
 RUN_NONCE="/run/watchtower-run-nonce"
 # The login nonces this boot has seen.
 LOGINS="/run/watchtower-ruleset.logins"
+# How many it keeps.
+LOGINS_KEPT=8
 # The watchtower/tool word startup.sh said at this boot, once this boot's apply ended
 # well (its report_tool): what say_tool says again, and nothing else.
 TOOL_WORD="/run/watchtower-ruleset.tool"
-# How many it keeps.
-LOGINS_KEPT=8
+# This boot's apply went through to its end, confirmed (mark_applied): its own marker,
+# which nothing else writes, for startup.sh's tool_proved.
+APPLIED="/run/watchtower-ruleset.applied"
 # systemd's own name for a mount there.
 DROPBOX_MOUNT='run-watchtower\x2druleset.mount'
 TOOL="/usr/local/sbin/watchtower-ruleset"
@@ -620,7 +623,22 @@ cmd_apply() {
     say "error: sshd did not start, with the guard on: journalctl -u ssh says why (docs/runbook.md, \"The bastion with SSH gone\")"
     exit 1
   fi
-  [[ -z "$confirmed_sha" ]] || status confirmed "$confirmed_sha"
+  if [[ -n "$confirmed_sha" ]]; then
+    status confirmed "$confirmed_sha"
+    mark_applied
+  fi
+}
+
+# mark_applied: this apply went through to its end with its ruleset confirmed and sshd
+# up, as `confirmed <sha256 of the code that ran>`: what startup.sh's tool_proved asks
+# before it keeps a tool as the last good copy. Written here alone, never by confirm,
+# rollback or any say_: the word in LAST_WORD is any of those's too, and a login's
+# confirm during a do-nothing apply would say confirmed there for it. Root's alone.
+mark_applied() {
+  local sha
+  sha="$(sha256sum <"${BASH_SOURCE[0]}" | cut -d' ' -f1)" || return 0
+  rm -f "$APPLIED"
+  (umask 077 && printf 'confirmed %s\n' "$sha" >"$APPLIED") || warn "could not mark this apply as done"
 }
 
 # A word the attribute lost, at a boot or a confirmation, stays lost for the whole

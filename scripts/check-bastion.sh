@@ -974,7 +974,8 @@ give_run_nonce() { (umask 077 && printf '%s\n' "$run_a" >"$run_nonce_file"); }
 # A bastion that has only ever had the package's ruleset, and no account.
 fresh() {
   rm -rf "$state_dir" "$dropbox"
-  rm -f /run/watchtower-ruleset.word /run/watchtower-ruleset.logins /run/watchtower-ruleset.tool
+  rm -f /run/watchtower-ruleset.word /run/watchtower-ruleset.logins /run/watchtower-ruleset.tool \
+    /run/watchtower-ruleset.applied
   give_run_nonce
   rm -f "${stubs}/load-broken" "${stubs}/timer-broken" "${stubs}/install-broken" \
     "${stubs}/nft-broken" "${stubs}/at-load-disk-fails" "${stubs}/at-load-a-login" \
@@ -990,7 +991,8 @@ fresh() {
 # What a reboot does to all of it: nftables.service loads the file, the units
 # start afresh, /run empties.
 reboot_vm() {
-  rm -f /run/watchtower-ruleset.word /run/watchtower-ruleset.logins /run/watchtower-ruleset.tool
+  rm -f /run/watchtower-ruleset.word /run/watchtower-ruleset.logins /run/watchtower-ruleset.tool \
+    /run/watchtower-ruleset.applied
   give_run_nonce
   nft flush ruleset
   [[ ! -e "${stubs}/load-broken" && -f /etc/nftables.conf ]] && nft --file /etc/nftables.conf 2>/dev/null
@@ -1082,8 +1084,12 @@ check "a user may ask" test -e "${dropbox}/confirm"
 kept_tool_word="$(printf '%064x' 99) boot ${this_boot} run ${run_a}"
 printf '%s\n' "$kept_tool_word" >/run/watchtower-ruleset.tool
 rm -f "${stubs}/attribute-tool"
+# The apply's own marker: a trial's apply leaves none, and a confirm never writes one,
+# though it says confirmed (only an apply that ends confirmed marks itself).
+check "applied marker: a trial's apply leaves none" no_file /run/watchtower-ruleset.applied
 confirm
 check "confirm: says confirmed" state_is "$sha_a" confirmed
+check "applied marker: a confirm writes none" no_file /run/watchtower-ruleset.applied
 check "confirm: says the kept tool word again" grep -qxF "$kept_tool_word" "${stubs}/attribute-tool"
 check "confirm: nothing pending" no_file "${state_dir}/pending"
 check "confirm: records it" grep -qx "$sha_a" "${state_dir}/confirmed"
@@ -1136,6 +1142,9 @@ check "confirm: a late timer leaves the ruleset" same_file "${rules}/a" /etc/nft
 reboot_vm
 apply_ruleset a
 check "confirm: says so at the next boot" state_is "$sha_a" confirmed
+check "applied marker: an apply that ends confirmed marks itself, as the code that ran" \
+  grep -qx "confirmed $(sha256sum ruleset.sh | cut -d' ' -f1)" /run/watchtower-ruleset.applied
+check "applied marker: root's, 0600" test "$(stat -c '%a %U' /run/watchtower-ruleset.applied 2>/dev/null)" = "600 root"
 refute "confirm: no timer at the next boot" called "restart ${timer}"
 check "confirm: the guard is on at the next boot" guard_on
 refute "confirm: a boot with no change ends no one's sessions" called "--no-block stop user.slice"
@@ -2361,12 +2370,28 @@ tool_as "${variants}/older" "${variants}/older" settled
 rm -f "${stubs}/sshd-down"
 boot_with_tool ruleset.sh
 check "tool, a good one, sshd up from the boot, no trial: kept" same_file ruleset.sh "$last_good"
+# ... and a do-nothing apply while a login's confirm runs, as the path unit runs it at
+# any login (the reviewer's case 8, 2026-11-04): that confirm says confirmed in
+# ruleset.sh's word on its ruleset, for the state the boot left. Only cmd_apply's own
+# marker counts, so the tool still isn't kept.
+sed 's|^cmd_apply() {$|&\n  touch "${DROPBOX}/login-race"; bash /check/ruleset.sh confirm >/dev/null 2>\&1; exit 0|' \
+  ruleset.sh >"${variants}/apply-zero-login"
+chmod 0755 "${variants}/apply-zero-login"
+if cmp -s ruleset.sh "${variants}/apply-zero-login"; then flunk "tool: the apply-zero-login mutant is the real tool"; fi
+tool_as ruleset.sh ruleset.sh settled
+rm -f "${stubs}/sshd-down"
+boot_with_tool "${variants}/apply-zero-login"
+check "tool, apply-zero with a login's confirm during it: the confirm said confirmed meanwhile" grep -qx confirmed /run/watchtower-ruleset.word
+check "tool, apply-zero with a login's confirm during it: no marker of an apply" no_file /run/watchtower-ruleset.applied
+check "tool, apply-zero with a login's confirm during it: the last good copy stays the good one" same_file ruleset.sh "$last_good"
+check "tool, apply-zero with a login's confirm during it: says why" said "apply didn't end with its ruleset confirmed at this boot"
 
 # What a boot must show before the tool is kept, beyond its self-check.
 # promote_case <name> <sshd: up|down> <guard: on|off> <account: yes|no>
-#   <trial pending: yes|no> <want: kept|not> [<this boot's ruleset word, or none>]
+#   <trial pending: yes|no> <want: kept|not>
+#   [<this boot's apply marker: this-tool, another-tool or none>]
 promote_case() {
-  local name=$1 sshd=$2 guard=$3 account=$4 pending=$5 want=$6 word=${7:-confirmed} dir got result
+  local name=$1 sshd=$2 guard=$3 account=$4 pending=$5 want=$6 marker=${7:-this-tool} dir got result
   dir="$(mktemp -d)"
   install -m 0755 ruleset.sh "${dir}/tool"
   install -m 0755 "${variants}/older" "${dir}/last-good"
@@ -2376,9 +2401,12 @@ promote_case() {
     RULESET_TOOL="${dir}/tool"
     TOOL_LAST_GOOD="${dir}/last-good"
     PENDING_TRIAL="${dir}/pending"
-    RULESET_WORD="${dir}/word"
+    RULESET_APPLIED="${dir}/applied"
     [[ "$pending" != yes ]] || touch "$PENDING_TRIAL"
-    [[ "$word" == none ]] || printf '%s\n' "$word" >"$RULESET_WORD"
+    case "$marker" in
+      this-tool) printf 'confirmed %s\n' "$(sha256sum <"$RULESET_TOOL" | cut -d' ' -f1)" >"$RULESET_APPLIED" ;;
+      another-tool) printf 'confirmed %s\n' "$(sha256sum <"$TOOL_LAST_GOOD" | cut -d' ' -f1)" >"$RULESET_APPLIED" ;;
+    esac
     systemctl() { [[ "$*" == "is-active --quiet ssh.service" && "$sshd" == up ]]; }
     guard_loaded() { [[ "$guard" == on ]]; }
     get() { if [[ "$account" == no ]]; then echo 404; else echo 200; fi; }
@@ -2392,8 +2420,8 @@ promote_case "sshd up, no guard, no account so no token" up off no no kept
 promote_case "sshd up, no guard, an account" up off yes no not
 promote_case "sshd down" down on yes no not
 promote_case "a trial pending, over a last good copy" up on yes yes not
-promote_case "all well but the apply said nothing at this boot" up on yes no not none
-promote_case "all well but the apply said pending at this boot" up on yes no not pending
+promote_case "all well but no apply marked its end at this boot" up on yes no not none
+promote_case "all well but the marker is another tool's" up on yes no not another-tool
 
 # Each bug the self-check sees: not put in place, the last good copy untouched, and why.
 # self_check_case <variant> <what it says>
