@@ -181,9 +181,11 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     why it isn't `user.max_user_namespaces=0`, which would stop those too. sshd, OS
     Login, wg-quick, Alloy and the guard need none (the guard's `unshare --net` is
     root's and makes no user namespace). The startup script applies it first thing,
-    and `systemd-sysctl` at every later boot. To check, as your own user:
-    `sysctl kernel.unprivileged_userns_clone` says 0, and `unshare --user true` is
-    refused.
+    and `systemd-sysctl` at every later boot. It tells bootstrap in
+    `watchtower/userns` (`off` or `on`, with the boot and run nonce), and bootstrap
+    warns, without stopping, when they're on or it heard nothing. To check, as your
+    own user: `sysctl kernel.unprivileged_userns_clone` says 0, and
+    `unshare --user true` is refused.
   - Its startup script (`config/bastion/startup.sh`) sets all of this up
     at every boot; its output is in `journalctl -u google-startup-scripts`
     and on the serial console, and never holds the peer config or the ping URL.
@@ -206,7 +208,7 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     attaches the account only once this boot has confirmed its ruleset (below)
     and finished apt, and asks again of the boot with the account, so don't run
     it during a deploy with `ssh_via=bastion`. Bootstrap goes by guest attributes
-    (`watchtower/boot`, `ruleset`, `settled`, `login`, `tool`), which the guard keeps from
+    (`watchtower/boot`, `ruleset`, `settled`, `login`, `tool`, `userns`), which the guard keeps from
     every uid but root, and never by the serial console, where any user can put
     a line. On a VM with no guard yet a user could write them too, which is why
     it asks again. Each carries the kernel's boot id, as a stop, a reset and a
@@ -223,7 +225,11 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     already doesn't trust. Anyone who may describe the VM can read it through the
     API too, but writing an attribute takes the metadata server, from inside the VM,
     as root. A run that starts nothing goes by the nonce its boot was started with,
-    and a VM with none is restarted to get one.
+    and a VM with none is restarted to get one. Every start bootstrap makes gets a
+    fresh one, its exit trap's after a failure and that of a VM an earlier run left
+    stopped among them (the review's fix, 2026-11-04). If metadata won't take a fresh
+    one, the old one is removed, as the boot before may have shown it to its users,
+    and the next run starts the VM afresh.
   - Every run ends by dispatching `bastion-confirm.yml` again, or asking you to do
     it by hand, and waiting for a real login to reach the boot it ends on
     (`watchtower/login`): on the boot with the account above all, as only a login
@@ -234,9 +240,11 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     by an earlier run's login, a session left from it, or its attribute. The login
     that confirmed this run's ruleset on that boot counts too. It prints `Done` only
     with the VM running, on the boot that said `confirmed` with this run's nonce, and
-    that login seen.
+    that login seen. The attribute keeps a boot's last eight login nonces, so a user
+    on the VM could push this run's out of it; once the wait has seen it on that boot,
+    the final check takes it as seen.
   - If a run fails between a stop and its start, its exit trap starts the bastion
-    again and keeps the failure. If that start fails too (no capacity in the zone,
+    again, with a fresh run nonce, and keeps the failure. If that start fails too (no capacity in the zone,
     a lost connection), break glass is down, and it says so. Rerun bootstrap, which
     starts a stopped bastion first, or
     `gcloud compute instances start watchtower-bastion --zone us-east1-b`.
@@ -322,20 +330,33 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     `gate` must let sshd run. One that fails never goes in, even with no other
     tool: the boot says `the watchtower-ruleset in metadata failed its self-check`
     and why, and goes on with the tool it has.
-  - **Kept once it has worked.** A tool that brings sshd up through its gate at a
-    boot, and passes the self-check, becomes the last good copy.
+  - **Kept once it has worked** (as the review fixed it, 2026-11-04). A tool becomes
+    the last good copy at a boot where its `apply` ended well, sshd is active, the
+    guard is in the kernel (or the VM has no account, so no token), no ruleset trial
+    is pending, and it passes the self-check. A tool whose `apply` ends at once and
+    starts nothing isn't kept, and neither is one with its trial still pending, whose
+    confirmation or rollback it hasn't run yet. So **a first install has no last good
+    copy until its second boot**, the one after its trial ends: until then a tool that
+    fails has nothing to fall back to, as before this change.
   - **A tool that fails at a boot** (its `apply` ends with sshd not allowed or not
-    up) gives way to the last good copy, which sets its units up again and has the
-    boot to itself: `falling back to its last good copy`. sshd still starts only
-    through the gate. That happens at each boot while metadata holds the new tool.
-    With no last good copy the boot stops there, and sshd stays down.
+    up), or whose `apply` takes over 5 minutes (`took longer than 5m, and was
+    stopped`), gives way to the last good copy, which sets its units up again and has
+    the boot to itself: `falling back to its last good copy`. The time limit ends
+    the tool's whole process group, so nothing of it keeps the lock the rollback
+    needs. The self-check has a limit of 2 minutes. sshd still starts only through
+    the gate. That happens at each boot while metadata holds the new tool. With no
+    last good copy the boot stops there, and nothing more asks for sshd: it stays as
+    the boot left it, down through the gate, or, on a first install or a new VM with
+    no drop-in yet, up and ungated on a VM with no account, so no token to guard.
   - **Bootstrap hears of either:** the VM reports the sha256 of the tool it runs in
     `watchtower/tool`, with its boot and run nonce, and bootstrap prints `Done` only
     if it's the `ruleset.sh` it put in metadata. Otherwise it stops and says so: see
-    the serial output, fix `ruleset.sh`, and rerun. A third cause would be the file
-    coming back from metadata changed by a byte: then the sha256 in `watchtower/tool`
-    is the tool's as fetched, and the serial output shows no self-check failure or
-    fallback.
+    the serial output, fix `ruleset.sh`, and rerun. Two other causes: the file coming
+    back from metadata changed by a byte (then the sha256 in `watchtower/tool` is the
+    tool's as fetched, and the serial output shows no self-check failure or
+    fallback), or the VM's word lost on the way to the attribute. The tool says it
+    again with every `confirmed`, so a login (the hand command) or a reset says it
+    again; then rerun.
   - A tool on disk gone or cut short comes back from the last good copy.
 
 Every service is a quadlet: `/etc/containers/systemd/<name>.container`
@@ -453,15 +474,20 @@ ruleset's tool and the ruleset back from metadata and sets the units up again, w
 the fixed script doesn't. The fixed script restores a broken tool too: from its last
 good copy (`restored it from its last good copy`), or else from metadata, only if
 that copy passes the same self-check as at a boot (`restored it from metadata`). A
-tool that fails gives way to its last good copy here too (`falling back to its last
-good copy`).
+tool that fails, or whose `apply` takes over 5 minutes, gives way to its last good
+copy here too (`falling back to its last good copy`), which sets its units up again
+before it's asked, as at a boot.
 
 **It never gets sshd past the gate** (the owner's decision, 2026-11-04): only the tool
 starts sshd, through its gate, and with no usable tool the script doesn't ask for
-sshd at all (`not asking for sshd, as nothing would gate it`), even if sshd's drop-in
-were gone too. That case is decided, not left open: sshd stays down. If it said
-`could not restore it` because metadata has lost the tool, rerun bootstrap, which
-puts it back.
+sshd at all (`not asking for sshd, as nothing would gate it`). That case is decided,
+not left open. With sshd's drop-in gone too, systemd will already have started sshd
+at the boot, ungated: if sshd is up, the guard isn't in the kernel (by its name) and
+the VM may have an account (the metadata server doesn't say 404), the script stops it
+(`sshd is up with no guard, on a VM that may have an account: stopping it`, as the
+review fixed it, 2026-11-04). With the guard there, or no account, it leaves sshd as
+the boot started it. If it said `could not restore it` because metadata has lost the
+tool, rerun bootstrap, which puts it back.
 
 If that doesn't do it, the lines under `why sshd isn't up:` hold `sshd -t` and the
 journal of `nftables` and `ssh`. The script has already reinstalled nftables once.

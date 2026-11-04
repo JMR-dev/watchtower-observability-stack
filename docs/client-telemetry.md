@@ -391,6 +391,13 @@ The owner settled five more on 2026-11-04 (the runbook has the detail):
   only values with it count. A value written on the unguarded boot with no account,
   where any user may write one, can't carry the nonce of the boot with the account.
 
+A review of those, answered the same day, tightened them: a tool becomes the last good
+copy only at a boot with sshd active, the guard on (or no account) and no trial
+pending; `recovery.sh` stops an sshd the boot left up with no guard on a VM that may
+have an account; every start bootstrap makes, its exit trap's included, gets a fresh
+run nonce; a tool's `apply` at a boot has 5 minutes and its self-check 2; and bootstrap
+warns when unprivileged user namespaces are on.
+
 ### G2: gitea, the VM (after the Ansible cutover)
 
 - Pulumi: `gitea:watchtowerPeerSecret` as metadata, left out when unset, so
