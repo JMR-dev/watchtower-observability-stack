@@ -67,13 +67,22 @@
 # Each outcome, at every boot again, is a line on the serial console for whoever
 # reads it, and the guest attribute watchtower/ruleset for scripts/bootstrap.sh:
 #
-#   pending|confirmed|rolled back|refused|failed <sha256> at <epoch> boot <boot id>
+#   pending|confirmed|rolled back|refused|failed <sha256> at <epoch> boot <boot id> run <nonce>
 #
 # confirmed: this ruleset is on and sshd is active, at this boot. failed: it should
 # be on and isn't, sshd won't start, or a rollback's restore hasn't worked yet.
-# watchtower/boot holds this boot's id, from the kernel, and watchtower/login is
+# watchtower/boot is this boot's id, from the kernel, as `<boot id> run <nonce>`, and
+# watchtower/login is
 #
-#   login <epoch> boot <boot id>
+#   login <epoch> boot <boot id> for <login nonces, comma-separated, or -> run <nonce>
+#
+# The run nonce (the owner's decision, 2026-11-04) is the one bootstrap put in metadata
+# while the VM was stopped, which startup.sh keeps in /run for root alone, or "-" for
+# none. A value written on a boot that had no guard, where any user could write one,
+# carries an earlier start's nonce, so bootstrap takes it for no word. The login
+# nonces are those in the names of the files logins left (confirm-<nonce>, from
+# scripts/bastion-confirm.sh), this boot's last eight: bootstrap's own shows that a
+# login of this run got in.
 #
 # bootstrap can't go by the console, as any user can put a line there (logger,
 # through rsyslog). The guard keeps them from the attributes.
@@ -95,6 +104,12 @@ LOCK="/run/watchtower-ruleset.lock"
 DROPBOX="/run/watchtower-ruleset"
 # The last thing this boot said of its ruleset.
 LAST_WORD="/run/watchtower-ruleset.word"
+# This boot's run nonce, which startup.sh keeps (it's in metadata).
+RUN_NONCE="/run/watchtower-run-nonce"
+# The login nonces this boot has seen.
+LOGINS="/run/watchtower-ruleset.logins"
+# How many it keeps.
+LOGINS_KEPT=8
 # systemd's own name for a mount there.
 DROPBOX_MOUNT='run-watchtower\x2druleset.mount'
 TOOL="/usr/local/sbin/watchtower-ruleset"
@@ -120,10 +135,48 @@ warn() { printf 'bastion: warning: %s\n' "$*" >&2; }
 
 boot_id() { cat /proc/sys/kernel/random/boot_id; }
 
-# put_attribute <key> <value>
+# This boot's run nonce, or "-" when it has none.
+run_nonce() {
+  local nonce
+  nonce="$(cat "$RUN_NONCE" 2>/dev/null)" || nonce=""
+  [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || nonce=-
+  printf '%s' "$nonce"
+}
+
+# put_attribute <key> <value>: with this boot's run nonce after it.
 put_attribute() {
   curl -fsS -o /dev/null --max-time 5 --retry 2 --retry-connrefused -X PUT -H 'Metadata-Flavor: Google' \
-    --data "$2" "${ATTRIBUTES_URL}/$1"
+    --data "$2 run $(run_nonce)" "${ATTRIBUTES_URL}/$1"
+}
+
+# logins_seen: the login nonces in the names of the files in the dropbox now, kept with
+# this boot's others, the newest last and LOGINS_KEPT at most; prints them
+# comma-separated, or "-". Only a name of exactly that shape counts, so nothing else a
+# user names a file reaches the attribute. Never reads a file.
+logins_seen() {
+  local name nonce i joined seen=()
+  if [[ -f "$LOGINS" ]]; then
+    while IFS= read -r nonce; do
+      [[ ! "$nonce" =~ ^[0-9a-f]{32}$ ]] || seen+=("$nonce")
+    done <"$LOGINS"
+  fi
+  while IFS= read -r -d '' name; do
+    nonce="${name#confirm-}"
+    [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || continue
+    for i in "${!seen[@]}"; do
+      [[ "${seen[i]}" != "$nonce" ]] || unset 'seen[i]'
+    done
+    seen+=("$nonce")
+  done < <(find "$DROPBOX" -mindepth 1 -maxdepth 1 -name 'confirm-*' -printf '%f\0' 2>/dev/null)
+  seen=("${seen[@]}")
+  [[ "${#seen[@]}" -le "$LOGINS_KEPT" ]] || seen=("${seen[@]: -$LOGINS_KEPT}")
+  (umask 077 && printf '%s\n' "${seen[@]}" >"$LOGINS") || warn "could not keep this boot's login nonces"
+  if [[ "${#seen[@]}" -eq 0 ]]; then
+    printf '%s' -
+  else
+    joined="$(printf '%s,' "${seen[@]}")"
+    printf '%s' "${joined%,}"
+  fi
 }
 
 # status <state> <sha>: what came of it. The boot's id tells scripts/bootstrap.sh
@@ -561,12 +614,14 @@ say_confirmed_again() {
 }
 
 cmd_confirm() {
-  local pending
+  local pending logins
   lock
   # A file from before the load went with the load (try).
   [[ -n "$(find "$DROPBOX" -mindepth 1 -print -quit 2>/dev/null)" ]] || return 0
-  # What a file there shows at any time: someone got in, on this boot.
-  put_attribute login "login $(date +%s) boot $(boot_id)" || warn "could not put the login in the guest attribute"
+  # What a file there shows at any time: someone got in, on this boot, and which
+  # logins that were asked for by a nonce did.
+  logins="$(logins_seen)" || logins=-
+  put_attribute login "login $(date +%s) boot $(boot_id) for ${logins}" || warn "could not put the login in the guest attribute"
   pending="$(read_state "$PENDING")"
   # Not if it's rejected already, with its rollback still trying to reach the disk.
   if [[ -n "$pending" && ! -e "${REJECTED}/${pending}" ]]; then

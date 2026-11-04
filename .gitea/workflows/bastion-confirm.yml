@@ -19,6 +19,10 @@ on:
         description: The bastion's ssh-ed25519 host key, to pin (a new VM's isn't in the stack file yet)
         type: string
         default: ""
+      nonce:
+        description: scripts/bootstrap.sh's login nonce for its run (32 hex digits), which names the file the login leaves
+        type: string
+        default: ""
 
 # Not cancelled: a confirmation in progress is the one that counts.
 concurrency:
@@ -41,6 +45,7 @@ jobs:
       - name: Log in to the bastion as the deployer, and confirm
         env:
           HOST_KEY: ${{ inputs.host_key }}
+          NONCE: ${{ inputs.nonce }}
         run: |
           set -euo pipefail
           export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$GOOGLE_APPLICATION_CREDENTIALS"

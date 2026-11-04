@@ -12,6 +12,10 @@
 # .gitea/workflows/bastion-confirm.yml runs it as watchtower-deployer@. For a
 # service account, export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE.
 #
+# NONCE, when set, is scripts/bootstrap.sh's login nonce for this run (32 hex digits):
+# the file is then named confirm-<nonce>, and the VM puts the nonce in
+# watchtower/login, which is how bootstrap knows the login is this run's.
+#
 # The host key is pinned, as every SSH here is: HOST_KEY when set (bootstrap
 # sends it, as a new VM's isn't in the stack file yet), else bastionHostKey in
 # infra/cloud/Pulumi.prod.yaml. OS Login gets a fresh key for an hour, kept in
@@ -43,6 +47,10 @@ fi
 [[ -n "$host_key" ]] || die "no host key to pin: no HOST_KEY, and no bastionHostKey in ${stack_file}"
 # It comes from a dispatch's input, and goes in a known_hosts file.
 [[ "$host_key" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+={0,2}$ ]] || die "the host key isn't one ssh-ed25519 key"
+# It comes from a dispatch's input too, and goes in a remote command and a file's name.
+nonce="${NONCE:-}"
+[[ -z "$nonce" || "$nonce" =~ ^[0-9a-f]{32}$ ]] || die "the nonce isn't 32 hex digits"
+confirm_file="${DROPBOX}/confirm${nonce:+-${nonce}}"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -85,7 +93,7 @@ Host ${BASTION}
 EOF
 
 for attempt in $(seq "$ATTEMPTS"); do
-  if ssh -F "${work}/ssh_config" "$BASTION" "touch ${DROPBOX}/confirm"; then
+  if ssh -F "${work}/ssh_config" "$BASTION" "touch ${confirm_file}"; then
     echo "confirmed: logged in to ${BASTION}, attempt ${attempt}"
     exit 0
   fi

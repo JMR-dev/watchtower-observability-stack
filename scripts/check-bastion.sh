@@ -38,8 +38,14 @@
 #          from before is gone, and polkit's rule runs under its own JavaScript
 #          engine.
 #   bootstrap  bootstrap.sh's bastion_update in order, with gcloud stubbed: metadata
-#          before a stop, the VM started again by its exit trap if a stop is left
-#          in flight, a login last, and the final check.
+#          before a stop, a fresh run nonce while stopped for each start, the VM
+#          started again by its exit trap if a stop is left in flight, a login last,
+#          and the final check, which wants this run's nonces and this ruleset.sh.
+#   nonce  the run nonce: startup.sh keeps only one of its shape, for root alone,
+#          and every attribute carries it; bootstrap counts only its own, so a value
+#          planted on an unguarded boot, with that boot's nonce, is no word. The
+#          login nonce: confirm lists only names of exactly its shape, eight at most,
+#          and bootstrap counts only a login of its own run.
 #   tool   startup.sh's self-check of a new ruleset.sh, in a network namespace of its
 #          own, refuses a tool whose gate says yes with no guard, that takes no rules
 #          for a guard, or whose floor doesn't guard or won't load, or one cut short;
@@ -102,8 +108,9 @@ fi
 # How bootstrap.sh reads the attributes, waits on them and changes the VM, which
 # run.sh checks against what ruleset.sh sends.
 : >"${work}/ruleset_state.sh"
-for fn in ruleset_state login_seen guest_attribute attribute_refusal bastion_attribute bastion_ruleset_wait \
-  bastion_login_wait bastion_update bastion_final_check bastion_on_exit bastion_stop bastion_start; do
+for fn in ruleset_state login_seen guest_attribute attribute_refusal bastion_attribute bastion_boot bastion_ruleset_wait \
+  bastion_login_wait bastion_update bastion_final_check bastion_on_exit bastion_stop bastion_start \
+  new_nonce bastion_new_run_nonce; do
   sed -n "/^${fn}() {\$/,/^}\$/p" "${repo_root}/scripts/bootstrap.sh" >>"${work}/ruleset_state.sh"
   grep -q "^${fn}() {\$" "${work}/ruleset_state.sh" || {
     echo "FAIL  bootstrap.sh has no ${fn}"
@@ -377,14 +384,69 @@ main_order="$(
   teardown() { echo teardown; }
   ping_setup() { :; }
   ping_if_up() { echo ping; }
+  report_tool() { echo tool; }
   # The attribute's PUT, which comes with the line.
   curl() { [[ "$*" == *guest-attributes/watchtower/settled* ]] && echo settled-attribute; }
   main 2>/dev/null | tr '\n' ' '
 )"
-if [[ "$main_order" == "userns guard bastion: metadata guard loaded updates apt bastion: settled settled-attribute ping teardown " ]]; then
-  pass "apt: main turns user namespaces off before anything else, says settled only after the guard and apt, the guard goes next, and the ping comes before anything of telemetry"
+if [[ "$main_order" == "userns guard tool bastion: metadata guard loaded updates apt bastion: settled settled-attribute ping teardown " ]]; then
+  pass "apt: main turns user namespaces off before anything else, says settled only after the guard and apt, the guard goes next and then which tool it ran, and the ping comes before anything of telemetry"
 else
   flunk "apt: main's order is: ${main_order}"
+fi
+
+# --- nonce: startup.sh's side of the run nonce ---------------------------------
+# keep_run_nonce keeps metadata's value for root alone, and only one of its shape; the
+# settled and tool attributes carry it, and "-" when there is none.
+# nonce_case <name> <what metadata says, or "none"> <want: kept or none>
+nonce_case() {
+  local name=$1 says=$2 want=$3 dir got
+  dir="$(mktemp -d)"
+  got="$(
+    RUN_NONCE="${dir}/nonce"
+    mds() { [[ "$says" != none && "$1" == instance/attributes/watchtower-run-nonce ]] && printf '%s' "$says"; }
+    keep_run_nonce 2>/dev/null
+    if [[ -f "$RUN_NONCE" ]]; then
+      echo "file $(stat -c '%a %U' "$RUN_NONCE")"
+    fi
+    echo "says $(run_nonce)"
+  )"
+  local ok=""
+  case "$want" in
+    kept) [[ "$got" != "file 600 root"*"says ${says}" ]] || ok=1 ;;
+    none) [[ "$got" != "says -" ]] || ok=1 ;;
+  esac
+  if [[ -n "$ok" ]]; then pass "nonce ${name}: ${want}"; else flunk "nonce ${name}: ${got//$'\n'/ }"; fi
+}
+umask_before="$(umask)"
+umask 077
+nonce_case "one of its shape" "$(printf '%032x' 7)" kept
+nonce_case "none in metadata" none none
+nonce_case "not hex" "$(printf 'z%.0s' {1..32})" none
+nonce_case "too short" "$(printf '%031x' 7)" none
+nonce_case "a value that would add to the attribute" "$(printf '%032x' 7) boot x" none
+umask "$umask_before"
+# What the settled and tool attributes are sent: <boot id> [<sha256>] and the run nonce.
+attribute_sent="$(
+  RUN_NONCE="$(mktemp)"
+  printf '%032x\n' 7 >"$RUN_NONCE"
+  RULESET_TOOL="$(mktemp)"
+  echo a-tool >"$RULESET_TOOL"
+  curl() { local a; for a in "$@"; do [[ "$a" != *" run "* ]] || echo "${*: -1} ${a}"; done; }
+  report_settled
+  report_tool
+)"
+this_boot_now="$(cat /proc/sys/kernel/random/boot_id)"
+tool_sum="$(echo a-tool | sha256sum | cut -d' ' -f1)"
+if grep -qxF "http://169.254.169.254/computeMetadata/v1/instance/guest-attributes/watchtower/settled ${this_boot_now} run $(printf '%032x' 7)" <<<"$attribute_sent"; then
+  pass "nonce: settled carries the boot and its run nonce"
+else
+  flunk "nonce: settled was sent: ${attribute_sent}"
+fi
+if grep -qxF "http://169.254.169.254/computeMetadata/v1/instance/guest-attributes/watchtower/tool ${tool_sum} boot ${this_boot_now} run $(printf '%032x' 7)" <<<"$attribute_sent"; then
+  pass "nonce: tool carries the tool's sha256, the boot and its run nonce"
+else
+  flunk "nonce: tool was sent: ${attribute_sent}"
 fi
 
 # --- userns: unprivileged user namespaces off ---------------------------------
@@ -854,11 +916,21 @@ sha_b="$(sha256sum "${rules}/b" | cut -d' ' -f1)"
 sha_c="$(sha256sum "${rules}/c" | cut -d' ' -f1)"
 sha_broken="$(sha256sum "${rules}/broken" | cut -d' ' -f1)"
 sha_marked="$(sha256sum "${rules}/marked" | cut -d' ' -f1)"
+# Nonces, in bootstrap.sh's shape (32 hex digits): this run's run and login nonces, and
+# another run's.
+run_a="$(printf '%032x' 10)"
+run_b="$(printf '%032x' 11)"
+login_a="$(printf '%032x' 20)"
+login_b="$(printf '%032x' 21)"
+# What startup.sh keeps of metadata's run nonce at each boot, and what /run holds.
+run_nonce_file=/run/watchtower-run-nonce
+give_run_nonce() { (umask 077 && printf '%s\n' "$run_a" >"$run_nonce_file"); }
 
 # A bastion that has only ever had the package's ruleset, and no account.
 fresh() {
   rm -rf "$state_dir" "$dropbox"
-  rm -f /run/watchtower-ruleset.word
+  rm -f /run/watchtower-ruleset.word /run/watchtower-ruleset.logins
+  give_run_nonce
   rm -f "${stubs}/load-broken" "${stubs}/timer-broken" "${stubs}/install-broken" \
     "${stubs}/nft-broken" "${stubs}/at-load-disk-fails" "${stubs}/at-load-a-login" \
     "${stubs}/sshd-start-broken" "${stubs}/sshd-down" "${stubs}/sshd-runs-its-gate" "${stubs}/ruleset-path" \
@@ -873,7 +945,8 @@ fresh() {
 # What a reboot does to all of it: nftables.service loads the file, the units
 # start afresh, /run empties.
 reboot_vm() {
-  rm -f /run/watchtower-ruleset.word
+  rm -f /run/watchtower-ruleset.word /run/watchtower-ruleset.logins
+  give_run_nonce
   nft flush ruleset
   [[ ! -e "${stubs}/load-broken" && -f /etc/nftables.conf ]] && nft --file /etc/nftables.conf 2>/dev/null
   rm -rf "$dropbox"
@@ -888,8 +961,8 @@ apply_ruleset() {
   rc=$?
 }
 fire() { : >"${stubs}/attribute"; out="$(tool rollback 2>&1)"; rc=$?; }
-# A login's file, then what the path unit starts.
-confirm() { : >"${stubs}/attribute"; touch "${dropbox}/a-login"; out="$(tool confirm 2>&1)"; rc=$?; }
+# A login's file, named as bootstrap.sh's job names it, then what the path unit starts.
+confirm() { : >"${stubs}/attribute"; touch "${dropbox}/confirm-${login_a}"; out="$(tool confirm 2>&1)"; rc=$?; }
 marked_on() { nft list table inet marked >/dev/null 2>&1; }
 
 # A first install: no ruleset to go back to, and no account.
@@ -903,8 +976,10 @@ check "first install: the guard is on" guard_on
 check "first install: records the trial" grep -qx "$sha_a" "${state_dir}/pending"
 check "first install: arms the timer" called "restart ${timer}"
 check "first install: starts sshd" called "start ssh.service"
-check "first install: says which boot it is" grep -qx "$this_boot" "${stubs}/attribute-boot"
+check "first install: says which boot it is, with its run nonce" grep -qx "${this_boot} run ${run_a}" "${stubs}/attribute-boot"
 check "first install: and its word has that boot's id" test "$(ruleset_state "$sha_a" "$this_boot" <"${stubs}/attribute")" = pending
+check "first install: and that boot's run nonce" test "$(ruleset_state "$sha_a" "$this_boot" "$run_a" <"${stubs}/attribute")" = pending
+check "first install: and isn't another run's" test -z "$(ruleset_state "$sha_a" "$this_boot" "$run_b" <"${stubs}/attribute")"
 # line_of <call>: where it came in the order of what systemctl was asked.
 line_of() { grep -nxF -- "$1" "${stubs}/calls" | head -1 | cut -d: -f1; }
 trial_in_order() {
@@ -962,7 +1037,46 @@ check "confirm: nothing pending" no_file "${state_dir}/pending"
 check "confirm: records it" grep -qx "$sha_a" "${state_dir}/confirmed"
 check "confirm: stops the timer" called "stop ${timer}"
 check "confirm: empties the directory" no_file "${dropbox}/confirm"
-check "confirm: reports a login, on this boot" login_seen "$this_boot" "$(date +%s)" <"${stubs}/attribute-login"
+check "confirm: reports a login, on this boot, with this run's nonces" login_seen "$this_boot" "$run_a" "$login_a" <"${stubs}/attribute-login"
+refute "confirm: not as another run's login" login_seen "$this_boot" "$run_a" "$login_b" <"${stubs}/attribute-login"
+refute "confirm: not with another run nonce" login_seen "$this_boot" "$run_b" "$login_a" <"${stubs}/attribute-login"
+# The login nonces: this boot's, the newest last, eight at most, and only a name of
+# exactly that shape, read from the name alone.
+# login_list: what the last login attribute listed.
+login_list() { sed -n 's/^login [0-9]* boot [0-9a-f-]* for \([^ ]*\) run .*$/\1/p' "${stubs}/attribute-login"; }
+# Each login in a pass of its own, as the path unit runs, so the order is theirs.
+touch "${dropbox}/confirm-${login_b}"
+out="$(tool confirm 2>&1)"
+check "login nonces: two logins, both listed, the newest last" test "$(login_list)" = "${login_a},${login_b}"
+touch "${dropbox}/plain-login"
+out="$(tool confirm 2>&1)"
+check "login nonces: a plain login keeps them" test "$(login_list)" = "${login_a},${login_b}"
+for n in 30 31 32 33 34 35 36 37 38; do
+  touch "${dropbox}/confirm-$(printf '%032x' "$n")"
+  out="$(tool confirm 2>&1)"
+done
+check "login nonces: eight at most, the newest kept" test "$(login_list)" = "$(for n in 31 32 33 34 35 36 37 38; do printf '%032x\n' "$n"; done | paste -sd,)"
+touch "${dropbox}/confirm-$(printf '%031x' 1)" "${dropbox}/confirm-$(printf '%032x' 2)x" "${dropbox}/confirm-$(printf '%032X' 171)" \
+  "${dropbox}/confirm-$(printf '%032x' 3),$(printf '%032x' 4)"
+# A name with a newline in it, which a line-by-line read would split into two.
+touch "${dropbox}/confirm-$(printf '%032x' 5)"$'\n'"confirm-$(printf '%032x' 6)"
+out="$(tool confirm 2>&1)"
+check "login nonces: no name of another shape listed" test "$(login_list)" = "$(for n in 31 32 33 34 35 36 37 38; do printf '%032x\n' "$n"; done | paste -sd,)"
+rm -f /run/watchtower-ruleset.logins
+touch "${dropbox}/plain-login"
+out="$(tool confirm 2>&1)"
+check "login nonces: none at all is -" test "$(login_list)" = -
+# The run nonce: each attribute carries this boot's, and "-" without one.
+rm -f "$run_nonce_file"
+touch "${dropbox}/confirm-${login_a}"
+out="$(tool confirm 2>&1)"
+check "run nonce: none is -" grep -q ' run -$' "${stubs}/attribute-login"
+refute "run nonce: none is no login bootstrap counts" login_seen "$this_boot" "$run_a" "$login_a" <"${stubs}/attribute-login"
+printf 'not-a-nonce\n' >"$run_nonce_file"
+touch "${dropbox}/confirm-${login_a}"
+out="$(tool confirm 2>&1)"
+check "run nonce: one of another shape is -" grep -q ' run -$' "${stubs}/attribute-login"
+give_run_nonce
 : >"${stubs}/calls"
 fire
 refute "confirm: a late timer does nothing" called "--no-block reboot"
@@ -978,7 +1092,7 @@ refute "confirm: a boot with no change doesn't stop sshd" called "stop ssh.servi
 rm -f "${stubs}/attribute-login"
 confirm
 refute "confirm: with nothing pending, nothing" called "stop ${timer}"
-check "confirm: with nothing pending, the login is still reported" login_seen "$this_boot" "$(date +%s)" <"${stubs}/attribute-login"
+check "confirm: with nothing pending, the login is still reported" login_seen "$this_boot" "$run_a" "$login_a" <"${stubs}/attribute-login"
 
 # confirmed means sshd is up too. An sshd that won't start, at a boot with no change.
 reboot_vm
@@ -1420,48 +1534,66 @@ if grep -qF "bastion: ruleset pending ${sha_a} at " <<<"$out"; then pass "rulese
 boot_a="aaaaaaaa-0000-4000-8000-000000000001"
 boot_b="bbbbbbbb-0000-4000-8000-000000000002"
 now="$(date +%s)"
-read_state() { [[ "$(ruleset_state "$2" "$3" <<<"$1")" == "$4" ]]; }
-check "bootstrap reads: one word" read_state "confirmed ${sha_a} at 200 boot ${boot_a}" "$sha_a" "$boot_a" confirmed
-check "bootstrap reads: two words" read_state "rolled back ${sha_b} at 300 boot ${boot_a}" "$sha_b" "$boot_a" "rolled back"
-check "bootstrap reads: refused" read_state "refused ${sha_c} at 400 boot ${boot_a}" "$sha_c" "$boot_a" refused
-check "bootstrap reads: failed" read_state "failed ${sha_c} at 400 boot ${boot_a}" "$sha_c" "$boot_a" failed
-check "bootstrap reads: any boot's, when asked" read_state "rolled back ${sha_b} at 300 boot ${boot_a}" "$sha_b" "" "rolled back"
-check "bootstrap reads: not an earlier boot's" read_state "confirmed ${sha_a} at 200 boot ${boot_b}" "$sha_a" "$boot_a" ""
-check "bootstrap reads: not without a boot" read_state "confirmed ${sha_a} at 200" "$sha_a" "" ""
-check "bootstrap reads: another ruleset's are no news" read_state "confirmed ${sha_b} at 200 boot ${boot_a}" "$sha_a" "$boot_a" ""
+# read_state <value> <sha> <boot> <want> [<run nonce>]
+read_state() { [[ "$(ruleset_state "$2" "$3" "${5:-}" <<<"$1")" == "$4" ]]; }
+check "bootstrap reads: one word" read_state "confirmed ${sha_a} at 200 boot ${boot_a} run ${run_a}" "$sha_a" "$boot_a" confirmed
+check "bootstrap reads: two words" read_state "rolled back ${sha_b} at 300 boot ${boot_a} run ${run_a}" "$sha_b" "$boot_a" "rolled back"
+check "bootstrap reads: refused" read_state "refused ${sha_c} at 400 boot ${boot_a} run ${run_a}" "$sha_c" "$boot_a" refused
+check "bootstrap reads: failed" read_state "failed ${sha_c} at 400 boot ${boot_a} run ${run_a}" "$sha_c" "$boot_a" failed
+check "bootstrap reads: any boot's, when asked" read_state "rolled back ${sha_b} at 300 boot ${boot_a} run ${run_a}" "$sha_b" "" "rolled back"
+check "bootstrap reads: not an earlier boot's" read_state "confirmed ${sha_a} at 200 boot ${boot_b} run ${run_a}" "$sha_a" "$boot_a" ""
+check "bootstrap reads: not without a boot" read_state "confirmed ${sha_a} at 200 run ${run_a}" "$sha_a" "" ""
+check "bootstrap reads: another ruleset's are no news" read_state "confirmed ${sha_b} at 200 boot ${boot_a} run ${run_a}" "$sha_a" "$boot_a" ""
 check "bootstrap reads: nothing from nothing" test -z "$(ruleset_state "$sha_a" "$boot_a" </dev/null)"
-check "bootstrap reads: not ten years from now" read_state "confirmed ${sha_a} at $((now + 315360000)) boot ${boot_a}" "$sha_a" "$boot_a" ""
-check "bootstrap reads: a minute of clock skew is fine" read_state "confirmed ${sha_a} at $((now + 60)) boot ${boot_a}" "$sha_a" "$boot_a" confirmed
+check "bootstrap reads: not ten years from now" read_state "confirmed ${sha_a} at $((now + 315360000)) boot ${boot_a} run ${run_a}" "$sha_a" "$boot_a" ""
+check "bootstrap reads: a minute of clock skew is fine" read_state "confirmed ${sha_a} at $((now + 60)) boot ${boot_a} run ${run_a}" "$sha_a" "$boot_a" confirmed
 # Only the value, whole: not a serial line of any shape, which any user can write.
-check "bootstrap reads: not a console line" read_state "bastion: ruleset confirmed ${sha_a} at 200 boot ${boot_a}" "$sha_a" "$boot_a" ""
-check "bootstrap reads: not one inside another" read_state "x confirmed ${sha_a} at 200 boot ${boot_a}" "$sha_a" "$boot_a" ""
-# And a login: on that boot, since then, and no later than now.
-saw_login() { login_seen "$2" "$3" <<<"$1"; }
-check "bootstrap reads a login: this boot, now" saw_login "login ${now} boot ${boot_a}" "$boot_a" "$now"
-check "bootstrap reads a login: with a minute of clock skew" saw_login "login $((now - 60)) boot ${boot_a}" "$boot_a" "$now"
-refute "bootstrap reads a login: not another boot's" saw_login "login ${now} boot ${boot_b}" "$boot_a" "$now"
-refute "bootstrap reads a login: not an old one" saw_login "login $((now - 3600)) boot ${boot_a}" "$boot_a" "$now"
-refute "bootstrap reads a login: not one from the future" saw_login "login $((now + 3600)) boot ${boot_a}" "$boot_a" "$now"
-refute "bootstrap reads a login: not a console line" saw_login "bastion: login ${now} boot ${boot_a}" "$boot_a" "$now"
-refute "bootstrap reads a login: not nothing" saw_login "" "$boot_a" "$now"
+check "bootstrap reads: not a console line" read_state "bastion: ruleset confirmed ${sha_a} at 200 boot ${boot_a} run ${run_a}" "$sha_a" "$boot_a" ""
+check "bootstrap reads: not one inside another" read_state "x confirmed ${sha_a} at 200 boot ${boot_a} run ${run_a}" "$sha_a" "$boot_a" ""
+# The run nonce: this run's, when asked for one.
+check "bootstrap reads: this run's nonce" read_state "confirmed ${sha_a} at 200 boot ${boot_a} run ${run_a}" "$sha_a" "$boot_a" confirmed "$run_a"
+check "bootstrap reads: not another run's" read_state "confirmed ${sha_a} at 200 boot ${boot_a} run ${run_b}" "$sha_a" "$boot_a" "" "$run_a"
+check "bootstrap reads: not a boot with no run nonce" read_state "confirmed ${sha_a} at 200 boot ${boot_a} run -" "$sha_a" "$boot_a" "" "$run_a"
+check "bootstrap reads: not a value without one at all" read_state "confirmed ${sha_a} at 200 boot ${boot_a}" "$sha_a" "$boot_a" ""
+check "bootstrap reads: not one with more after it" read_state "confirmed ${sha_a} at 200 boot ${boot_a} run ${run_a} x" "$sha_a" "$boot_a" "" "$run_a"
+# And a login: on that boot, with this run's run nonce and login nonce, and no later than now.
+# saw_login <value> <boot> [<run nonce>] [<login nonce>]
+saw_login() { login_seen "$2" "${3-$run_a}" "${4-$login_a}" <<<"$1"; }
+check "bootstrap reads a login: this boot, this run" saw_login "login ${now} boot ${boot_a} for ${login_a} run ${run_a}" "$boot_a"
+check "bootstrap reads a login: among others of the boot" saw_login "login ${now} boot ${boot_a} for ${login_b},${login_a} run ${run_a}" "$boot_a"
+check "bootstrap reads a login: an older one of this run" saw_login "login $((now - 3600)) boot ${boot_a} for ${login_a} run ${run_a}" "$boot_a"
+refute "bootstrap reads a login: not an earlier run's, though on this boot and recent" saw_login "login ${now} boot ${boot_a} for ${login_b} run ${run_a}" "$boot_a"
+refute "bootstrap reads a login: not one with no login nonce" saw_login "login ${now} boot ${boot_a} for - run ${run_a}" "$boot_a"
+refute "bootstrap reads a login: not with another run nonce" saw_login "login ${now} boot ${boot_a} for ${login_a} run ${run_b}" "$boot_a"
+refute "bootstrap reads a login: not with no run nonce" saw_login "login ${now} boot ${boot_a} for ${login_a} run -" "$boot_a"
+refute "bootstrap reads a login: not when it has no login nonce to look for" saw_login "login ${now} boot ${boot_a} for ${login_a} run ${run_a}" "$boot_a" "$run_a" ""
+refute "bootstrap reads a login: not another boot's" saw_login "login ${now} boot ${boot_b} for ${login_a} run ${run_a}" "$boot_a"
+refute "bootstrap reads a login: not one from the future" saw_login "login $((now + 3600)) boot ${boot_a} for ${login_a} run ${run_a}" "$boot_a"
+refute "bootstrap reads a login: not a console line" saw_login "bastion: login ${now} boot ${boot_a} for ${login_a} run ${run_a}" "$boot_a"
+refute "bootstrap reads a login: not a nonce inside another" saw_login "login ${now} boot ${boot_a} for x${login_a} run ${run_a}" "$boot_a"
+refute "bootstrap reads a login: not the old shape" saw_login "login ${now} boot ${boot_a}" "$boot_a"
+refute "bootstrap reads a login: not nothing" saw_login "" "$boot_a"
 
 # bootstrap.sh's wait. The attribute's values, in turn, from a file of them, with
-# watchtower/boot saying which boot it is.
+# watchtower/boot saying which boot it is, and with which run nonce.
 # wait_case <name> <want exit> <want dispatches> <the boot before a restart, or "">
-#   <values, one a line> [<the boot it says it's on>]
+#   <values, one a line> [<the boot it says it's on>] [<the run nonce it says that with>]
 BASTION=watchtower-bastion
 BASTION_ZONE=stand-in-zone
 GCP_PROJECT=stand-in-project
 confirm_by_hand="the-hand-confirm"
 ruleset_sha="$sha_a"
 attribute_error=/tmp/attribute-error
+# This run's nonces, as bootstrap.sh holds them.
+run_nonce="$run_a"
+login_nonce="$login_a"
 wait_case() {
-  local name=$1 want_rc=$2 want_dispatches=$3 old_boot=$4 values=$5 says_boot=${6-$boot_a} got rc
+  local name=$1 want_rc=$2 want_dispatches=$3 old_boot=$4 values=$5 says_boot=${6-$boot_a} says_run=${7-$run_a} got rc
   printf '%s\n' "$values" >"${stubs}/values"
   got="$(
     bastion_attribute() {
       if [[ "$1" == boot ]]; then
-        printf '%s\n' "$says_boot"
+        [[ -z "$says_boot" ]] || printf '%s run %s\n' "$says_boot" "$says_run"
         return
       fi
       # The next value, the last one staying.
@@ -1486,7 +1618,8 @@ wait_case() {
   fi
   wait_out="$got"
 }
-word() { printf '%s %s at %s boot %s' "$1" "${3:-$sha_a}" "${4:-200}" "${2:-$boot_a}"; }
+# word <state> [<boot>] [<sha>] [<epoch>] [<run nonce>]: a ruleset attribute's value.
+word() { printf '%s %s at %s boot %s run %s' "$1" "${3:-$sha_a}" "${4:-200}" "${2:-$boot_a}" "${5:-$run_a}"; }
 wait_case "confirmed" 0 0 "" "$(word confirmed)"
 wait_case "pending, then confirmed: dispatches once" 0 1 "" "$(word pending)
 $(word pending)
@@ -1507,6 +1640,24 @@ wait_case "a forged console line isn't a word" 1 0 "" "bastion: ruleset $(word c
 wait_case "nothing at all stops, in the end" 1 0 "" ""
 # What the tool itself said above, of an sshd that wouldn't start: no success.
 wait_case "confirmed with sshd down, in the tool's own words, stops" 1 0 "" "$sshd_down_word" "$this_boot"
+# The run nonce (the owner's decision, 2026-11-04): only values with this start's count.
+wait_case "this start's nonce on the boot and the word" 0 0 "" "$(word confirmed)"
+wait_case "a word of another run's isn't this one's" 1 0 "" "$(word confirmed "$boot_a" "$sha_a" 200 "$run_b")"
+wait_case "a word from a boot with no run nonce isn't one" 1 0 "" "$(word confirmed "$boot_a" "$sha_a" 200 -)"
+wait_case "a boot said with another run's nonce isn't this one" 1 0 "" "$(word confirmed)" "$boot_a" "$run_b"
+# What a user could leave on the boot with no account, for the next to be taken by: a
+# made-up boot, and its word, with the nonce that boot had. The next start's is new.
+wait_case "values planted before this start, with the nonce of the boot before, are no word" 1 0 "$boot_b" \
+  "$(word confirmed "$boot_a" "$sha_a" 200 "$run_b")" "$boot_a" "$run_b"
+no_nonce_wait="$(
+  run_nonce=""
+  bastion_attribute() { echo "should not be asked"; }
+  log() { :; }
+  die() { printf 'died: %s\n' "$*"; exit 1; }
+  sleep() { :; }
+  bastion_ruleset_wait ""
+)"
+if [[ "$no_nonce_wait" == "died: no run nonce"* ]]; then pass "bootstrap waits: with no run nonce, stops before it asks"; else flunk "bootstrap waits: with no run nonce: ${no_nonce_wait}"; fi
 
 # A guest attribute that isn't there yet, and one that can't be read.
 attribute_case() {
@@ -1563,20 +1714,32 @@ login_case() {
     flunk "bootstrap waits for a login: ${name}: exit ${rc}, ${dispatches} dispatches; want exit ${want_rc}, ${want_dispatches} dispatches"
   fi
 }
-login_case "there already: no job" 0 0 "login ${now} boot ${boot_a}"
+# login_word <boot> [<login nonces>] [<run nonce>] [<epoch>]: a login attribute's value.
+login_word() { printf 'login %s boot %s for %s run %s' "${4:-$now}" "$1" "${2:-$login_a}" "${3:-$run_a}"; }
+login_case "there already: no job" 0 0 "$(login_word "$boot_a")"
 login_case "none, so the job, then it comes" 0 1 "
-login ${now} boot ${boot_a}"
-login_case "another boot's doesn't count, and the job runs" 0 1 "login ${now} boot ${boot_b}
-login ${now} boot ${boot_a}"
+$(login_word "$boot_a")"
+login_case "another boot's doesn't count, and the job runs" 0 1 "$(login_word "$boot_b")
+$(login_word "$boot_a")"
 login_case "none ever: stops" 1 1 ""
-login_case "only an old one: stops" 1 1 "login $((now - 3600)) boot ${boot_a}"
+# The login nonce (the owner's decision, 2026-11-04): a rerun can't be satisfied by an
+# earlier run's login, however recent, on the very boot it asks about.
+login_case "only an earlier run's login, on this boot and just now: stops" 1 1 "$(login_word "$boot_a" "$login_b")"
+login_case "only a login with no nonce: stops" 1 1 "$(login_word "$boot_a" -)"
+login_case "an earlier run's, then this run's: the job, then it counts" 0 1 "$(login_word "$boot_a" "$login_b")
+$(login_word "$boot_a" "${login_b},${login_a}")"
+login_case "this run's login nonce, with another run nonce: stops" 1 1 "$(login_word "$boot_a" "$login_a" "$run_b")"
 
 # --- bootstrap: bastion_update, in order, with gcloud stubbed --------------------
-# update_trace <metadata differs?> <account differs?> [the compute call that fails]:
-# prints everything it does, and "exit <n>" last. Under set -e and the real exit
-# trap, as bootstrap.sh runs it.
+# update_trace <metadata differs?> <account differs?> [the compute call that fails]
+# [the run nonce the VM has, or "none"]: prints everything it does, and "exit <n>"
+# last; the add-metadata that sets a run nonce is "compute-run-nonce". Under set -e
+# and the real exit trap, as bootstrap.sh runs it. The run nonce each wait was asked
+# with goes in /tmp/update-trace-nonces, the VM's first.
 update_trace() {
-  local meta=$1 account=$2 failing=${3:-}
+  local meta=$1 account=$2 failing=${3:-} had=${4:-$run_a}
+  [[ "$had" != none ]] || had=""
+  printf '%s\n' "${had:-none}" >/tmp/update-trace-nonces
   (
     set -e
     n=0
@@ -1589,6 +1752,7 @@ update_trace() {
     [[ "$account" != yes ]] || account_differs=1
     retry_args=()
     stop_in_flight=""
+    run_nonce="$had"
     cleanup=/tmp/update-trace-cleanup
     log() { :; }
     die() { echo died; exit 1; }
@@ -1599,16 +1763,24 @@ update_trace() {
         # Not a bare return: in a trap, that gives the status from before the trap.
         return 0
       fi
-      echo "compute-$2"
-      [[ "$2" != "$failing" ]]
+      local call="$2"
+      [[ "$*" != *watchtower-run-nonce=* ]] || call=run-nonce
+      echo "compute-${call}"
+      [[ "$call" != "$failing" ]]
     }
     bastion_attribute() {
       case "$1" in
-        boot) echo boot-before ;;
-        settled) echo "$bastion_boot_id" ;;
+        # The boot before, said with the run nonce it was started with.
+        boot) echo "dead-beef run ${had}" ;;
+        settled) echo "${bastion_boot_id} run ${settled_with:-$run_nonce}" ;;
       esac
     }
-    bastion_ruleset_wait() { n=$((n + 1)); echo "wait-after-${1:-nothing}"; bastion_boot_id="boot-${n}"; }
+    bastion_ruleset_wait() {
+      n=$((n + 1))
+      echo "wait-after-${1:-nothing}"
+      echo "$run_nonce" >>/tmp/update-trace-nonces
+      bastion_boot_id="boot-${n}"
+    }
     bastion_login_wait() { echo "login-on-$1"; }
     trap bastion_on_exit EXIT
     bastion_update
@@ -1616,27 +1788,49 @@ update_trace() {
   echo "exit $?"
 }
 # Not through check: set -e does nothing inside an if, and it's what's under test.
-# update_case <name> <want> <metadata differs?> <account differs?> [what fails]
+# update_case <name> <want> <metadata differs?> <account differs?> [what fails] [the VM's run nonce]
 update_case() {
   local name=$1 want=$2 got
-  got="$(update_trace "$3" "$4" "${5:-}")"
+  got="$(update_trace "$3" "$4" "${5:-}" "${6:-}")"
   got="${got//$'\n'/ }"
   if [[ "$got" == "$want" ]]; then pass "update: ${name}"; else flunk "update: ${name}: ${got}"; fi
 }
-update_case "both differ: metadata before the stop, a stop for the account, each boot asked, and a login last" \
-  "compute-add-metadata compute-stop compute-start wait-after-boot-before compute-stop compute-set-service-account compute-start wait-after-boot-1 login-on-boot-2 exit 0" yes yes
-update_case "only the metadata: one restart" \
-  "compute-add-metadata compute-stop compute-start wait-after-boot-before login-on-boot-1 exit 0" yes no
-update_case "only the account: goes by this boot, then asks the new one" \
-  "wait-after-nothing compute-stop compute-set-service-account compute-start wait-after-boot-1 login-on-boot-2 exit 0" no yes
+update_case "both differ: metadata before the stop, a stop for the account, a run nonce while stopped each time, each boot asked, and a login last" \
+  "compute-add-metadata compute-stop compute-run-nonce compute-start wait-after-dead-beef compute-stop compute-set-service-account compute-run-nonce compute-start wait-after-boot-1 login-on-boot-2 exit 0" yes yes
+update_case "only the metadata: one restart, with a run nonce while stopped" \
+  "compute-add-metadata compute-stop compute-run-nonce compute-start wait-after-dead-beef login-on-boot-1 exit 0" yes no
+update_case "only the account: goes by this boot, then asks the new one, with a run nonce while stopped" \
+  "wait-after-nothing compute-stop compute-set-service-account compute-run-nonce compute-start wait-after-boot-1 login-on-boot-2 exit 0" no yes
 update_case "nothing differs: no restart, and it's still asked, with a login" \
   "wait-after-nothing login-on-boot-1 exit 0" no no
+update_case "nothing differs, and no run nonce yet: started afresh to get one" \
+  "compute-add-metadata compute-stop compute-run-nonce compute-start wait-after-nothing login-on-boot-1 exit 0" no no "" none
 update_case "metadata refused: never stopped, and the failure stands" \
   "compute-add-metadata exit 1" yes no add-metadata
 update_case "a stop that fails: started anyway, and the failure stands" \
   "compute-add-metadata compute-stop compute-start exit 1" yes no stop
+update_case "the run nonce refused: the exit trap starts it, and the failure stands" \
+  "compute-add-metadata compute-stop compute-run-nonce compute-start exit 1" yes no run-nonce
 update_case "the account refused: the exit trap starts it, and the failure stands" \
   "wait-after-nothing compute-stop compute-set-service-account compute-start exit 1" no yes set-service-account
+# apt's word said with another run's nonce: no account goes on.
+settled_with="$run_b"
+update_case "settled with another run's nonce: never stopped for the account" \
+  "wait-after-nothing died exit 1" no yes
+settled_with=""
+# Each start gets a nonce of its own, of bootstrap's shape, and none the VM had before;
+# a run that starts nothing asks by the one its boot has.
+update_trace yes yes >/dev/null
+mapfile -t trace_nonces </tmp/update-trace-nonces
+if [[ "${#trace_nonces[@]}" == 3 && "${trace_nonces[1]}" =~ ^[0-9a-f]{32}$ && "${trace_nonces[2]}" =~ ^[0-9a-f]{32}$ &&
+  "${trace_nonces[1]}" != "${trace_nonces[2]}" && "${trace_nonces[1]}" != "$run_a" && "${trace_nonces[2]}" != "$run_a" ]]; then
+  pass "update: two starts, two fresh run nonces, neither the one the VM had"
+else
+  flunk "update: the waits were asked with: ${trace_nonces[*]}"
+fi
+update_trace no no >/dev/null
+mapfile -t trace_nonces </tmp/update-trace-nonces
+if [[ "${trace_nonces[*]}" == "${run_a} ${run_a}" ]]; then pass "update: no start, so asked by the VM's own run nonce"; else flunk "update: with no start, asked with: ${trace_nonces[*]}"; fi
 
 # The exit trap alone: the status it came with, whatever the start does.
 # trap_trace <in flight> <start's status> <polls still STOPPING before TERMINATED>
@@ -1677,18 +1871,20 @@ else
 fi
 
 # The last word before "Done".
-# final_is <want exit> <status> <boot it says> <ruleset attribute> <login attribute>
+# final_is <want exit> <status> <boot attribute> <ruleset attribute> <login attribute>
+#   [<tool attribute>]
+tool_sha="$(sha256sum ruleset.sh | cut -d' ' -f1)"
 final_is() {
-  local want_rc=$1 vm_status=$2 says_boot=$3 ruleset=$4 login=$5 rc
+  local want_rc=$1 vm_status=$2 says_boot=$3 ruleset=$4 login=$5 tool_says=${6-"${tool_sha} boot ${boot_a} run ${run_a}"} rc
   (
     bastion_boot_id="$boot_a"
-    login_since="$now"
     compute() { echo "$vm_status"; }
     bastion_attribute() {
       case "$1" in
         boot) echo "$says_boot" ;;
         ruleset) echo "$ruleset" ;;
         login) echo "$login" ;;
+        tool) echo "$tool_says" ;;
       esac
     }
     die() { exit 1; }
@@ -1697,13 +1893,23 @@ final_is() {
   rc=$?
   [[ "$rc" == "$want_rc" ]]
 }
-login_word="login ${now} boot ${boot_a}"
-check "final check: running, this boot, confirmed, a login" final_is 0 RUNNING "$boot_a" "$(word confirmed)" "$login_word"
-check "final check: stopped" final_is 1 TERMINATED "$boot_a" "$(word confirmed)" "$login_word"
-check "final check: running, and it has rebooted since" final_is 1 RUNNING "$boot_b" "$(word confirmed "$boot_b")" "login ${now} boot ${boot_b}"
-check "final check: running, and says no boot" final_is 1 RUNNING "" "$(word confirmed)" "$login_word"
-check "final check: running, and sshd has failed since" final_is 1 RUNNING "$boot_a" "$(word failed)" "$login_word"
-check "final check: running, and no login" final_is 1 RUNNING "$boot_a" "$(word confirmed)" ""
+boot_word="${boot_a} run ${run_a}"
+final_login="$(login_word "$boot_a")"
+check "final check: running, this boot, confirmed, this tool, a login of this run" final_is 0 RUNNING "$boot_word" "$(word confirmed)" "$final_login"
+check "final check: stopped" final_is 1 TERMINATED "$boot_word" "$(word confirmed)" "$final_login"
+check "final check: running, and it has rebooted since" final_is 1 RUNNING "${boot_b} run ${run_a}" "$(word confirmed "$boot_b")" "$(login_word "$boot_b")"
+check "final check: running, and says no boot" final_is 1 RUNNING "" "$(word confirmed)" "$final_login"
+check "final check: running, and sshd has failed since" final_is 1 RUNNING "$boot_word" "$(word failed)" "$final_login"
+check "final check: running, and no login" final_is 1 RUNNING "$boot_word" "$(word confirmed)" ""
+check "final check: running, and only an earlier run's login" final_is 1 RUNNING "$boot_word" "$(word confirmed)" "$(login_word "$boot_a" "$login_b")"
+check "final check: running, and the boot said with another run's nonce" final_is 1 RUNNING "${boot_a} run ${run_b}" "$(word confirmed)" "$final_login"
+check "final check: running, and confirmed with another run's nonce" final_is 1 RUNNING "$boot_word" "$(word confirmed "$boot_a" "$sha_a" 200 "$run_b")" "$final_login"
+# The tool it runs: this ruleset.sh, or no Done (it failed its self-check, or fell back).
+check "final check: running, and another tool" final_is 1 RUNNING "$boot_word" "$(word confirmed)" "$final_login" \
+  "$(printf '%064x' 1) boot ${boot_a} run ${run_a}"
+check "final check: running, and no tool said" final_is 1 RUNNING "$boot_word" "$(word confirmed)" "$final_login" ""
+check "final check: running, and this tool said with another run's nonce" final_is 1 RUNNING "$boot_word" "$(word confirmed)" "$final_login" \
+  "${tool_sha} boot ${boot_a} run ${run_b}"
 
 # The units, as systemd reads them.
 fresh
@@ -2332,17 +2538,17 @@ if mount -t tmpfs -o size=64k tmpfs "$tiny"; then
   out="$(small apply "${rules}/a" "" 2>&1)"; rc=$?
   check "full disk: a on trial" state_is "$sha_a" pending
   fill_disk
-  touch "${dropbox}/a-login"
+  touch "${dropbox}/confirm-${login_a}"
   out="$(small confirm 2>&1)"; rc=$?
-  check "full disk, a login: its file stays" test -e "${dropbox}/a-login"
+  check "full disk, a login: its file stays" test -e "${dropbox}/confirm-${login_a}"
   check "full disk, a login: the trial stands" grep -qx "$sha_a" "${tiny}/state/pending"
   refute "full disk, a login: not confirmed" state_is "$sha_a" confirmed
   check "full disk, a login: says so" said 'could not record the confirmation'
-  check "full disk, a login: still shows someone got in" login_seen "$this_boot" "$(date +%s)" <"${stubs}/attribute-login"
+  check "full disk, a login: still shows a login of this run got in" login_seen "$this_boot" "$run_a" "$login_a" <"${stubs}/attribute-login"
   rm -f "${tiny}/filler"
   out="$(small confirm 2>&1)"; rc=$?
   check "full disk, then room: confirmed" state_is "$sha_a" confirmed
-  check "full disk, then room: its file went" no_file "${dropbox}/a-login"
+  check "full disk, then room: its file went" no_file "${dropbox}/confirm-${login_a}"
   check "full disk, then room: nothing pending" no_file "${tiny}/state/pending"
   # A rollback on a full disk, by real ENOSPC.
   : >"${stubs}/attribute"

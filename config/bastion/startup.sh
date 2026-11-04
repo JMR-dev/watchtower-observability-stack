@@ -68,6 +68,9 @@ RULESET_TOOL="/usr/local/sbin/watchtower-ruleset"
 TOOL_LAST_GOOD="/usr/local/sbin/watchtower-ruleset.last-good"
 # ruleset.sh's exit status when it rolled back and is rebooting.
 RULESET_REBOOTING=75
+# This boot's run nonce, from metadata, for ruleset.sh's guest attributes and the
+# settled one: root's alone, in /run, so gone at the next boot.
+RUN_NONCE="/run/watchtower-run-nonce"
 # Unprivileged user namespaces, off: Debian's own knob, and where it's set for good.
 USERNS_CONF="/etc/sysctl.d/90-watchtower-userns.conf"
 USERNS_KNOB="/proc/sys/kernel/unprivileged_userns_clone"
@@ -291,12 +294,35 @@ run_tool() {
   fi
 }
 
+# keep_run_nonce: the run nonce scripts/bootstrap.sh put in metadata while the VM was
+# stopped (the owner's decision, 2026-11-04), kept for root alone, for every guest
+# attribute this boot writes: bootstrap counts only values with its own. None, or not
+# one: no file, and they carry "-".
+keep_run_nonce() {
+  local nonce
+  nonce="$(mds instance/attributes/watchtower-run-nonce 2>/dev/null || true)"
+  if [[ "$nonce" =~ ^[0-9a-f]{32}$ ]]; then
+    printf '%s\n' "$nonce" >"$RUN_NONCE" || warn "could not keep this boot's run nonce"
+  else
+    rm -f "$RUN_NONCE"
+  fi
+}
+
+# This boot's run nonce, or "-": ruleset.sh's run_nonce.
+run_nonce() {
+  local nonce
+  nonce="$(cat "$RUN_NONCE" 2>/dev/null)" || nonce=""
+  [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || nonce=-
+  printf '%s' "$nonce"
+}
+
 # Whatever metadata does or doesn't answer, this ends with sshd up or with a
 # reason it isn't: what's on disk from an earlier boot still applies. It never starts
 # sshd itself: only the tool does, through its gate.
 guard() {
   local rc=0 retry="" ruleset=""
   installed nftables || apt_install --no-install-recommends nftables
+  keep_run_nonce
   if mds_file instance/attributes/watchtower-ruleset "${work}/ruleset.sh" && [[ -s "${work}/ruleset.sh" ]]; then
     take_tool "${work}/ruleset.sh"
   else
@@ -320,13 +346,25 @@ guard() {
   esac
 }
 
+# Which tool this boot runs, in a guest attribute, by its sha256: bootstrap reports
+# success only if it's the one it put in metadata, so a tool that failed its
+# self-check, or gave way to the last good copy, can't pass unseen.
+report_tool() {
+  local sha
+  sha="$(sha256sum <"$RULESET_TOOL" 2>/dev/null | cut -d' ' -f1)" || sha=""
+  [[ -n "$sha" ]] || { warn "could not read ${RULESET_TOOL} to report it"; return 0; }
+  curl -fsS -o /dev/null --max-time 5 --retry 2 --retry-connrefused -X PUT -H 'Metadata-Flavor: Google' \
+    --data "${sha} boot $(cat /proc/sys/kernel/random/boot_id) run $(run_nonce)" "${MDS}/instance/guest-attributes/watchtower/tool" ||
+    warn "could not put the tool in the guest attribute"
+}
+
 # What scripts/bootstrap.sh waits for, in a guest attribute: any user can put a
 # line on the console, and the guard keeps them from this. From here a stop can't
 # break apt.
 report_settled() {
   log "settled"
   curl -fsS -o /dev/null --max-time 5 --retry 2 --retry-connrefused -X PUT -H 'Metadata-Flavor: Google' \
-    --data "$(cat /proc/sys/kernel/random/boot_id)" "${MDS}/instance/guest-attributes/watchtower/settled" ||
+    --data "$(cat /proc/sys/kernel/random/boot_id) run $(run_nonce)" "${MDS}/instance/guest-attributes/watchtower/settled" ||
     warn "could not put that in the guest attribute"
 }
 
@@ -608,6 +646,7 @@ main() {
 
   userns_off
   guard
+  report_tool
   if guard_loaded; then
     log "metadata guard loaded"
   else

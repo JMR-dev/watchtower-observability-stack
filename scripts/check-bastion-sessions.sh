@@ -10,6 +10,8 @@
 #                    /proc is always a step behind: dies, and confirms nothing
 #   a connection in pre-auth across the trial, which ssh.service's KillMode=process
 #                    leaves running: dies, and confirms nothing
+#   a login's nonce  the name of the file a login leaves reaches watchtower/login, as
+#                    scripts/bootstrap.sh's per-run login check needs
 #   no change        a boot with no ruleset change touches no one's session
 #   no user namespaces, the container's limit at 0: a user can't make one, and a trial,
 #                    a login and its confirmation still work, as none of them needs one
@@ -224,6 +226,18 @@ refute "pre-auth: its client fails" test "$?" = 0
 refute "pre-auth: can't confirm" wait_word confirmed 3
 login "touch ${DROPBOX}/new"
 check "pre-auth: a new login confirms" wait_word confirmed 8
+clear_user
+
+# A login asked for by a nonce, as scripts/bootstrap.sh asks: its file's name reaches
+# watchtower/login through the real path unit, and a plain login after it keeps it there.
+settle
+login_nonce="$(printf '%032x' 4660)"
+login "touch ${DROPBOX}/confirm-${login_nonce}"
+sleep 2
+check "a login's nonce: in the login attribute" grep -q " for ${login_nonce} run " /stubs/attr.login
+login "touch ${DROPBOX}/plain"
+sleep 2
+check "a login's nonce: still there after a plain login" grep -q " for ${login_nonce} run " /stubs/attr.login
 clear_user
 
 # No change: the same file again, at a boot, touches no one's session.

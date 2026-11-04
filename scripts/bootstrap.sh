@@ -68,8 +68,10 @@
 #      log in as the deployer and cancel it, and waits to see which came of
 #      it, in a guest attribute only root can write once the guard is on, and
 #      never prints "Done" unless this boot, by its boot id, has confirmed it with
-#      sshd active, and a real login has reached it during this run (the same job,
-#      dispatched again, and the attribute watchtower/login). Rolled back, it
+#      sshd active, and a real login of this run has reached it (the same job, and
+#      the attribute watchtower/login). Every value counts only with this run's
+#      nonces: the run nonce each start gets in metadata while the VM is stopped,
+#      and the login nonce the job's file is named by. Rolled back, it
 #      stops, and a rerun tries again: a fixed file has a new sha256, and the
 #      same file is asked for again. The account goes on only after that ruleset
 #      is confirmed, and it's asked again of the boot with the account: two
@@ -444,6 +446,28 @@ bastion_dir="${repo_root}/config/bastion"
 bastion_alloy="${repo_root}/config/alloy/bastion.alloy"
 bastion_files="startup-script=${bastion_dir}/startup.sh,watchtower-nftables=${bastion_dir}/nftables.conf,watchtower-ruleset=${bastion_dir}/ruleset.sh,watchtower-alloy=${bastion_alloy}"
 ruleset_sha="$(sha256sum "${bastion_dir}/nftables.conf" | cut -d' ' -f1)"
+# The ruleset's tool, which the VM runs only once it passes its self-check, and gives
+# up for its last good copy if it then fails: the final check asks which it runs.
+tool_sha="$(sha256sum "${bastion_dir}/ruleset.sh" | cut -d' ' -f1)"
+# new_nonce: 32 hex digits from the kernel's random source. Neither nonce below is a
+# secret: what makes each count is where and when it reaches the VM.
+new_nonce() {
+  od -An -tx1 -N16 /dev/urandom | tr -d ' \n'
+}
+# This run's login nonce (the owner's decision, 2026-11-04). The login this run asks
+# for leaves a file named by it, and the VM puts it in watchtower/login: only a login
+# with it counts, so a rerun can't be satisfied by a login, a session or an attribute
+# left from an earlier run.
+login_nonce="$(new_nonce)"
+# The run nonce of the boot the waits below ask about (the owner's decision,
+# 2026-11-04): every guest attribute the VM writes carries it, and only a value with it
+# counts. A fresh one goes in metadata at each start this run makes, while the VM is
+# stopped (bastion_new_run_nonce), so no boot before that start ever saw it: in
+# particular not the boot with no account and so no guard, where any user may read
+# metadata and write attributes. The boot with the account has its guard from early
+# boot, before any user's process, so only root reads its nonce on the VM. A run that
+# starts nothing goes by the nonce its boot was started with (set below, from metadata).
+run_nonce=""
 BASTION_SA="$(sa_email "$BASTION")"
 # OS Login lets a user onto a VM that runs as a service account only if they
 # may act as that account: without this, attaching it would lock
@@ -459,6 +483,12 @@ bastion_start() {
   compute instances start "$BASTION" --zone "$BASTION_ZONE" ||
     die "${BASTION} is stopped and did not start, so break glass is down: rerun this, which starts it first"
   stop_in_flight=""
+}
+# bastion_new_run_nonce: a fresh run nonce in metadata, between a stop and its start,
+# for the boot that start begins. A failure leaves the VM stopped, for the exit trap.
+bastion_new_run_nonce() {
+  run_nonce="$(new_nonce)"
+  compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata "watchtower-run-nonce=${run_nonce}"
 }
 # Up, or on its way: a run that failed between a stop and its start leaves it
 # stopped with nothing below left to do, and nothing below starts it otherwise.
@@ -478,27 +508,32 @@ bastion_up() {
   done
   die "${BASTION} stayed ${state} for 5 minutes, so break glass is down"
 }
-# ruleset_state <sha> <boot>: the guest attribute watchtower/ruleset on stdin;
-# prints what came of that ruleset (pending, confirmed, rolled back, refused or
-# failed), if it's that boot's, or any boot's when boot is empty. Nothing when there
-# is none: the attribute outlasts a stop, a reset and a reboot, so a value alone
-# says nothing about this boot. A time beyond 5 minutes of clock skew ahead of this
-# machine's is no word either. scripts/check-bastion.sh tests it.
+# ruleset_state <sha> <boot> [<run nonce>]: the guest attribute watchtower/ruleset on
+# stdin; prints what came of that ruleset (pending, confirmed, rolled back, refused or
+# failed), if it's that boot's, or any boot's when boot is empty, and with that run
+# nonce, or any when none is given. Nothing when there is none: the attribute outlasts
+# a stop, a reset and a reboot, so a value alone says nothing about this boot. A time
+# beyond 5 minutes of clock skew ahead of this machine's is no word either.
+# scripts/check-bastion.sh tests it.
 ruleset_state() {
-  { grep -xE '(pending|confirmed|rolled back|refused|failed) [0-9a-f]{64} at [0-9]+ boot [0-9a-f-]+' || true; } |
-    awk -v sha="$1" -v boot="$2" -v latest="$(($(date +%s) + 300))" '
-      $(NF - 4) == sha && $(NF - 2) + 0 <= latest + 0 && (boot == "" || $NF == boot) {
+  { grep -xE '(pending|confirmed|rolled back|refused|failed) [0-9a-f]{64} at [0-9]+ boot [0-9a-f-]+ run ([0-9a-f]{32}|-)' || true; } |
+    awk -v sha="$1" -v boot="$2" -v nonce="${3:-}" -v latest="$(($(date +%s) + 300))" '
+      $(NF - 6) == sha && $(NF - 4) + 0 <= latest + 0 && (boot == "" || $(NF - 2) == boot) && (nonce == "" || $NF == nonce) {
         state = $1
-        if (NF == 7) state = $1 " " $2
+        if (NF == 9) state = $1 " " $2
       }
       END { print state }'
 }
-# login_seen <boot> <since>: the guest attribute watchtower/login on stdin; true if
-# it's a login on that boot, since then (an epoch, less 5 minutes of clock skew).
+# login_seen <boot> <run nonce> <login nonce>: the guest attribute watchtower/login on
+# stdin; true if it's a login on that boot, with that run nonce, that came with that
+# login nonce, and no later than 5 minutes of clock skew from now.
 login_seen() {
-  { grep -xE 'login [0-9]+ boot [0-9a-f-]+' || true; } |
-    awk -v boot="$1" -v earliest="$(($2 - 300))" -v latest="$(($(date +%s) + 300))" '
-      $NF == boot && $2 + 0 >= earliest + 0 && $2 + 0 <= latest + 0 { seen = 1 }
+  { grep -xE 'login [0-9]+ boot [0-9a-f-]+ for ([0-9a-f]{32}(,[0-9a-f]{32})*|-) run [0-9a-f]{32}' || true; } |
+    awk -v boot="$1" -v run="$2" -v login="$3" -v latest="$(($(date +%s) + 300))" '
+      $4 == boot && $8 == run && $2 + 0 <= latest + 0 {
+        n = split($6, logins, ",")
+        for (i = 1; i <= n; i++) if (logins[i] == login) seen = 1
+      }
       END { exit !seen }'
 }
 # guest_attribute <path>: its value, and nothing when it isn't there yet. A read
@@ -527,9 +562,15 @@ attribute_refusal() {
 bastion_attribute() {
   guest_attribute "watchtower/$1"
 }
+# bastion_boot <run nonce>: the boot the VM says it's on, if it says so with that run
+# nonce, and nothing otherwise.
+bastion_boot() {
+  [[ "$1" =~ ^[0-9a-f]{32}$ ]] || return 0
+  bastion_attribute boot | awk -v nonce="$1" 'NF == 3 && $1 ~ /^[0-9a-f-]+$/ && $2 == "run" && $3 == nonce { print $1 }'
+}
 # The way to cancel a rollback, or show a login, by hand, as any account with OS
-# Login on it.
-confirm_by_hand="gcloud compute ssh ${BASTION} --zone ${BASTION_ZONE} --project ${GCP_PROJECT} --tunnel-through-iap --command 'touch /run/watchtower-ruleset/confirm'"
+# Login on it: a file named by this run's login nonce.
+confirm_by_hand="gcloud compute ssh ${BASTION} --zone ${BASTION_ZONE} --project ${GCP_PROJECT} --tunnel-through-iap --command 'touch /run/watchtower-ruleset/confirm-${login_nonce}'"
 # The guest agent publishes the host keys once the VM has booted.
 bastion_host_key() { guest_attribute hostkeys/ssh-ed25519; }
 # Dispatches bastion-confirm.yml through Gitea's API, for this branch: it logs
@@ -537,13 +578,14 @@ bastion_host_key() { guest_attribute hostkeys/ssh-ed25519; }
 # plainly if it can't, and never fails: then the rollback is what happens, or the
 # wait for a login gives up. The token goes through a pipe, never into a variable or
 # an argument. The job pins the host key sent here: a new VM's isn't in the stack
-# file yet.
+# file yet. It takes this run's login nonce too, for the name of the file it leaves.
 bastion_dispatch() {
   local branch payload key
   branch="$(git -C "$repo_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   key="$(bastion_host_key)"
   payload="$(mktemp)"
-  jq -n --arg ref "$branch" --arg key "${key:+ssh-ed25519 ${key}}" '{ref: $ref, inputs: {host_key: $key}}' >"$payload"
+  jq -n --arg ref "$branch" --arg key "${key:+ssh-ed25519 ${key}}" --arg nonce "$login_nonce" \
+    '{ref: $ref, inputs: {host_key: $key, nonce: $nonce}}' >"$payload"
   unset key
   if gopass show -o api/gitea >/dev/null &&
     gopass show -o api/gitea | sed 's/.*/header = "Authorization: token &"/' |
@@ -557,19 +599,20 @@ bastion_dispatch() {
   rm -f "$payload"
 }
 # bastion_ruleset_wait <the boot before this run's restart, if it made one>: waits
-# for what comes of the ruleset at this boot, by its boot id, dispatching the job when
-# it goes pending, and returns only if it's confirmed, with that boot's id in
-# bastion_boot_id. A rollback takes 10 minutes and a reboot, so this outlasts it.
+# for what comes of the ruleset at this boot, by its boot id and run nonce, dispatching
+# the job when it goes pending, and returns only if it's confirmed, with that boot's id
+# in bastion_boot_id. A rollback takes 10 minutes and a reboot, so this outlasts it.
 # Two reads a time, so within the 10 a minute guest attributes allow a VM.
 bastion_ruleset_wait() {
   local old_boot=$1 boot state dispatched=""
+  [[ "$run_nonce" =~ ^[0-9a-f]{32}$ ]] || die "no run nonce for ${BASTION}'s boot, so no word from it could count: rerun this"
   log "  waiting for ${BASTION}'s ruleset ${ruleset_sha:0:12}: it rolls back after 10 minutes unless confirmed"
   for _ in $(seq 67); do
-    boot="$(bastion_attribute boot)"
+    boot="$(bastion_boot "$run_nonce")"
     state=""
     # Until the boot says so, an old word could pass for its own.
     if [[ -n "$boot" && "$boot" != "$old_boot" ]]; then
-      state="$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" "$boot")"
+      state="$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" "$boot" "$run_nonce")"
     fi
     case "$state" in
       confirmed)
@@ -608,10 +651,9 @@ bastion_ruleset_wait() {
 # now, so an old attribute can't stand in for this boot.
 bastion_login_wait() {
   local boot=$1 dispatched=""
-  login_since="$(date +%s)"
   log "  waiting for a real login to reach ${BASTION}"
   for _ in $(seq 60); do
-    if bastion_attribute login | login_seen "$boot" "$login_since"; then
+    if bastion_attribute login | login_seen "$boot" "$run_nonce" "$login_nonce"; then
       log "  a login reached it"
       return 0
     fi
@@ -626,15 +668,17 @@ bastion_login_wait() {
 }
 # bastion_update: what differs goes on, in order, ending on a VM that has confirmed
 # this ruleset at this boot and let a login in. Metadata goes on before the stop,
-# so a failure there leaves the VM running. Needs current, want, account_differs and
-# retry_args, below.
+# so a failure there leaves the VM running, and each start this makes gets a fresh run
+# nonce while the VM is stopped. Needs current, want, account_differs, retry_args and
+# run_nonce, below: a VM with no run nonce yet is started afresh to get one.
 bastion_update() {
   local old_boot=""
-  if [[ "$(jq -c .meta <<<"$current")" != "$(jq -c .meta <<<"$want")" || "${#retry_args[@]}" -gt 0 ]]; then
-    log "  updating ${BASTION} in place: its metadata, stop, start"
-    old_boot="$(bastion_attribute boot)"
+  if [[ "$(jq -c .meta <<<"$current")" != "$(jq -c .meta <<<"$want")" || "${#retry_args[@]}" -gt 0 || -z "$run_nonce" ]]; then
+    log "  updating ${BASTION} in place: its metadata, stop, a run nonce, start"
+    old_boot="$(bastion_boot "$run_nonce")"
     compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata-from-file "$bastion_files" "${retry_args[@]}"
     bastion_stop
+    bastion_new_run_nonce
     bastion_start
   fi
   # Every run, as the attribute doesn't age out: this boot's word on this file, so
@@ -649,38 +693,43 @@ bastion_update() {
     log "  waiting for ${BASTION} to finish apt"
     local guarded=""
     for _ in $(seq 90); do
-      if [[ "$(bastion_attribute settled)" == "$bastion_boot_id" ]]; then
+      if [[ "$(bastion_attribute settled)" == "${bastion_boot_id} run ${run_nonce}" ]]; then
         guarded=1
         break
       fi
       sleep 10
     done
     [[ -n "$guarded" ]] || die "${BASTION} didn't report that apt had finished within 15 minutes, so it still runs as no one: see its serial output, gcloud compute instances reset it if it is running, and rerun (a rerun starts it if it is stopped).$(attribute_refusal)"
-    log "  attaching ${BASTION}'s account: stop, its account, start"
+    log "  attaching ${BASTION}'s account: stop, its account, a run nonce, start"
     old_boot="$bastion_boot_id"
     bastion_stop
     compute instances set-service-account "$BASTION" --zone "$BASTION_ZONE" --service-account "$BASTION_SA" --scopes cloud-platform
+    bastion_new_run_nonce
     bastion_start
     # Asked again of the boot with the account, whose guard is what keeps a user
     # from the attribute. A VM with no guard before it can't vouch for itself: a
-    # user could have written what the wait above read. Still pending here, it's
-    # dispatched and waited on like any other, and anything but confirmed stops.
+    # user could have written what the wait above read, or put values there for this
+    # boot to be taken by, but not with the run nonce this boot starts with, which
+    # went in after that boot was stopped. Still pending here, it's dispatched and
+    # waited on like any other, and anything but confirmed stops.
     bastion_ruleset_wait "$old_boot"
   fi
   bastion_login_wait "$bastion_boot_id"
 }
 # The last word before "Done": running, on the boot that confirmed this ruleset with
-# sshd active, and which a login reached during this run.
+# sshd active, with this run's nonce, and which a login of this run reached.
 bastion_final_check() {
   local status boot
   status="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format 'value(status)')"
   [[ "$status" == RUNNING ]] || die "${BASTION} is ${status}, so break glass is down"
-  boot="$(bastion_attribute boot)"
+  boot="$(bastion_boot "$run_nonce")"
   [[ -n "$boot" && "$boot" == "$bastion_boot_id" ]] || die "${BASTION} rebooted during this run: rerun this, to ask the boot it's on now.$(attribute_refusal)"
-  [[ "$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" "$boot")" == confirmed ]] ||
+  [[ "$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" "$boot" "$run_nonce")" == confirmed ]] ||
     die "${BASTION}'s ruleset is no longer confirmed: see its serial output, and rerun.$(attribute_refusal)"
-  bastion_attribute login | login_seen "$boot" "$login_since" ||
-    die "${BASTION} shows no login on this boot: rerun this.$(attribute_refusal)"
+  [[ "$(bastion_attribute tool)" == "${tool_sha} boot ${boot} run ${run_nonce}" ]] ||
+    die "${BASTION} doesn't run this config/bastion/ruleset.sh: it failed its self-check, or failed at the boot and gave way to its last good copy (see its serial output, and \"A new ruleset tool\" in docs/runbook.md). Fix it and rerun.$(attribute_refusal)"
+  bastion_attribute login | login_seen "$boot" "$run_nonce" "$login_nonce" ||
+    die "${BASTION} shows no login of this run on this boot: rerun this.$(attribute_refusal)"
 }
 if ! exists instances describe "$BASTION" --zone "$BASTION_ZONE"; then
   compute instances create "$BASTION" --zone "$BASTION_ZONE" --machine-type e2-micro \
@@ -689,7 +738,7 @@ if ! exists instances describe "$BASTION" --zone "$BASTION_ZONE"; then
     --boot-disk-size 10GB --boot-disk-type pd-standard \
     --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
     --no-service-account --no-scopes --tags "$BASTION" \
-    --metadata enable-oslogin=TRUE,block-project-ssh-keys=TRUE,enable-guest-attributes=TRUE \
+    --metadata "enable-oslogin=TRUE,block-project-ssh-keys=TRUE,enable-guest-attributes=TRUE,watchtower-run-nonce=$(new_nonce)" \
     --metadata-from-file "$bastion_files"
 fi
 # In place, and only when something differs. Stop and start keep the boot
@@ -708,15 +757,23 @@ retry_iam gcloud projects add-iam-policy-binding "$GCP_PROJECT" \
 # Everything below goes by them, on an older VM too. No restart needed.
 compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata enable-guest-attributes=TRUE
 
-current="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format json | jq -cS '{
+described="$(compute instances describe "$BASTION" --zone "$BASTION_ZONE" --format json)"
+current="$(jq -cS '{
   sa: (.serviceAccounts[0].email // ""), scopes: (.serviceAccounts[0].scopes // []),
-  meta: ([.metadata.items[]? | select(.key | IN("startup-script", "watchtower-nftables", "watchtower-ruleset", "watchtower-alloy"))] | from_entries)}')"
+  meta: ([.metadata.items[]? | select(.key | IN("startup-script", "watchtower-nftables", "watchtower-ruleset", "watchtower-alloy"))] | from_entries)}' <<<"$described")"
+# The run nonce the boot now running was started with: what a run that starts nothing
+# asks for. None, or not one, and bastion_update starts it afresh with one.
+run_nonce="$(jq -r '[.metadata.items[]? | select(.key == "watchtower-run-nonce") | .value][0] // ""' <<<"$described")"
+[[ "$run_nonce" =~ ^[0-9a-f]{32}$ ]] || run_nonce=""
+unset described
 want="$(jq -ncS --arg sa "$BASTION_SA" --rawfile s "${bastion_dir}/startup.sh" \
   --rawfile n "${bastion_dir}/nftables.conf" --rawfile r "${bastion_dir}/ruleset.sh" --rawfile a "$bastion_alloy" '{
   sa: $sa, scopes: ["https://www.googleapis.com/auth/cloud-platform"],
   meta: {"startup-script": $s, "watchtower-nftables": $n, "watchtower-ruleset": $r, "watchtower-alloy": $a}}')"
 account_differs=""
 [[ "$(jq -c 'del(.meta)' <<<"$current")" == "$(jq -c 'del(.meta)' <<<"$want")" ]] || account_differs=1
+# Any boot's and any run's: all it decides is whether to ask for the file once more,
+# which a forged word could only make it do for nothing.
 ruleset_before="$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" "")"
 # A rerun after a rollback: this file again, even unchanged, since nothing need
 # be wrong with it (Gitea was down). The VM takes a new value here to mean so,
