@@ -188,17 +188,24 @@ apply_tool() {
   return "$rc"
 }
 
-# stop_ungated_sshd: sshd up with no guard, on a VM that may have an account, which is
-# what a boot leaves with the tool and sshd's drop-in both gone: systemd starts sshd
-# before any startup script, and with no drop-in nothing gates it. Stopped, as nothing
-# may run with a token and no guard. By the guard's name, as there's no tool to ask.
-stop_ungated_sshd() {
+# sshd_up_unguarded: sshd is active, the guard isn't in the kernel (by its name, as
+# there may be no tool to ask by its rules), and the VM may have an account (the
+# metadata server doesn't say 404). startup.sh has the same function, word for word,
+# and scripts/check-bastion.sh keeps them equal.
+sshd_up_unguarded() {
   local code
-  sshd_active || return 0
-  nft list chain inet metadata_guard metadata >/dev/null 2>&1 && return 0
+  systemctl is-active --quiet ssh.service || return 1
+  ! nft list chain inet metadata_guard metadata >/dev/null 2>&1 || return 1
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --retry 2 --retry-connrefused \
     -H 'Metadata-Flavor: Google' "$ACCOUNT_URL" 2>/dev/null || true)"
-  [[ "$code" != 404 ]] || return 0
+  [[ "$code" != 404 ]]
+}
+
+# stop_ungated_sshd: what a boot leaves with the tool and sshd's drop-in both gone:
+# systemd starts sshd before any startup script, and with no drop-in nothing gates it.
+# Stopped, as nothing may run with a token and no guard. startup.sh does the same.
+stop_ungated_sshd() {
+  sshd_up_unguarded || return 0
   say "sshd is up with no guard, on a VM that may have an account: stopping it"
   systemctl stop ssh.service 2>&1 | quote
 }

@@ -439,13 +439,18 @@ if [[ "$nonce_left" == "600 root" ]]; then pass "nonce: one readable to all from
 umask "$umask_before"
 # What the settled, tool and userns attributes are sent: <boot id> [<sha256>] and the
 # run nonce.
+# report_tool keeps its word for a login to say again: here, under a umask that would
+# leave it readable to all.
+tool_word_dir="$(mktemp -d)"
 attribute_sent="$(
   RUN_NONCE="$(mktemp)"
   printf '%032x\n' 7 >"$RUN_NONCE"
   RULESET_TOOL="$(mktemp)"
   echo a-tool >"$RULESET_TOOL"
+  TOOL_WORD="${tool_word_dir}/tool"
   curl() { local a; for a in "$@"; do [[ "$a" != *" run "* ]] || echo "${*: -1} ${a}"; done; }
   report_settled
+  umask 022
   report_tool
   userns_state=off
   report_userns
@@ -474,6 +479,12 @@ if grep -qxF "http://169.254.169.254/computeMetadata/v1/instance/guest-attribute
 else
   flunk "nonce: tool was sent: ${attribute_sent}"
 fi
+if [[ "$(cat "${tool_word_dir}/tool" 2>/dev/null)" == "${tool_sum} boot ${this_boot_now} run $(printf '%032x' 7)" ]]; then
+  pass "nonce: report_tool keeps that word for a login to say again"
+else
+  flunk "nonce: report_tool kept: $(cat "${tool_word_dir}/tool" 2>&1)"
+fi
+if [[ "$(stat -c '%a %U' "${tool_word_dir}/tool" 2>/dev/null)" == "600 root" ]]; then pass "nonce: the kept tool word is root's, 0600"; else flunk "nonce: the kept tool word is $(stat -c '%a %U' "${tool_word_dir}/tool" 2>&1)"; fi
 
 # --- userns: unprivileged user namespaces off ---------------------------------
 # This container runs the host's kernel, not Debian's, so it has no such knob: a file
@@ -963,7 +974,7 @@ give_run_nonce() { (umask 077 && printf '%s\n' "$run_a" >"$run_nonce_file"); }
 # A bastion that has only ever had the package's ruleset, and no account.
 fresh() {
   rm -rf "$state_dir" "$dropbox"
-  rm -f /run/watchtower-ruleset.word /run/watchtower-ruleset.logins
+  rm -f /run/watchtower-ruleset.word /run/watchtower-ruleset.logins /run/watchtower-ruleset.tool
   give_run_nonce
   rm -f "${stubs}/load-broken" "${stubs}/timer-broken" "${stubs}/install-broken" \
     "${stubs}/nft-broken" "${stubs}/at-load-disk-fails" "${stubs}/at-load-a-login" \
@@ -979,7 +990,7 @@ fresh() {
 # What a reboot does to all of it: nftables.service loads the file, the units
 # start afresh, /run empties.
 reboot_vm() {
-  rm -f /run/watchtower-ruleset.word /run/watchtower-ruleset.logins
+  rm -f /run/watchtower-ruleset.word /run/watchtower-ruleset.logins /run/watchtower-ruleset.tool
   give_run_nonce
   nft flush ruleset
   [[ ! -e "${stubs}/load-broken" && -f /etc/nftables.conf ]] && nft --file /etc/nftables.conf 2>/dev/null
@@ -1065,12 +1076,15 @@ fresh
 apply_ruleset a
 setpriv --reuid=65534 --regid=65534 --clear-groups touch "${dropbox}/confirm"
 check "a user may ask" test -e "${dropbox}/confirm"
-# The installed tool, which confirm names in watchtower/tool.
-install -m 0755 ruleset.sh /usr/local/sbin/watchtower-ruleset
+# The tool word startup.sh's report_tool kept at this boot, once its apply ended well:
+# what confirm says again in watchtower/tool, word for word. Not the installed tool's
+# sha256 here, so it's the kept word that's said, not one worked out afresh.
+kept_tool_word="$(printf '%064x' 99) boot ${this_boot} run ${run_a}"
+printf '%s\n' "$kept_tool_word" >/run/watchtower-ruleset.tool
 rm -f "${stubs}/attribute-tool"
 confirm
 check "confirm: says confirmed" state_is "$sha_a" confirmed
-check "confirm: says which tool, with the boot and its run nonce" grep -qxF "$(sha256sum ruleset.sh | cut -d' ' -f1) boot ${this_boot} run ${run_a}" "${stubs}/attribute-tool"
+check "confirm: says the kept tool word again" grep -qxF "$kept_tool_word" "${stubs}/attribute-tool"
 check "confirm: nothing pending" no_file "${state_dir}/pending"
 check "confirm: records it" grep -qx "$sha_a" "${state_dir}/confirmed"
 check "confirm: stops the timer" called "stop ${timer}"
@@ -1156,13 +1170,22 @@ apply_ruleset a
 rm -f "${stubs}/attribute-broken"
 check "a lost word: nothing reached the attribute" test ! -s "${stubs}/attribute"
 check "a lost word: it did say so" reason_is 0
-# watchtower/tool too, which only startup.sh says at a boot: the installed tool's.
+# watchtower/tool too, which startup.sh says once at a boot whose apply ended well, and
+# keeps for a login to say again.
 install -m 0755 ruleset.sh /usr/local/sbin/watchtower-ruleset
-tool_word="$(sha256sum ruleset.sh | cut -d' ' -f1) boot ${this_boot} run ${run_a}"
+printf '%s\n' "$kept_tool_word" >/run/watchtower-ruleset.tool
 rm -f "${stubs}/attribute-tool"
 confirm
 check "a lost word: a login says it again" state_is "$sha_a" confirmed
-check "a lost word: and which tool this is, again" grep -qxF "$tool_word" "${stubs}/attribute-tool"
+check "a lost word: and the tool word, again" grep -qxF "$kept_tool_word" "${stubs}/attribute-tool"
+# A boot whose apply never ended well keeps no tool word (startup.sh's guard died before
+# report_tool): a login then says confirmed of the ruleset, if that's true, and nothing
+# of the tool, so bootstrap's final check can't pass on it (the review's case,
+# 2026-11-04).
+rm -f /run/watchtower-ruleset.tool "${stubs}/attribute-tool"
+confirm
+check "no kept tool word: a login still says the ruleset's" state_is "$sha_a" confirmed
+check "no kept tool word: and nothing of the tool" no_file "${stubs}/attribute-tool"
 # ... only while it's true.
 touch "${stubs}/sshd-down"
 confirm
@@ -1669,10 +1692,22 @@ $(word pending)
 $(word confirmed)"
 if grep -qF "$confirm_by_hand" <<<"$wait_out"; then pass "bootstrap waits: says how to confirm by hand"; else flunk "bootstrap waits: doesn't say how to confirm by hand"; fi
 wait_case "rolled back stops" 1 0 "" "$(word 'rolled back')"
+# A tool stopped at its time limit mid-trial ends rolled back too: the message names it,
+# and that a retry would hang the same way (the review's fix, 2026-11-04).
+if grep -qF 'says "apply took longer than", the ruleset tool hung in its trial and was stopped at its time limit, and a retry would hang the same way' <<<"$wait_out"; then
+  pass "bootstrap waits: rolled back names the tool's time limit, and the serial output's line"
+else
+  flunk "bootstrap waits: rolled back says: ${wait_out}"
+fi
 wait_case "pending, then rolled back stops" 1 1 "" "$(word pending)
 $(word 'rolled back')"
 wait_case "refused stops, as a rerun finds it" 1 0 "" "$(word refused)"
 wait_case "failed stops" 1 0 "" "$(word failed)"
+if grep -qF 'or its ruleset tool was stopped at its time limit, which the serial output then says ("apply took longer than"' <<<"$wait_out"; then
+  pass "bootstrap waits: failed names the tool's time limit, and the serial output's line"
+else
+  flunk "bootstrap waits: failed says: ${wait_out}"
+fi
 wait_case "an earlier boot's word isn't this boot's" 1 0 "" "$(word confirmed "$boot_b")"
 wait_case "after a restart, the old boot's word isn't one, while the VM still says that boot" 1 0 "$boot_a" "$(word confirmed)"
 wait_case "after a restart, the new boot's word is" 0 0 "$boot_b" "$(word confirmed)"
@@ -2309,13 +2344,29 @@ boot_with_tool "${variants}/apply-zero"
 check "tool, apply-zero: the boot goes on" reason_is 0
 check "tool, apply-zero: sshd never came up" test -e "${stubs}/sshd-down"
 check "tool, apply-zero: the last good copy stays the good one" same_file ruleset.sh "$last_good"
-check "tool, apply-zero: says why" said "sshd isn't active, so"
+check "tool, apply-zero: says why" said "apply didn't end with its ruleset confirmed at this boot"
+# ... and as a real boot leaves things (the review's case, 2026-11-04): sshd already up
+# through the tool before's gate, and the guard loaded at early boot, with no trial, as
+# a run that changes only ruleset.sh has. Neither is the new tool's doing, so neither
+# keeps it.
+tool_as ruleset.sh ruleset.sh settled
+rm -f "${stubs}/sshd-down"
+boot_with_tool "${variants}/apply-zero"
+check "tool, apply-zero, sshd up from the boot: the boot goes on" reason_is 0
+refute "tool, apply-zero, sshd up from the boot: it started nothing" called "start ssh.service"
+check "tool, apply-zero, sshd up from the boot: the last good copy stays the good one" same_file ruleset.sh "$last_good"
+check "tool, apply-zero, sshd up from the boot: says why" said "apply didn't end with its ruleset confirmed at this boot"
+# ... while the good tool, at a boot like that, is kept: its apply says confirmed.
+tool_as "${variants}/older" "${variants}/older" settled
+rm -f "${stubs}/sshd-down"
+boot_with_tool ruleset.sh
+check "tool, a good one, sshd up from the boot, no trial: kept" same_file ruleset.sh "$last_good"
 
 # What a boot must show before the tool is kept, beyond its self-check.
 # promote_case <name> <sshd: up|down> <guard: on|off> <account: yes|no>
-#   <trial pending: yes|no> <want: kept|not>
+#   <trial pending: yes|no> <want: kept|not> [<this boot's ruleset word, or none>]
 promote_case() {
-  local name=$1 sshd=$2 guard=$3 account=$4 pending=$5 want=$6 dir got result
+  local name=$1 sshd=$2 guard=$3 account=$4 pending=$5 want=$6 word=${7:-confirmed} dir got result
   dir="$(mktemp -d)"
   install -m 0755 ruleset.sh "${dir}/tool"
   install -m 0755 "${variants}/older" "${dir}/last-good"
@@ -2325,7 +2376,9 @@ promote_case() {
     RULESET_TOOL="${dir}/tool"
     TOOL_LAST_GOOD="${dir}/last-good"
     PENDING_TRIAL="${dir}/pending"
+    RULESET_WORD="${dir}/word"
     [[ "$pending" != yes ]] || touch "$PENDING_TRIAL"
+    [[ "$word" == none ]] || printf '%s\n' "$word" >"$RULESET_WORD"
     systemctl() { [[ "$*" == "is-active --quiet ssh.service" && "$sshd" == up ]]; }
     guard_loaded() { [[ "$guard" == on ]]; }
     get() { if [[ "$account" == no ]]; then echo 404; else echo 200; fi; }
@@ -2339,6 +2392,8 @@ promote_case "sshd up, no guard, no account so no token" up off no no kept
 promote_case "sshd up, no guard, an account" up off yes no not
 promote_case "sshd down" down on yes no not
 promote_case "a trial pending, over a last good copy" up on yes yes not
+promote_case "all well but the apply said nothing at this boot" up on yes no not none
+promote_case "all well but the apply said pending at this boot" up on yes no not pending
 
 # Each bug the self-check sees: not put in place, the last good copy untouched, and why.
 # self_check_case <variant> <what it says>
@@ -2459,6 +2514,29 @@ check "tool, gone, metadata's fails: stops" reason_is 1
 check "tool, gone, metadata's fails: not put in place" no_file "$real_tool"
 refute "tool, gone, metadata's fails: nothing starts sshd" called "start ssh.service"
 check "tool, gone, metadata's fails: says sshd stays as the boot left it" said 'it stays as the boot left it'
+# ... with sshd's drop-in gone too, so sshd up from the boot, ungated, with no guard, on
+# a VM with an account: stopped before the boot stops, as recovery.sh does (the review's
+# fix, 2026-11-04).
+tool_as none none
+rm -f "${stubs}/sshd-down" "${stubs}/sshd-runs-its-gate"
+touch "${stubs}/sshd-ungated"
+boot_with_tool none
+check "tool, gone, sshd up ungated with no guard and an account: the boot stops" reason_is 1
+check "tool, gone, sshd up ungated with no guard and an account: stopped" called "stop ssh.service"
+check "tool, gone, sshd up ungated with no guard and an account: sshd down" test -e "${stubs}/sshd-down"
+check "tool, gone, sshd up ungated with no guard and an account: says why" said 'sshd is up with no guard, on a VM that may have an account: stopping it'
+# ... and left up on a VM with no account, so no token to guard.
+tool_as none none
+rm -f "${stubs}/sshd-down" "${stubs}/sshd-runs-its-gate"
+touch "${stubs}/sshd-ungated"
+echo 404 >"${stubs}/account-code"
+boot_with_tool none
+refute "tool, gone, sshd up ungated, no account: left up" called "stop ssh.service"
+check "tool, gone, sshd up ungated, no account: up" no_file "${stubs}/sshd-down"
+# The check itself is the same in startup.sh and recovery.sh, word for word.
+unguarded_in_startup="$(sed -n '/^sshd_up_unguarded() {$/,/^}$/p' startup.sh)"
+check "sshd_up_unguarded: in startup.sh" test -n "$unguarded_in_startup"
+check "sshd_up_unguarded: the same in recovery.sh" test "$(sed -n '/^sshd_up_unguarded() {$/,/^}$/p' recovery.sh)" = "$unguarded_in_startup"
 
 # A tool on disk that never passed the self-check is never kept, though it brought sshd up
 # at a boot with no trial.

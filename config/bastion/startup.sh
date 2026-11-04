@@ -68,6 +68,14 @@ RULESET_TOOL="/usr/local/sbin/watchtower-ruleset"
 TOOL_LAST_GOOD="/usr/local/sbin/watchtower-ruleset.last-good"
 # ruleset.sh's record of a trial that is pending: nothing is promoted while it's there.
 PENDING_TRIAL="/var/lib/watchtower-bastion/pending"
+# ruleset.sh's last word on its ruleset at this boot (its LAST_WORD), cleared before
+# each apply here: confirmed there is the apply's own proof it went through to the end.
+RULESET_WORD="/run/watchtower-ruleset.word"
+# The watchtower/tool word report_tool said at this boot, kept for ruleset.sh to say
+# again after a login: root's alone, and only once this boot's apply ended well.
+TOOL_WORD="/run/watchtower-ruleset.tool"
+# 404 here means a VM with no account, so no token to guard. recovery.sh names it too.
+ACCOUNT_URL="${MDS}/instance/service-accounts/default/email"
 # How long the tool's setup or apply may take at a boot before it's stopped and, for
 # apply, the last good copy takes over; and the self-check of a new tool.
 TOOL_TIMEOUT="5m"
@@ -288,17 +296,46 @@ fall_back() {
 # no_account: the metadata server says this VM has no account, so no token to guard.
 # Only a 404 says so: anything else may be a VM with a token.
 no_account() {
-  [[ "$(get "${MDS}/instance/service-accounts/default/email" "${work}/account-email" -H 'Metadata-Flavor: Google')" == 404 ]]
+  [[ "$(get "$ACCOUNT_URL" "${work}/account-email" -H 'Metadata-Flavor: Google')" == 404 ]]
 }
 
-# tool_proved: what this boot has shown of the tool, beyond its self-check: sshd is
-# active, through the gate as it stands now (the guard in the kernel, or no account
-# and so no token), and no ruleset trial is pending, whose confirmation or rollback the
-# tool hasn't run yet. A tool whose apply ends at once, starting nothing, shows none of
-# it. Says why not.
+# sshd_up_unguarded: sshd is active, the guard isn't in the kernel (by its name, as
+# there may be no tool to ask by its rules), and the VM may have an account (the
+# metadata server doesn't say 404). recovery.sh has the same function, word for word,
+# and scripts/check-bastion.sh keeps them equal.
+sshd_up_unguarded() {
+  local code
+  systemctl is-active --quiet ssh.service || return 1
+  ! nft list chain inet metadata_guard metadata >/dev/null 2>&1 || return 1
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --retry 2 --retry-connrefused \
+    -H 'Metadata-Flavor: Google' "$ACCOUNT_URL" 2>/dev/null || true)"
+  [[ "$code" != 404 ]]
+}
+
+# stop_ungated_sshd: what a boot leaves with the tool and sshd's drop-in both gone, and
+# no tool to restore: systemd started sshd before this script, and nothing gated it.
+# Stopped, as nothing may run with a token and no guard, as recovery.sh does.
+stop_ungated_sshd() {
+  sshd_up_unguarded || return 0
+  warn "sshd is up with no guard, on a VM that may have an account: stopping it"
+  systemctl stop ssh.service || warn "could not stop sshd"
+}
+
+# tool_proved: what this boot's apply has shown of the tool, beyond its self-check:
+# that apply itself went through to the end and said its ruleset is confirmed (its word
+# at this boot, which run_tool clears before it; sshd up and the guard on may be the
+# boot's doing, from the tool before, so they prove nothing on their own); sshd active,
+# through the gate as it stands now (the guard in the kernel, or no account and so no
+# token); and no ruleset trial pending, whose confirmation or rollback the tool hasn't
+# run yet. A tool whose apply ends at once, saying nothing, shows none of it. Says why
+# not.
 tool_proved() {
   if [[ -e "$PENDING_TRIAL" ]]; then
     warn "a ruleset trial is pending, so ${RULESET_TOOL} isn't kept as the last good copy before a boot after it"
+    return 1
+  fi
+  if [[ "$(cat "$RULESET_WORD" 2>/dev/null)" != confirmed ]]; then
+    warn "${RULESET_TOOL}'s apply didn't end with its ruleset confirmed at this boot, so it isn't kept as the last good copy"
     return 1
   fi
   if ! systemctl is-active --quiet ssh.service; then
@@ -331,6 +368,8 @@ promote_tool() {
 # timeout ends the tool's whole process group, so nothing of it keeps that lock.
 run_tool() {
   local rc=0
+  # Only this apply's word counts for tool_proved.
+  rm -f "$RULESET_WORD"
   # Without its timer no trial starts, so a failure here costs only that.
   timeout -k 10s "$TOOL_TIMEOUT" "$RULESET_TOOL" setup || warn "could not set up ${RULESET_TOOL}'s units"
   if [[ -n "$1" ]]; then
@@ -380,8 +419,12 @@ guard() {
   # Nothing here then asks for sshd: it stays as the boot left it. That's down, at a
   # boot with sshd's drop-in, whose gate needs the tool; and up, ungated, on a first
   # install or a new VM, which has no drop-in yet and no account, so no token to guard.
-  tool_whole "$RULESET_TOOL" || restore_last_good ||
-    die "no usable ${RULESET_TOOL} and no last good copy, so no way to load the guard, and nothing here asks for sshd: it stays as the boot left it"
+  # Up with no guard on a VM that may have an account, with the drop-in gone too, it's
+  # stopped.
+  if ! tool_whole "$RULESET_TOOL" && ! restore_last_good; then
+    stop_ungated_sshd
+    die "no usable ${RULESET_TOOL} and no last good copy, so no way to load the guard, and nothing here asks for sshd: it stays as the boot left it, unless it was up with no guard on a VM that may have an account"
+  fi
   retry="$(mds instance/attributes/watchtower-nftables-retry 2>/dev/null || true)"
   if mds_file instance/attributes/watchtower-nftables "${work}/nftables.conf" && [[ -s "${work}/nftables.conf" ]]; then
     ruleset="${work}/nftables.conf"
@@ -398,22 +441,33 @@ guard() {
   esac
 }
 
-# put_word <key> <value>: the guest attribute watchtower/<key>, as
-# `<value> boot <boot id> run <run nonce>`, which is how bootstrap reads them.
-put_word() {
+# word_of <value>: `<value> boot <boot id> run <run nonce>`, which is how bootstrap
+# reads the guest attributes.
+word_of() { printf '%s boot %s run %s' "$1" "$(cat /proc/sys/kernel/random/boot_id)" "$(run_nonce)"; }
+
+# put_value <key> <value>: the guest attribute watchtower/<key>, as it is.
+put_value() {
   curl -fsS -o /dev/null --max-time 5 --retry 2 --retry-connrefused -X PUT -H 'Metadata-Flavor: Google' \
-    --data "$2 boot $(cat /proc/sys/kernel/random/boot_id) run $(run_nonce)" "${MDS}/instance/guest-attributes/watchtower/$1"
+    --data "$2" "${MDS}/instance/guest-attributes/watchtower/$1"
 }
+
+# put_word <key> <value>: the guest attribute watchtower/<key>, as word_of says it.
+put_word() { put_value "$1" "$(word_of "$2")"; }
 
 # Which tool this boot runs, in a guest attribute, by its sha256: bootstrap reports
 # success only if it's the one it put in metadata, so a tool that failed its
-# self-check, or gave way to the last good copy, can't pass unseen. ruleset.sh says it
-# again whenever it says confirmed, so a lost word comes back with a login.
+# self-check, or gave way to the last good copy, can't pass unseen. Called only once
+# guard() has returned, so this boot's apply ended well. The word is kept in TOOL_WORD
+# too, root's alone, for ruleset.sh to say again with a login if this PUT is lost; with
+# no such file it says nothing, so a login can't vouch for a tool whose apply failed.
 report_tool() {
-  local sha
+  local sha word
   sha="$(sha256sum <"$RULESET_TOOL" 2>/dev/null | cut -d' ' -f1)" || sha=""
   [[ -n "$sha" ]] || { warn "could not read ${RULESET_TOOL} to report it"; return 0; }
-  put_word tool "$sha" || warn "could not put the tool in the guest attribute"
+  word="$(word_of "$sha")"
+  rm -f "$TOOL_WORD"
+  (umask 077 && printf '%s\n' "$word" >"$TOOL_WORD") || warn "could not keep the tool's word for a login to say again"
+  put_value tool "$word" || warn "could not put the tool in the guest attribute"
 }
 
 # Whether unprivileged user namespaces are off at this boot (userns_off), in a guest

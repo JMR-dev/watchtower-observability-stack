@@ -80,7 +80,8 @@
 #
 #   <sha256 of the installed tool> boot <boot id> run <nonce>
 #
-# said again here with every confirmed, so a lost word comes back with a login.
+# said again here with every confirmed, from the copy startup.sh keeps once this boot's
+# apply has ended well, so a lost word comes back with a login; with no copy, nothing.
 #
 # The run nonce (the owner's decision, 2026-11-04) is the one bootstrap put in metadata
 # while the VM was stopped, which startup.sh keeps in /run for root alone, or "-" for
@@ -114,6 +115,9 @@ LAST_WORD="/run/watchtower-ruleset.word"
 RUN_NONCE="/run/watchtower-run-nonce"
 # The login nonces this boot has seen.
 LOGINS="/run/watchtower-ruleset.logins"
+# The watchtower/tool word startup.sh said at this boot, once this boot's apply ended
+# well (its report_tool): what say_tool says again, and nothing else.
+TOOL_WORD="/run/watchtower-ruleset.tool"
 # How many it keeps.
 LOGINS_KEPT=8
 # systemd's own name for a mount there.
@@ -149,11 +153,14 @@ run_nonce() {
   printf '%s' "$nonce"
 }
 
-# put_attribute <key> <value>: with this boot's run nonce after it.
-put_attribute() {
+# put_raw <key> <value>: the guest attribute watchtower/<key>, as it is.
+put_raw() {
   curl -fsS -o /dev/null --max-time 5 --retry 2 --retry-connrefused -X PUT -H 'Metadata-Flavor: Google' \
-    --data "$2 run $(run_nonce)" "${ATTRIBUTES_URL}/$1"
+    --data "$2" "${ATTRIBUTES_URL}/$1"
 }
+
+# put_attribute <key> <value>: with this boot's run nonce after it.
+put_attribute() { put_raw "$1" "$2 run $(run_nonce)"; }
 
 # logins_seen: the login nonces in the names of the files in the dropbox now, kept with
 # this boot's others, the newest last and LOGINS_KEPT at most; prints them
@@ -199,14 +206,17 @@ status() {
 
 sshd_active() { systemctl is-active --quiet ssh.service; }
 
-# say_tool: which tool is installed, by its sha256, in watchtower/tool, as startup.sh
-# says it at a boot: bootstrap's final check asks for it. Said again with every
-# confirmed, so a word the attribute lost comes back with a login. Never fails.
+# say_tool: watchtower/tool again, word for word as startup.sh's report_tool said it at
+# this boot, from the copy it keeps in TOOL_WORD: bootstrap's final check asks for it.
+# Said again with every confirmed, so a word the attribute lost comes back with a
+# login. With no such copy it says nothing: report_tool keeps one only once this boot's
+# apply has ended well, so a login can't vouch for a tool whose apply never finished.
+# Never fails.
 say_tool() {
-  local sha
-  sha="$(sha256sum <"$TOOL" 2>/dev/null | cut -d' ' -f1)" || sha=""
-  [[ -n "$sha" ]] || { warn "could not read ${TOOL} to say which tool this is"; return 0; }
-  put_attribute tool "${sha} boot $(boot_id)" || warn "could not put the tool in the guest attribute"
+  local word
+  word="$(cat "$TOOL_WORD" 2>/dev/null)" || return 0
+  [[ "$word" =~ ^[0-9a-f]{64}\ boot\ [0-9a-f-]+\ run\ ([0-9a-f]{32}|-)$ ]] || return 0
+  put_raw tool "$word" || warn "could not put the tool in the guest attribute"
 }
 
 # say_confirmed <sha>: confirmed means the way in works too.

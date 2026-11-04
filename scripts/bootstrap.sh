@@ -639,13 +639,13 @@ bastion_ruleset_wait() {
         return 0
         ;;
       "rolled back")
-        die "${BASTION} rolled ruleset ${ruleset_sha:0:12} back: it runs on its old ruleset, and as no one if it has no account yet. Rerun this: with a fixed config/bastion/nftables.conf, or with the same file to try it again (once Gitea can run bastion-confirm.yml; or confirm by hand: ${confirm_by_hand})"
+        die "${BASTION} rolled ruleset ${ruleset_sha:0:12} back: it runs on its old ruleset, and as no one if it has no account yet. If its serial output says \"apply took longer than\", the ruleset tool hung in its trial and was stopped at its time limit, and a retry would hang the same way: fix config/bastion/ruleset.sh. Otherwise rerun this: with a fixed config/bastion/nftables.conf, or with the same file to try it again (once Gitea can run bastion-confirm.yml; or confirm by hand: ${confirm_by_hand})"
         ;;
       refused)
         die "${BASTION} refused ruleset ${ruleset_sha:0:12} (see its serial output): it won't load or gives no guard, so what it ran stays. Fix config/bastion/nftables.conf and rerun"
         ;;
       failed)
-        die "${BASTION} could not load ruleset ${ruleset_sha:0:12}, could not put its old one back on disk, or could not start sshd (see its serial output, and \"A new ruleset\" in docs/runbook.md): it runs on the old ruleset or the floor from the kernel"
+        die "${BASTION} could not load ruleset ${ruleset_sha:0:12}, could not put its old one back on disk, or could not start sshd, or its ruleset tool was stopped at its time limit, which the serial output then says (\"apply took longer than\"; see it, and \"A new ruleset\" in docs/runbook.md): it runs on the old ruleset or the floor from the kernel"
         ;;
       pending)
         if [[ -z "$dispatched" ]]; then
