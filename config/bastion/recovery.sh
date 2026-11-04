@@ -16,14 +16,21 @@
 #      paths. It never removes a user's files: that's a line for you to add to a
 #      copy of this script, once you've read which ones they are.
 #   3. Checks the ruleset's tool, which sshd's gate depends on. Missing or cut short,
-#      it's restored from metadata (watchtower-ruleset), whole or not at all.
+#      it's restored from its last good copy, or else from metadata
+#      (watchtower-ruleset) if that copy passes the same self-check startup.sh asks
+#      of a new tool. Whole or not at all.
 #   4. Asks that tool to end with sshd up: `watchtower-ruleset apply`, with no new
 #      ruleset. A rollback the full disk held up finishes here and reboots, and this
-#      script then runs once more. sshd stays subject to the gate: no guard on a VM
-#      with an account, no sshd. And with no tool at all, no sshd: this never starts
-#      sshd some other way.
+#      script then runs once more. If the tool fails, its last good copy takes its
+#      place and is asked the same. sshd stays subject to the gate: no guard on a VM
+#      with an account, no sshd.
 #   5. If sshd still isn't up, reinstalls nftables and asks again, then shows why.
 #   6. Says where the guard and sshd ended up, and "done".
+#
+# Never sshd without the gate (the owner's decision, 2026-11-04): this script never
+# starts sshd itself, only the tool does, through its gate. With no usable tool at all
+# it doesn't ask for sshd, so it doesn't rely on sshd's drop-in being on disk to keep it
+# down. The way back from there is a rerun of scripts/bootstrap.sh.
 #
 # With nothing wrong it changes nothing but starting what should be running, so
 # it's safe to try on a healthy bastion. scripts/check-bastion.sh tests it.
@@ -32,6 +39,8 @@ set -u
 export DEBIAN_FRONTEND=noninteractive
 
 RULESET_TOOL="/usr/local/sbin/watchtower-ruleset"
+# startup.sh keeps it: the last copy that passed its self-check and brought sshd up.
+TOOL_LAST_GOOD="/usr/local/sbin/watchtower-ruleset.last-good"
 TOOL_IN_METADATA="http://169.254.169.254/computeMetadata/v1/instance/attributes/watchtower-ruleset"
 ALLOY_DATA="/var/lib/alloy/data"
 FULL_PERCENT=90
@@ -88,40 +97,96 @@ tool_whole() {
   [[ -x "$1" ]] && bash -n "$1" 2>/dev/null && [[ "$(tail -n 1 "$1")" == 'main "$@"' ]]
 }
 
-# Whole or not at all: a temp file beside it, checked, then moved over it.
-restore_tool() {
+# tool_in_namespace <tool> <floor file>: startup.sh's, word for word but for say, run
+# by tool_self_check alone in a network namespace of its own. No rules is no guard, and
+# no guard with the metadata server out of reach keeps sshd down; its own floor,
+# loaded, guards; and with it on, sshd may run.
+# shellcheck disable=SC2329 # run by tool_self_check, through declare -f
+tool_in_namespace() {
+  local tool=$1 floor=$2
+  nft --check --file "$floor" || { say "its floor doesn't pass nft --check"; return 1; }
+  if "$tool" loaded >/dev/null 2>&1; then say "it takes an empty ruleset for a guard"; return 1; fi
+  if "$tool" gate >/dev/null 2>&1; then say "its gate lets sshd run with no guard"; return 1; fi
+  "$tool" probe "$floor" >/dev/null 2>&1 || { say "its floor doesn't guard"; return 1; }
+  "$tool" gate >/dev/null 2>&1 || { say "its gate keeps sshd down with its floor on"; return 1; }
+}
+
+# tool_self_check <tool>: startup.sh's, the same checks, in a network namespace that's
+# gone when it ends, so nothing it loads reaches the live kernel.
+tool_self_check() {
+  local tool=$1 floor="${work}/floor.nft"
+  tool_whole "$tool" || { say "${tool} is cut short or won't parse"; return 1; }
+  "$tool" floor-rules >"$floor" 2>/dev/null || { say "${tool} won't render its floor"; return 1; }
+  unshare --net bash -c "$(declare -f say tool_in_namespace); tool_in_namespace \"\$@\"" bash "$tool" "$floor"
+}
+
+# install_tool <file>: in the tool's place, whole or not at all: a temp file beside it,
+# checked, then moved over it.
+install_tool() {
   local tmp="${RULESET_TOOL}.tmp"
-  tool_whole "$RULESET_TOOL" && return 0
-  say "${RULESET_TOOL} is missing or cut short: restoring it from metadata"
-  # A file by name, which curl starts over on a retry: on stdout, a first try that
-  # stalled would leave its part in front of the whole.
-  curl -fsS --retry 5 --retry-connrefused --max-time 30 -H 'Metadata-Flavor: Google' \
-    -o "$tmp" "$TOOL_IN_METADATA" 2>/dev/null || say "metadata has no watchtower-ruleset to give, or didn't answer"
-  chmod 0755 "$tmp" 2>/dev/null
-  if tool_whole "$tmp" && mv -f "$tmp" "$RULESET_TOOL"; then
-    say "restored it"
+  if cp -f "$1" "$tmp" 2>/dev/null && chmod 0755 "$tmp" && tool_whole "$tmp" && mv -f "$tmp" "$RULESET_TOOL"; then
     return 0
   fi
   rm -f "$tmp"
-  say "could not restore it: sshd's gate needs it, so sshd can't start without it"
   return 1
 }
 
-# Exits here when a rollback finished and the VM is rebooting.
-ask_for_sshd() {
-  local rc=0
-  if ! tool_whole "$RULESET_TOOL"; then
-    say "no usable ${RULESET_TOOL}: starting the guard, and asking sshd, whose gate will refuse without it"
-    systemctl start nftables.service 2>&1 | quote
-    systemctl reset-failed ssh.service 2>&1 | quote
-    systemctl start ssh.service 2>&1 | quote
+# The tool whole again: its last good copy first, which has brought sshd up before,
+# then metadata's, only if it passes the self-check.
+restore_tool() {
+  local fetched="${work}/ruleset.sh"
+  tool_whole "$RULESET_TOOL" && return 0
+  say "${RULESET_TOOL} is missing or cut short"
+  if tool_whole "$TOOL_LAST_GOOD" && install_tool "$TOOL_LAST_GOOD"; then
+    say "restored it from its last good copy"
     return 0
   fi
+  say "no last good copy of it: asking metadata for one"
+  # A file by name, which curl starts over on a retry: on stdout, a first try that
+  # stalled would leave its part in front of the whole.
+  curl -fsS --retry 5 --retry-connrefused --max-time 30 -H 'Metadata-Flavor: Google' \
+    -o "$fetched" "$TOOL_IN_METADATA" 2>/dev/null || say "metadata has no watchtower-ruleset to give, or didn't answer"
+  chmod 0700 "$fetched" 2>/dev/null
+  if [[ -s "$fetched" ]] && tool_self_check "$fetched" && install_tool "$fetched"; then
+    say "restored it from metadata"
+    return 0
+  fi
+  say "could not restore it: sshd's gate needs it, so sshd isn't asked for"
+  return 1
+}
+
+# fall_back: its last good copy in place of a tool that failed, if there's one that
+# differs. True when it's in place.
+fall_back() {
+  tool_whole "$TOOL_LAST_GOOD" || return 1
+  cmp -s "$TOOL_LAST_GOOD" "$RULESET_TOOL" && return 1
+  say "${RULESET_TOOL} failed: falling back to its last good copy"
+  install_tool "$TOOL_LAST_GOOD"
+}
+
+# apply_tool: the tool's own way to sshd, through its gate. Exits here when a rollback
+# finished and the VM is rebooting; else apply's exit status.
+apply_tool() {
+  local rc
   "$RULESET_TOOL" apply 2>&1 | quote
   rc=${PIPESTATUS[0]}
   if [[ "$rc" -eq "$RULESET_REBOOTING" ]]; then
     say "a rollback finished: rebooting, and this script runs once more"
     exit 0
+  fi
+  return "$rc"
+}
+
+# Only the tool starts sshd, through its gate. With no usable tool, sshd isn't asked
+# for at all: nothing would gate it.
+ask_for_sshd() {
+  if ! tool_whole "$RULESET_TOOL"; then
+    say "no usable ${RULESET_TOOL}: loading the guard, and not asking for sshd, as nothing would gate it (rerun scripts/bootstrap.sh)"
+    systemctl start nftables.service 2>&1 | quote
+    return 0
+  fi
+  if ! apply_tool && fall_back; then
+    apply_tool || true
   fi
 }
 
@@ -139,6 +204,10 @@ say_why() {
 }
 
 main() {
+  # For a tool from metadata, and its self-check's floor: in /run, as the disk may be
+  # full.
+  work="$(mktemp -d -p /run bastion-recovery.XXXXXX)" || work=/run
+  trap '[[ "$work" == /run ]] || rm -rf "$work"' EXIT
   say "start: $(date -u '+%F %T UTC')"
   say_disk
   writable_root

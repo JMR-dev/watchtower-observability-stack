@@ -19,6 +19,7 @@
 #                    rejected, a reboot. Retried until the disk takes it.
 #   floor            Loads the guard at its smallest, from this file: what's
 #                    left when no ruleset on disk will do.
+#   floor-rules      Prints it, loading nothing.
 #   loaded           Is the guard in the kernel, by its rules and not its name?
 #   refuses-users    Does a user fail to connect to the metadata server's port 80?
 #                    Only a connection, which sends nothing: for when the network
@@ -303,9 +304,12 @@ guard_probe() {
 # The guard at its smallest (config/bastion/nftables.conf's rules, and
 # scripts/check-bastion.sh keeps them equal), for when no file will do. It can't
 # lock anyone out, since it only ever touches the way to the metadata server,
-# and it needs nothing on disk.
-floor() {
-  nft --file - <<'NFT'
+# and it needs nothing on disk. floor-rules prints it, for startup.sh's and
+# recovery.sh's self-check of a new copy of this tool.
+floor() { floor_rules | nft --file -; }
+
+floor_rules() {
+  cat <<'NFT'
 flush ruleset
 
 table inet metadata_guard {
@@ -758,10 +762,11 @@ main() {
     confirm) cmd_confirm ;;
     rollback) cmd_rollback ;;
     floor) floor ;;
+    floor-rules) floor_rules ;;
     loaded) guard_loaded ;;
     refuses-users) ! connects_as_user "$METADATA_V4" ;;
     probe) guard_probe "$@" ;;
-    *) echo "usage: watchtower-ruleset setup|apply|gate|confirm|rollback|floor|loaded|refuses-users|probe" >&2; exit 2 ;;
+    *) echo "usage: watchtower-ruleset setup|apply|gate|confirm|rollback|floor|floor-rules|loaded|refuses-users|probe" >&2; exit 2 ;;
   esac
 }
 

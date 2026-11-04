@@ -40,10 +40,18 @@
 #   bootstrap  bootstrap.sh's bastion_update in order, with gcloud stubbed: metadata
 #          before a stop, the VM started again by its exit trap if a stop is left
 #          in flight, a login last, and the final check.
+#   tool   startup.sh's self-check of a new ruleset.sh, in a network namespace of its
+#          own, refuses a tool whose gate says yes with no guard, that takes no rules
+#          for a guard, or whose floor doesn't guard or won't load, or one cut short;
+#          a tool that passes it and brings sshd up becomes the last good copy, one
+#          that fails at a boot gives way to that copy, and none that failed the
+#          self-check ever runs. sshd only ever starts through the gate.
 #   recovery  recovery.sh, the one-off startup script for when SSH is gone: it
 #          changes nothing on a healthy bastion, frees a full disk without touching
 #          a user's files, a rollback the disk held up then finishes, and a tool cut
-#          short comes back from metadata. It never gets sshd past the gate.
+#          short comes back from its last good copy, or from metadata if that passes
+#          the self-check. It never gets sshd past the gate, and with no tool it
+#          never asks for sshd at all, even with sshd's drop-in gone.
 #
 #   scripts/check-bastion.sh            # docker; CONTAINER_RUNTIME=podman locally
 #
@@ -491,12 +499,18 @@ guard_case() {
   got="$(
     work="$(mktemp -d)"
     RULESET_TOOL="${work}/tool"
+    # None, so a failure stands: the last good copy has its own cases (tool, below).
+    TOOL_LAST_GOOD="${work}/last-good"
+    # Whole, as the real tool is: it ends with main "$@".
     cat >"$RULESET_TOOL" <<TOOL
 #!/bin/bash
-[[ "\$1" == setup ]] && exit 0
-shift
-echo "args \${#}"
-exit ${tool_rc}
+main() {
+  [[ "\$1" == setup ]] && exit 0
+  shift
+  echo "args \${#}"
+  exit ${tool_rc}
+}
+main "\$@"
 TOOL
     chmod 0755 "$RULESET_TOOL"
     installed() { return 0; }
@@ -743,6 +757,8 @@ case "$*" in
   "start ssh.service")
     # sshd that won't start whatever the gate says, as a bad config does.
     [[ ! -e /stubs/sshd-start-broken ]] || exit 1
+    # sshd with no gate at all, as with its drop-in gone: any start gets it up.
+    [[ ! -e /stubs/sshd-ungated ]] || rm -f /stubs/sshd-down
     # sshd as it really is: nothing without its ExecStartPre, which is the tool.
     if [[ -e /stubs/sshd-runs-its-gate ]]; then
       if /usr/local/sbin/watchtower-ruleset gate >/dev/null 2>&1; then
@@ -845,7 +861,8 @@ fresh() {
   rm -f /run/watchtower-ruleset.word
   rm -f "${stubs}/load-broken" "${stubs}/timer-broken" "${stubs}/install-broken" \
     "${stubs}/nft-broken" "${stubs}/at-load-disk-fails" "${stubs}/at-load-a-login" \
-    "${stubs}/sshd-start-broken" "${stubs}/sshd-down" "${stubs}/sshd-runs-its-gate" "${stubs}/ruleset-path"
+    "${stubs}/sshd-start-broken" "${stubs}/sshd-down" "${stubs}/sshd-runs-its-gate" "${stubs}/ruleset-path" \
+    "${stubs}/sshd-ungated"
   mkdir -p "$dropbox"
   chmod 1777 "$dropbox"
   cp "${rules}/package" /etc/nftables.conf
@@ -1878,6 +1895,130 @@ check "ping units: no other unit names them" test -z "$ping_mentions"
 refute "ping units: nothing is made to need them" grep -qE '^(RequiredBy|WantedBy|Before)=' /etc/systemd/system/watchtower-ping.service
 check "ping units: says nothing when all goes well" test -z "$ping_units_out"
 
+# --- tool: startup.sh's self-check of a new ruleset.sh, and its last good copy -----
+real_tool=/usr/local/sbin/watchtower-ruleset
+last_good=/usr/local/sbin/watchtower-ruleset.last-good
+variants=/tool-variants
+mkdir -p "$variants"
+# The same tool, a comment apart: an older copy.
+sed '2i # an older copy' ruleset.sh >"${variants}/older"
+# Bugs a self-check has to see, each in a tool that otherwise parses and is whole:
+# sshd's gate saying yes with no guard; no rules taken for a guard; a floor that lets
+# users through; a floor nft refuses.
+sed 's/^gate() {$/&\n  return 0/' ruleset.sh >"${variants}/gate-yes"
+sed 's/^guard_loaded() {$/&\n  return 0/' ruleset.sh >"${variants}/loaded-yes"
+sed 's/meta skuid != 0 counter reject with icmpx admin-prohibited$/meta skuid != 0 accept/' ruleset.sh >"${variants}/floor-open"
+sed 's/^\t\tip daddr 169.254.169.254 jump metadata$/\t\tip daddr 169.254.169.254 jump nowhere/' ruleset.sh >"${variants}/floor-broken"
+head -n 40 ruleset.sh >"${variants}/cut-short"
+# And one it can't: apply fails at a boot, before it starts sshd.
+sed 's/^cmd_apply() {$/&\n  exit 1/' ruleset.sh >"${variants}/apply-fails"
+chmod 0755 "$variants"/*
+# Each mutant is what its name says, or the cases below prove nothing.
+for variant in gate-yes loaded-yes floor-open floor-broken apply-fails; do
+  if cmp -s ruleset.sh "${variants}/${variant}"; then flunk "tool: the ${variant} mutant is the real tool"; fi
+done
+
+# tool_as <file or none> <last good copy, or none>: what's on disk before a boot, on a
+# VM with an account (so a gate with no guard must say no).
+tool_as() {
+  fresh
+  echo 200 >"${stubs}/account-code"
+  rm -f "$real_tool" "$last_good"
+  [[ "$1" == none ]] || install -m 0755 "$1" "$real_tool"
+  [[ "$2" == none ]] || install -m 0755 "$2" "$last_good"
+}
+# boot_with_tool <the tool in metadata, or none>: startup.sh's guard, as at a boot, with
+# metadata offering that tool and nftables.conf. Sets out and rc.
+boot_with_tool() {
+  local offered=$1
+  : >"${stubs}/calls"
+  out="$(
+    export PATH="${stubs}:${PATH}"
+    work="$(mktemp -d)"
+    installed() { return 0; }
+    mds() { return 22; }
+    mds_file() {
+      case "$1" in
+        */watchtower-ruleset) [[ "$offered" != none ]] && cp "$offered" "$2" ;;
+        */watchtower-nftables) cp "${rules}/a" "$2" ;;
+        *) return 22 ;;
+      esac
+    }
+    guard 2>&1
+  )"
+  rc=$?
+}
+
+# A new tool that passes: in, and once it has brought sshd up, the last good copy.
+tool_as "${variants}/older" none
+boot_with_tool ruleset.sh
+check "tool, a new one that passes: the boot goes on" reason_is 0
+check "tool, a new one that passes: in place" same_file ruleset.sh "$real_tool"
+check "tool, a new one that passes: sshd, through it" called "start ssh.service"
+check "tool, a new one that passes: kept as the last good copy" same_file ruleset.sh "$last_good"
+refute "tool, a new one that passes: no fallback" said 'falling back'
+
+# Each bug the self-check sees: not put in place, the last good copy untouched, and why.
+# self_check_case <variant> <what it says>
+self_check_case() {
+  tool_as ruleset.sh ruleset.sh
+  boot_with_tool "${variants}/$1"
+  check "tool, $1: the boot goes on, on the old tool" reason_is 0
+  check "tool, $1: not put in place" same_file ruleset.sh "$real_tool"
+  check "tool, $1: the last good copy untouched" same_file ruleset.sh "$last_good"
+  check "tool, $1: says it failed its self-check" said 'failed its self-check'
+  check "tool, $1: says why: $2" said "$2"
+}
+self_check_case gate-yes 'its gate lets sshd run with no guard'
+self_check_case loaded-yes 'it takes an empty ruleset for a guard'
+self_check_case floor-open "its floor doesn't guard"
+self_check_case floor-broken "its floor doesn't pass nft --check"
+self_check_case cut-short 'is cut short or won'
+
+# Passes its self-check, and fails at the boot: the last good copy has the boot instead.
+tool_as ruleset.sh ruleset.sh
+boot_with_tool "${variants}/apply-fails"
+check "tool, fails at the boot: falls back" said 'falling back to its last good copy'
+check "tool, fails at the boot: the boot goes on" reason_is 0
+check "tool, fails at the boot: the last good copy in its place" same_file ruleset.sh "$real_tool"
+check "tool, fails at the boot: sshd, through the last good copy" called "start ssh.service"
+check "tool, fails at the boot: the last good copy stays what it was" same_file ruleset.sh "$last_good"
+check "tool, fails at the boot: the guard is on" guard_on
+# ... with no last good copy: the boot stops there, and nothing starts sshd.
+tool_as "${variants}/older" none
+boot_with_tool "${variants}/apply-fails"
+check "tool, fails at the boot, no last good copy: stops" reason_is 1
+refute "tool, fails at the boot, no last good copy: nothing starts sshd" called "start ssh.service"
+check "tool, fails at the boot, no last good copy: none made of it" no_file "$last_good"
+
+# The tool gone: its last good copy comes back, with metadata silent.
+tool_as none ruleset.sh
+boot_with_tool none
+check "tool, gone: its last good copy back" same_file ruleset.sh "$real_tool"
+check "tool, gone: says so" said 'putting back its last good copy'
+check "tool, gone: the boot goes on" reason_is 0
+check "tool, gone: sshd, through it" called "start ssh.service"
+# ... and with none, and metadata's failing its self-check: never in, even as the only one.
+tool_as none none
+boot_with_tool "${variants}/gate-yes"
+check "tool, gone, metadata's fails: stops" reason_is 1
+check "tool, gone, metadata's fails: not put in place" no_file "$real_tool"
+refute "tool, gone, metadata's fails: nothing starts sshd" called "start ssh.service"
+check "tool, gone, metadata's fails: says sshd stays down" said 'sshd stays down'
+
+# A tool on disk that never passed the self-check is never kept, though it brought sshd up.
+tool_as "${variants}/gate-yes" ruleset.sh
+boot_with_tool none
+check "tool, never checked: the boot goes on" reason_is 0
+check "tool, never checked: not kept as the last good copy" same_file ruleset.sh "$last_good"
+check "tool, never checked: says so" said "isn't kept as the last good copy"
+
+# Back as the rest expects it.
+fresh
+rm -f "$last_good"
+install -m 0755 ruleset.sh "$real_tool"
+echo 404 >"${stubs}/account-code"
+
 # --- recovery: recovery.sh, the one-off startup script for when SSH is gone -------
 recovery_bin="${stubs}/recovery-bin"
 mkdir -p "$recovery_bin"
@@ -2047,6 +2188,7 @@ tool_setting() {
   fresh
   full_disk 41
   install -m 0755 ruleset.sh "$real_tool"
+  rm -f "$last_good"
   nft --file nftables.conf
   echo 200 >"${stubs}/account-code"
   touch "${stubs}/sshd-runs-its-gate" "${stubs}/sshd-down"
@@ -2064,6 +2206,9 @@ for damage in gone mid-line at-a-line; do
     check "recovery, tool ${damage}, nothing in metadata: says sshd is down" said 'bastion-recovery: sshd: NOT active'
     check "recovery, tool ${damage}, nothing in metadata: sshd is down" test -e "${stubs}/sshd-down"
   fi
+  # Not even through sshd's own gate: with no tool, sshd isn't asked for at all.
+  refute "recovery, tool ${damage}, nothing in metadata: never asks for sshd" called "start ssh.service"
+  check "recovery, tool ${damage}, nothing in metadata: says it won't" said 'not asking for sshd'
   check "recovery, tool ${damage}, nothing in metadata: done" said 'bastion-recovery: done'
   # A good copy there: it's back, and sshd with it.
   tool_setting
@@ -2086,6 +2231,46 @@ recovery
 check "recovery, a bad copy in metadata: not put in place" same_file "${stubs}/damaged-tool" "$real_tool"
 check "recovery, a bad copy in metadata: nothing left behind" no_file "${real_tool}.tmp"
 check "recovery, a bad copy in metadata: says it couldn't" said 'could not restore it'
+# No tool, and sshd's drop-in gone too, so a start would get sshd up with no gate at all
+# (the owner's decision, 2026-11-04): sshd isn't asked for, and stays down.
+tool_setting
+tool_damage gone
+rm -f "${stubs}/sshd-runs-its-gate"
+touch "${stubs}/sshd-ungated"
+recovery
+refute "recovery, no tool and no gate on sshd: never asks for sshd" called "start ssh.service"
+check "recovery, no tool and no gate on sshd: sshd stays down" test -e "${stubs}/sshd-down"
+check "recovery, no tool and no gate on sshd: says so" said 'bastion-recovery: sshd: NOT active'
+# The last good copy, with nothing in metadata: back, and sshd through its gate.
+tool_setting
+tool_damage gone
+install -m 0755 ruleset.sh "$last_good"
+recovery
+check "recovery, tool gone, a last good copy: says so" said 'restored it from its last good copy'
+check "recovery, tool gone, a last good copy: whole" same_file ruleset.sh "$real_tool"
+check "recovery, tool gone, a last good copy: sshd up, through the gate" no_file "${stubs}/sshd-down"
+# A tool that fails, with a last good copy: that copy takes its place, and is asked.
+tool_setting
+install -m 0755 "${variants}/apply-fails" "$real_tool"
+install -m 0755 ruleset.sh "$last_good"
+recovery
+check "recovery, a tool that fails: falls back" said 'falling back to its last good copy'
+check "recovery, a tool that fails: the last good copy in its place" same_file ruleset.sh "$real_tool"
+check "recovery, a tool that fails: sshd up, through the gate" no_file "${stubs}/sshd-down"
+# ... and with none: sshd stays down.
+tool_setting
+install -m 0755 "${variants}/apply-fails" "$real_tool"
+recovery
+check "recovery, a tool that fails, no last good copy: sshd stays down" test -e "${stubs}/sshd-down"
+# A copy in metadata that's whole and fails the self-check: never goes in.
+tool_setting
+tool_damage gone
+cp "${variants}/gate-yes" "${stubs}/tool-in-metadata"
+recovery
+check "recovery, metadata's copy fails its self-check: not put in place" no_file "$real_tool"
+check "recovery, metadata's copy fails its self-check: says why" said 'its gate lets sshd run with no guard'
+refute "recovery, metadata's copy fails its self-check: never asks for sshd" called "start ssh.service"
+check "recovery, metadata's copy fails its self-check: sshd stays down" test -e "${stubs}/sshd-down"
 # The gate, untouched by any of it: guard off, an account, a whole tool.
 tool_setting
 nft flush ruleset

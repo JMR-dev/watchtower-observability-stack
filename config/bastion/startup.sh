@@ -13,7 +13,9 @@
 #      server, so only root can use the VM's token. First, since sshd waits
 #      on it. A new ruleset goes on under a 10-minute rollback that a login
 #      cancels, and sshd runs only with the guard loaded or on a VM with no
-#      token (ruleset.sh). Nothing else runs if sshd may not.
+#      token (ruleset.sh). Nothing else runs if sshd may not. A new ruleset.sh
+#      goes in only once it passes a self-check, and one that then fails at a
+#      boot gives way to the last good copy.
 #   2. Security updates every day, rebooting at 04:00 UTC when one needs it.
 #   3. Says so in a guest attribute once apt is done: scripts/bootstrap.sh stops
 #      the VM for its account only after that.
@@ -61,6 +63,9 @@ ALLOY_DEB_SHA256="dbbd705de8ab37dec0cbd6361a3fc7e754d6b2854b57ce672a83e6366199ba
 ALLOY_CONFIG="/etc/alloy/bastion.alloy"
 ALLOY_DROPIN="/etc/systemd/system/alloy.service.d/watchtower.conf"
 RULESET_TOOL="/usr/local/sbin/watchtower-ruleset"
+# The last copy of it that passed its self-check and brought sshd up through its gate.
+# recovery.sh names it too.
+TOOL_LAST_GOOD="/usr/local/sbin/watchtower-ruleset.last-good"
 # ruleset.sh's exit status when it rolled back and is rebooting.
 RULESET_REBOOTING=75
 # Unprivileged user namespaces, off: Debian's own knob, and where it's set for good.
@@ -186,30 +191,130 @@ guard_loaded() { "$RULESET_TOOL" loaded >/dev/null 2>&1; }
 # of the server, and with the network up, as it is by the time anything pings.
 guard_refuses_users() { "$RULESET_TOOL" refuses-users >/dev/null 2>&1; }
 
-# Whatever metadata does or doesn't answer, this ends with sshd up or with a
-# reason it isn't: what's on disk from an earlier boot still applies.
-guard() {
-  local rc=0 retry=""
-  installed nftables || apt_install --no-install-recommends nftables
-  if mds_file instance/attributes/watchtower-ruleset "${work}/ruleset.sh" && [[ -s "${work}/ruleset.sh" ]] && bash -n "${work}/ruleset.sh"; then
-    # A subshell, as put dies on a failure: a disk that won't take the new tool
-    # leaves the old one whole, and that one can still bring sshd up.
-    (put "${work}/ruleset.sh" "$RULESET_TOOL" 0755 root) || true
-  else
-    warn "no usable watchtower-ruleset in metadata; using the one on disk"
+# The ruleset's tool, and the last good copy of it (the owner's decision, 2026-11-04).
+# A new ruleset goes on under the dead man's switch, but a bug in the tool itself
+# would have no way back, and sshd's gate is that tool. So:
+#   - a tool from metadata goes in only once it has passed its self-check
+#     (tool_self_check), and one that fails it never runs, even with no other tool;
+#   - a tool that brings sshd up through its gate at a boot, and passes the self-check,
+#     becomes the last good copy (promote_tool);
+#   - a tool that fails at a boot gives way to the last good copy, which then has the
+#     boot to itself (fall_back). sshd still starts only through the gate.
+# recovery.sh uses the last good copy the same way.
+
+# tool_whole <file>: executable, parses, and ends as the tool ends: a file cut at a
+# line can parse and do nothing, which sshd's gate would take for a yes.
+tool_whole() {
+  # shellcheck disable=SC2016 # the tool's own last line, as written
+  [[ -x "$1" ]] && bash -n "$1" 2>/dev/null && [[ "$(tail -n 1 "$1")" == 'main "$@"' ]]
+}
+
+# tool_in_namespace <tool> <floor file>: run by tool_self_check, alone in a network
+# namespace of its own. What sshd's gate and a rollback rely on, each in turn: no
+# rules is no guard, and no guard with the metadata server out of reach keeps sshd
+# down; its own floor, loaded, guards (root reaches the server's addresses, a user
+# doesn't), and with it on, sshd may run.
+# shellcheck disable=SC2329 # run by tool_self_check, through declare -f
+tool_in_namespace() {
+  local tool=$1 floor=$2
+  nft --check --file "$floor" || { warn "its floor doesn't pass nft --check"; return 1; }
+  if "$tool" loaded >/dev/null 2>&1; then warn "it takes an empty ruleset for a guard"; return 1; fi
+  if "$tool" gate >/dev/null 2>&1; then warn "its gate lets sshd run with no guard"; return 1; fi
+  "$tool" probe "$floor" >/dev/null 2>&1 || { warn "its floor doesn't guard"; return 1; }
+  "$tool" gate >/dev/null 2>&1 || { warn "its gate keeps sshd down with its floor on"; return 1; }
+}
+
+# tool_self_check <tool>: whole, and its floor rendered and checked as above, in a
+# network namespace that is gone when it ends, so nothing it loads reaches the live
+# kernel. Asked by this script rather than of the tool about itself, through the
+# commands the units and sshd's gate use. Says why it failed.
+tool_self_check() {
+  local tool=$1 floor="${work}/floor.nft"
+  tool_whole "$tool" || { warn "${tool} is cut short or won't parse"; return 1; }
+  "$tool" floor-rules >"$floor" 2>/dev/null || { warn "${tool} won't render its floor"; return 1; }
+  unshare --net bash -c "$(declare -f warn tool_in_namespace); tool_in_namespace \"\$@\"" bash "$tool" "$floor"
+}
+
+# take_tool <file>: the tool from metadata, in place of the one on disk, if it passed
+# its self-check. Whole or not at all: a disk that won't take it leaves the old one.
+take_tool() {
+  [[ -f "$RULESET_TOOL" ]] && cmp -s "$1" "$RULESET_TOOL" && return 0
+  chmod 0700 "$1"
+  if ! tool_self_check "$1"; then
+    warn "the watchtower-ruleset in metadata failed its self-check, so it doesn't go in"
+    return 0
   fi
-  [[ -x "$RULESET_TOOL" ]] || die "no ${RULESET_TOOL}, so no way to load the guard"
+  # A subshell, as put dies on a failure.
+  (put "$1" "$RULESET_TOOL" 0755 root) || true
+}
+
+# restore_last_good: the last good copy back, when the tool on disk is gone or cut
+# short. True when the tool is whole now.
+restore_last_good() {
+  tool_whole "$TOOL_LAST_GOOD" || return 1
+  warn "${RULESET_TOOL} is missing or cut short: putting back its last good copy"
+  (put "$TOOL_LAST_GOOD" "$RULESET_TOOL" 0755 root) || true
+  tool_whole "$RULESET_TOOL"
+}
+
+# fall_back: the last good copy in place of a tool that failed at this boot, if there's
+# one that differs. True when it's in place.
+fall_back() {
+  tool_whole "$TOOL_LAST_GOOD" || return 1
+  [[ -f "$RULESET_TOOL" ]] && cmp -s "$TOOL_LAST_GOOD" "$RULESET_TOOL" && return 1
+  warn "${RULESET_TOOL} failed at this boot: falling back to its last good copy"
+  (put "$TOOL_LAST_GOOD" "$RULESET_TOOL" 0755 root) || true
+  cmp -s "$TOOL_LAST_GOOD" "$RULESET_TOOL"
+}
+
+# promote_tool: the tool that brought sshd up through its gate at this boot becomes the
+# last good copy, once it has passed the self-check too. Never fails.
+promote_tool() {
+  [[ -f "$TOOL_LAST_GOOD" ]] && cmp -s "$RULESET_TOOL" "$TOOL_LAST_GOOD" && return 0
+  if ! tool_self_check "$RULESET_TOOL"; then
+    warn "${RULESET_TOOL} failed its self-check, so it isn't kept as the last good copy"
+    return 0
+  fi
+  (put "$RULESET_TOOL" "$TOOL_LAST_GOOD" 0755 root) || warn "could not keep the last good copy of ${RULESET_TOOL}"
+}
+
+# run_tool <ruleset file, or nothing> <retry>: its units, then the ruleset, ending with
+# sshd up or a reason it isn't. apply's exit status.
+run_tool() {
   # Without its timer no trial starts, so a failure here costs only that.
   "$RULESET_TOOL" setup || warn "could not set up ${RULESET_TOOL}'s units"
-  retry="$(mds instance/attributes/watchtower-nftables-retry 2>/dev/null || true)"
-  if mds_file instance/attributes/watchtower-nftables "${work}/nftables.conf" && [[ -s "${work}/nftables.conf" ]]; then
-    "$RULESET_TOOL" apply "${work}/nftables.conf" "$retry" || rc=$?
+  if [[ -n "$1" ]]; then
+    "$RULESET_TOOL" apply "$1" "$2"
   else
     warn "no watchtower-nftables in metadata; the ruleset on disk stays"
-    "$RULESET_TOOL" apply || rc=$?
+    "$RULESET_TOOL" apply
+  fi
+}
+
+# Whatever metadata does or doesn't answer, this ends with sshd up or with a
+# reason it isn't: what's on disk from an earlier boot still applies. It never starts
+# sshd itself: only the tool does, through its gate.
+guard() {
+  local rc=0 retry="" ruleset=""
+  installed nftables || apt_install --no-install-recommends nftables
+  if mds_file instance/attributes/watchtower-ruleset "${work}/ruleset.sh" && [[ -s "${work}/ruleset.sh" ]]; then
+    take_tool "${work}/ruleset.sh"
+  else
+    warn "no watchtower-ruleset in metadata; using the one on disk"
+  fi
+  tool_whole "$RULESET_TOOL" || restore_last_good ||
+    die "no usable ${RULESET_TOOL} and no last good copy, so no way to load the guard: sshd stays down"
+  retry="$(mds instance/attributes/watchtower-nftables-retry 2>/dev/null || true)"
+  if mds_file instance/attributes/watchtower-nftables "${work}/nftables.conf" && [[ -s "${work}/nftables.conf" ]]; then
+    ruleset="${work}/nftables.conf"
+  fi
+  run_tool "$ruleset" "$retry" || rc=$?
+  if [[ "$rc" != 0 && "$rc" != "$RULESET_REBOOTING" ]] && fall_back; then
+    rc=0
+    run_tool "$ruleset" "$retry" || rc=$?
   fi
   case "$rc" in
-    0) ;;
+    0) promote_tool ;;
     "$RULESET_REBOOTING") log "rolling back: rebooting"; exit 0 ;;
     *) die "sshd may not run (see above), so nothing else does" ;;
   esac
