@@ -727,7 +727,7 @@ bastion_final_check() {
   [[ "$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" "$boot" "$run_nonce")" == confirmed ]] ||
     die "${BASTION}'s ruleset is no longer confirmed: see its serial output, and rerun.$(attribute_refusal)"
   [[ "$(bastion_attribute tool)" == "${tool_sha} boot ${boot} run ${run_nonce}" ]] ||
-    die "${BASTION} doesn't run this config/bastion/ruleset.sh: it failed its self-check, or failed at the boot and gave way to its last good copy (see its serial output, and \"A new ruleset tool\" in docs/runbook.md). Fix it and rerun.$(attribute_refusal)"
+    die "${BASTION} doesn't run this config/bastion/ruleset.sh: it failed its self-check, or failed at the boot and gave way to its last good copy, or came back from metadata changed (see its serial output, compare watchtower/tool with sha256sum config/bastion/ruleset.sh, and \"A new ruleset tool\" in docs/runbook.md). Fix it and rerun.$(attribute_refusal)"
   bastion_attribute login | login_seen "$boot" "$run_nonce" "$login_nonce" ||
     die "${BASTION} shows no login of this run on this boot: rerun this.$(attribute_refusal)"
 }

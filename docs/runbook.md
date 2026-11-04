@@ -332,7 +332,10 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
   - **Bootstrap hears of either:** the VM reports the sha256 of the tool it runs in
     `watchtower/tool`, with its boot and run nonce, and bootstrap prints `Done` only
     if it's the `ruleset.sh` it put in metadata. Otherwise it stops and says so: see
-    the serial output, fix `ruleset.sh`, and rerun.
+    the serial output, fix `ruleset.sh`, and rerun. A third cause would be the file
+    coming back from metadata changed by a byte: then the sha256 in `watchtower/tool`
+    is the tool's as fetched, and the serial output shows no self-check failure or
+    fallback.
   - A tool on disk gone or cut short comes back from the last good copy.
 
 Every service is a quadlet: `/etc/containers/systemd/<name>.container`
