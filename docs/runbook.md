@@ -331,13 +331,19 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     tool: the boot says `the watchtower-ruleset in metadata failed its self-check`
     and why, and goes on with the tool it has.
   - **Kept once it has worked** (as the review fixed it, 2026-11-04). A tool becomes
-    the last good copy at a boot where its `apply` ended well, sshd is active, the
-    guard is in the kernel (or the VM has no account, so no token), no ruleset trial
-    is pending, and it passes the self-check. A tool whose `apply` ends at once and
-    starts nothing isn't kept, and neither is one with its trial still pending, whose
-    confirmation or rollback it hasn't run yet. So **a first install has no last good
-    copy until its second boot**, the one after its trial ends: until then a tool that
-    fails has nothing to fall back to, as before this change.
+    the last good copy at a boot where its own `apply` went through to the end and
+    said its ruleset is `confirmed` (its word in `/run/watchtower-ruleset.word`, which
+    the startup script clears before the apply), sshd is active, the guard is in the
+    kernel (or the VM has no account, so no token), no ruleset trial is pending, and
+    it passes the self-check. sshd up and the guard on prove nothing alone: at a real
+    boot both are there before the new tool runs, through the tool before's gate and
+    nftables.service. So a tool whose `apply` ends at once, saying nothing, isn't
+    kept, even on a boot with no trial, as a run that changes only `ruleset.sh` has.
+    Neither is one with its trial still pending, whose confirmation or rollback it
+    hasn't run yet, nor one at a boot whose apply said `pending`, `refused` or
+    `failed`. So **a first install has no last good copy until its second boot**, the
+    one after its trial ends: until then a tool that fails has nothing to fall back to,
+    as before this change.
   - **A tool that fails at a boot** (its `apply` ends with sshd not allowed or not
     up), or whose `apply` takes over 5 minutes (`took longer than 5m, and was
     stopped`), gives way to the last good copy, which sets its units up again and has
@@ -347,16 +353,26 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     the gate. That happens at each boot while metadata holds the new tool. With no
     last good copy the boot stops there, and nothing more asks for sshd: it stays as
     the boot left it, down through the gate, or, on a first install or a new VM with
-    no drop-in yet, up and ungated on a VM with no account, so no token to guard.
+    no drop-in yet, up and ungated on a VM with no account, so no token to guard. With
+    no usable tool at all and the drop-in gone too, an sshd the boot left up with no
+    guard, on a VM that may have an account, is stopped first, by the same check
+    `recovery.sh` makes.
+  - **A trial cut short by the time limit** rolls back at 10 minutes, as any
+    unconfirmed trial does, and bootstrap stops on `rolled back` (or `failed`). Its
+    message says to look for `apply took longer than` in the serial output: then the
+    tool hung, and a retry would hang the same way, so fix `ruleset.sh`, not
+    `nftables.conf`.
   - **Bootstrap hears of either:** the VM reports the sha256 of the tool it runs in
     `watchtower/tool`, with its boot and run nonce, and bootstrap prints `Done` only
     if it's the `ruleset.sh` it put in metadata. Otherwise it stops and says so: see
     the serial output, fix `ruleset.sh`, and rerun. Two other causes: the file coming
     back from metadata changed by a byte (then the sha256 in `watchtower/tool` is the
     tool's as fetched, and the serial output shows no self-check failure or
-    fallback), or the VM's word lost on the way to the attribute. The tool says it
-    again with every `confirmed`, so a login (the hand command) or a reset says it
-    again; then rerun.
+    fallback), or the VM's word lost on the way to the attribute. The startup script
+    keeps the word it said, in `/run/watchtower-ruleset.tool` (root's alone), and the
+    tool says it again with every `confirmed`, so a login (the hand command) or a reset
+    says it again; then rerun. The word is kept only once that boot's apply ended
+    well, so a login never says it for a tool whose apply failed.
   - A tool on disk gone or cut short comes back from the last good copy.
 
 Every service is a quadlet: `/etc/containers/systemd/<name>.container`
