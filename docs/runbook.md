@@ -173,6 +173,17 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     leaves both running. Nothing of a user's runs without a login, so nothing gets
     past that gate: cron and at are root's, polkit refuses lingering, and any
     crontab, at job or linger file from before is removed at every boot.
+  - **No unprivileged user namespaces** (the owner's decision, 2026-11-04):
+    `/etc/sysctl.d/90-watchtower-userns.conf` sets
+    `kernel.unprivileged_userns_clone = 0`, Debian's own knob, which Debian 13's
+    kernel has. It stops users alone: root and systemd still make them, as
+    `chrony-wait.service` and `fstrim.service` need for `PrivateUsers=`, which is
+    why it isn't `user.max_user_namespaces=0`, which would stop those too. sshd, OS
+    Login, wg-quick, Alloy and the guard need none (the guard's `unshare --net` is
+    root's and makes no user namespace). The startup script applies it first thing,
+    and `systemd-sysctl` at every later boot. To check, as your own user:
+    `sysctl kernel.unprivileged_userns_clone` says 0, and `unshare --user true` is
+    refused.
   - Its startup script (`config/bastion/startup.sh`) sets all of this up
     at every boot; its output is in `journalctl -u google-startup-scripts`
     and on the serial console, and never holds the peer config or the ping URL.
@@ -195,16 +206,35 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     attaches the account only once this boot has confirmed its ruleset (below)
     and finished apt, and asks again of the boot with the account, so don't run
     it during a deploy with `ssh_via=bastion`. Bootstrap goes by guest attributes
-    (`watchtower/boot`, `ruleset`, `settled`, `login`), which the guard keeps from
+    (`watchtower/boot`, `ruleset`, `settled`, `login`, `tool`), which the guard keeps from
     every uid but root, and never by the serial console, where any user can put
     a line. On a VM with no guard yet a user could write them too, which is why
     it asks again. Each carries the kernel's boot id, as a stop, a reset and a
     reboot all leave the last boot's values behind.
+  - **Each also carries its boot's run nonce** (the owner's decision, 2026-11-04),
+    and bootstrap counts only values with its own. Each start a run makes gets a
+    fresh one in metadata (`watchtower-run-nonce`) while the VM is stopped, which the
+    startup script keeps in `/run` for root alone. So a value a user wrote on the
+    boot with no account, or planted there for the next boot to be taken by, can't
+    carry the nonce of the boot with the account: that one went in after the
+    unguarded boot had stopped, and the boot with the account has its guard from
+    early boot, before any user's process. Metadata is fine for it for that reason:
+    the boots that see a nonce before the guard are the ones whose word bootstrap
+    already doesn't trust. Anyone who may describe the VM can read it through the
+    API too, but writing an attribute takes the metadata server, from inside the VM,
+    as root. A run that starts nothing goes by the nonce its boot was started with,
+    and a VM with none is restarted to get one.
   - Every run ends by dispatching `bastion-confirm.yml` again, or asking you to do
     it by hand, and waiting for a real login to reach the boot it ends on
     (`watchtower/login`): on the boot with the account above all, as only a login
-    shows OS Login still lets anyone onto it. It prints `Done` only with the VM
-    running, on the boot that said `confirmed`, and that login seen.
+    shows OS Login still lets anyone onto it. Only a login of this run counts (the
+    owner's decision, 2026-11-04): bootstrap makes a login nonce for each run, the
+    job (or the hand command it prints) leaves `/run/watchtower-ruleset/confirm-<nonce>`,
+    and the VM lists that nonce in `watchtower/login`. So a rerun can't be satisfied
+    by an earlier run's login, a session left from it, or its attribute. The login
+    that confirmed this run's ruleset on that boot counts too. It prints `Done` only
+    with the VM running, on the boot that said `confirmed` with this run's nonce, and
+    that login seen.
   - If a run fails between a stop and its start, its exit trap starts the bastion
     again and keeps the failure. If that start fails too (no capacity in the zone,
     a lost connection), break glass is down, and it says so. Rerun bootstrap, which
@@ -224,7 +254,9 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     loads it and starts sshd. A reboot in those 10 minutes starts them again. A boot
     with no change touches no one's session.
   - Any login cancels it, no sudo needed: an interactive shell does so by
-    itself, or `touch /run/watchtower-ruleset/confirm`. Nothing of a login's from
+    itself, or `touch /run/watchtower-ruleset/confirm`. Bootstrap's own login check
+    needs the file named by its run's nonce, which the command it prints has.
+    Nothing of a login's from
     before the load counts, connections still in pre-auth included, as none of it is
     left running. Root isn't held to that: a root process outside those two groups
     could confirm, as it could do anything else. Bootstrap dispatches
@@ -278,6 +310,30 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     is new metadata: rerun bootstrap with a ruleset that loads, or "The bastion
     with SSH gone", below, which also says why it's down. The serial console only
     reads.
+- **A new ruleset tool** (`config/bastion/ruleset.sh`, the owner's decision,
+  2026-11-04): the dead man's switch covers a new ruleset, not a bug in the tool
+  that runs it, and sshd's gate is that tool. So it has a last good copy,
+  `/usr/local/sbin/watchtower-ruleset.last-good`.
+  - **A self-check before it goes in.** The startup script asks the tool from
+    metadata, in a network namespace of its own: with no rules, `loaded` must say no
+    and `gate` must keep sshd down (the metadata server is out of reach there); its
+    floor, printed by `floor-rules`, must pass `nft --check`, and `probe` must show it
+    guards (root reaches the server's addresses, a user doesn't); and with it on,
+    `gate` must let sshd run. One that fails never goes in, even with no other
+    tool: the boot says `the watchtower-ruleset in metadata failed its self-check`
+    and why, and goes on with the tool it has.
+  - **Kept once it has worked.** A tool that brings sshd up through its gate at a
+    boot, and passes the self-check, becomes the last good copy.
+  - **A tool that fails at a boot** (its `apply` ends with sshd not allowed or not
+    up) gives way to the last good copy, which sets its units up again and has the
+    boot to itself: `falling back to its last good copy`. sshd still starts only
+    through the gate. That happens at each boot while metadata holds the new tool.
+    With no last good copy the boot stops there, and sshd stays down.
+  - **Bootstrap hears of either:** the VM reports the sha256 of the tool it runs in
+    `watchtower/tool`, with its boot and run nonce, and bootstrap prints `Done` only
+    if it's the `ruleset.sh` it put in metadata. Otherwise it stops and says so: see
+    the serial output, fix `ruleset.sh`, and rerun.
+  - A tool on disk gone or cut short comes back from the last good copy.
 
 Every service is a quadlet: `/etc/containers/systemd/<name>.container`
 generates `<name>.service`.
@@ -298,8 +354,8 @@ has only OS Login users and no local password, so a console's login prompt has
 no credential to accept, and it isn't getting one. A startup script needs no
 login: GCE runs it as root at the next boot, and `gcloud` can put it there and
 reset the VM with no SSH at all. `config/bastion/recovery.sh` is that script, kept
-fixed and ready. It frees the disk if it's full, asks for sshd and says where
-everything ended up.
+fixed and ready. It frees the disk if it's full, asks the ruleset's tool for sshd,
+which only ever starts it through the gate, and says where everything ended up.
 
 **Written by reading the code, and not yet tried on the real VM.** Try it once
 during the first rollout ("To try it", below), then remove this line.
@@ -391,10 +447,18 @@ bastion-recovery: disk: 58% of / used, 11% of its inodes
 
 **`sshd: NOT active`:** try step 4 first, the normal startup script. It puts the
 ruleset's tool and the ruleset back from metadata and sets the units up again, which
-the fixed script doesn't. The fixed script restores a broken tool too, but it never
-gets sshd past the gate: with no tool, sshd's gate can't run and sshd stays down. If
-it said `could not restore it` because metadata has lost the tool, rerun bootstrap,
-which puts it back.
+the fixed script doesn't. The fixed script restores a broken tool too: from its last
+good copy (`restored it from its last good copy`), or else from metadata, only if
+that copy passes the same self-check as at a boot (`restored it from metadata`). A
+tool that fails gives way to its last good copy here too (`falling back to its last
+good copy`).
+
+**It never gets sshd past the gate** (the owner's decision, 2026-11-04): only the tool
+starts sshd, through its gate, and with no usable tool the script doesn't ask for
+sshd at all (`not asking for sshd, as nothing would gate it`), even if sshd's drop-in
+were gone too. That case is decided, not left open: sshd stays down. If it said
+`could not restore it` because metadata has lost the tool, rerun bootstrap, which
+puts it back.
 
 If that doesn't do it, the lines under `why sshd isn't up:` hold `sshd -t` and the
 journal of `nftables` and `ssh`. The script has already reinstalled nftables once.

@@ -77,8 +77,10 @@ scripts/check-bastion-labels.sh
 test the bastion's peer checks, metadata guard and ruleset rollback in Debian
 13, and its scrub rules with Alloy, as CI's `configs` and `alloy` jobs do.
 `scripts/check-bastion-sessions.sh` tests what a new ruleset's trial does to real
-logins, under real systemd, logind and sshd. It needs podman and isn't in CI: run it
-by hand after a change to `end_logins` in `config/bastion/ruleset.sh`.
+logins, under real systemd, logind and sshd, that a login's nonce reaches the login
+attribute, and that none of it needs a user namespace. It needs podman and isn't in
+CI: run it by hand after a change to `end_logins` or `cmd_confirm` in
+`config/bastion/ruleset.sh`.
 
 ## Documentation
 

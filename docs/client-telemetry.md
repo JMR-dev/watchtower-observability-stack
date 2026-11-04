@@ -371,6 +371,26 @@ when SSH is gone, with `config/bastion/recovery.sh` ready to put there; the seri
 console only reads, and there is no local password user (the runbook's "The
 bastion with SSH gone").
 
+The owner settled five more on 2026-11-04 (the runbook has the detail):
+
+- **Recovery stays gated.** `recovery.sh` never starts sshd itself, only the tool
+  does, through its gate, and with no usable tool it doesn't ask for sshd at all.
+- **A last good copy of the ruleset's tool.** A new `watchtower-ruleset` goes in
+  only once it passes a self-check in a network namespace of its own: no rules
+  must not pass for a guard, and its gate must keep sshd down with no guard; its
+  floor must pass `nft --check`, load and guard; and its gate must let sshd run with
+  the floor on. The last tool that passed and brought sshd up is kept, and a tool
+  that fails at a boot gives way to it.
+- **No unprivileged user namespaces:** `kernel.unprivileged_userns_clone = 0`,
+  Debian's own knob, which leaves root's and systemd's (`PrivateUsers=`) alone.
+- **A per-run login nonce:** bootstrap's login check counts only a login whose file
+  is named by its run's nonce, so a rerun can't be satisfied by an earlier run's
+  login, session or attribute.
+- **A run nonce against forged attributes:** each start bootstrap makes gets a fresh
+  nonce in metadata while the VM is stopped, every attribute carries its boot's, and
+  only values with it count. A value written on the unguarded boot with no account,
+  where any user may write one, can't carry the nonce of the boot with the account.
+
 ### G2: gitea, the VM (after the Ansible cutover)
 
 - Pulumi: `gitea:watchtowerPeerSecret` as metadata, left out when unset, so
