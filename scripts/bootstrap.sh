@@ -326,6 +326,8 @@ bastion_on_exit() {
       [[ "$status" != TERMINATED ]] || break
       sleep 5
     done
+    # Its boot may be the one with the account: a fresh run nonce first, or none.
+    bastion_restart_nonce
     compute instances start "$BASTION" --zone "$BASTION_ZONE" ||
       printf 'warning: %s did not start, so break glass is down: gcloud compute instances start %s --zone %s --project %s\n' \
         "$BASTION" "$BASTION" "$BASTION_ZONE" "$GCP_PROJECT" >&2
@@ -459,6 +461,9 @@ new_nonce() {
 # with it counts, so a rerun can't be satisfied by a login, a session or an attribute
 # left from an earlier run.
 login_nonce="$(new_nonce)"
+# The boot bastion_login_wait saw a login of this run reach, which the final check
+# then takes as shown.
+login_seen_boot=""
 # The run nonce of the boot the waits below ask about (the owner's decision,
 # 2026-11-04): every guest attribute the VM writes carries it, and only a value with it
 # counts. A fresh one goes in metadata at each start this run makes, while the VM is
@@ -490,6 +495,18 @@ bastion_new_run_nonce() {
   run_nonce="$(new_nonce)"
   compute instances add-metadata "$BASTION" --zone "$BASTION_ZONE" --metadata "watchtower-run-nonce=${run_nonce}"
 }
+# bastion_restart_nonce: the same, for a start this run makes outside bastion_update
+# (the exit trap's, and bastion_up's of a stopped VM), and never fails. If metadata won't
+# take a fresh one, the old one goes, as the boot before may have shown it to its users:
+# with none, the next run starts the VM afresh rather than trust what it's told.
+bastion_restart_nonce() {
+  bastion_new_run_nonce && return 0
+  run_nonce=""
+  printf 'warning: %s took no fresh run nonce: removing the old one, so the next run starts it afresh\n' "$BASTION" >&2
+  compute instances remove-metadata "$BASTION" --zone "$BASTION_ZONE" --keys watchtower-run-nonce ||
+    printf 'warning: %s keeps its old run nonce: remove it before a rerun (gcloud compute instances remove-metadata %s --zone %s --project %s --keys watchtower-run-nonce)\n' \
+      "$BASTION" "$BASTION" "$BASTION_ZONE" "$GCP_PROJECT" >&2
+}
 # Up, or on its way: a run that failed between a stop and its start leaves it
 # stopped with nothing below left to do, and nothing below starts it otherwise.
 bastion_up() {
@@ -499,7 +516,8 @@ bastion_up() {
     case "$state" in
       RUNNING | PROVISIONING | STAGING) return 0 ;;
       TERMINATED)
-        log "  ${BASTION} is stopped: starting it"
+        log "  ${BASTION} is stopped: starting it, with a fresh run nonce"
+        bastion_restart_nonce
         bastion_start
         return 0
         ;;
@@ -655,6 +673,7 @@ bastion_login_wait() {
   for _ in $(seq 60); do
     if bastion_attribute login | login_seen "$boot" "$run_nonce" "$login_nonce"; then
       log "  a login reached it"
+      login_seen_boot="$boot"
       return 0
     fi
     if [[ -z "$dispatched" ]]; then
@@ -727,9 +746,27 @@ bastion_final_check() {
   [[ "$(bastion_attribute ruleset | ruleset_state "$ruleset_sha" "$boot" "$run_nonce")" == confirmed ]] ||
     die "${BASTION}'s ruleset is no longer confirmed: see its serial output, and rerun.$(attribute_refusal)"
   [[ "$(bastion_attribute tool)" == "${tool_sha} boot ${boot} run ${run_nonce}" ]] ||
-    die "${BASTION} doesn't run this config/bastion/ruleset.sh: it failed its self-check, or failed at the boot and gave way to its last good copy, or came back from metadata changed (see its serial output, compare watchtower/tool with sha256sum config/bastion/ruleset.sh, and \"A new ruleset tool\" in docs/runbook.md). Fix it and rerun.$(attribute_refusal)"
-  bastion_attribute login | login_seen "$boot" "$run_nonce" "$login_nonce" ||
-    die "${BASTION} shows no login of this run on this boot: rerun this.$(attribute_refusal)"
+    die "${BASTION} doesn't say it runs this config/bastion/ruleset.sh: it failed its self-check, or failed at the boot and gave way to its last good copy, or came back from metadata changed, or the VM lost that word, which a login or a reset says again (see its serial output, compare watchtower/tool with sha256sum config/bastion/ruleset.sh, and \"A new ruleset tool\" in docs/runbook.md). Fix it, or log in, and rerun.$(attribute_refusal)"
+  # The login the wait saw on this boot stands: the attribute keeps a boot's last eight
+  # login nonces, and a user on the VM could push this run's out of it since.
+  if [[ "$login_seen_boot" != "$boot" ]]; then
+    bastion_attribute login | login_seen "$boot" "$run_nonce" "$login_nonce" ||
+      die "${BASTION} shows no login of this run on this boot: rerun this.$(attribute_refusal)"
+  fi
+  bastion_userns_word "$boot"
+}
+# bastion_userns_word <boot>: warns, and never stops, unless this boot said with this
+# run's nonce that unprivileged user namespaces are off (startup.sh, report_userns).
+bastion_userns_word() {
+  case "$(bastion_attribute userns)" in
+    "off boot $1 run ${run_nonce}") ;;
+    "on boot $1 run ${run_nonce}")
+      printf 'warning: %s has unprivileged user namespaces on: its kernel has no kernel.unprivileged_userns_clone at 0 (see its serial output)\n' "$BASTION" >&2
+      ;;
+    *)
+      printf 'warning: %s said nothing at this boot of whether unprivileged user namespaces are off (see its serial output)\n' "$BASTION" >&2
+      ;;
+  esac
 }
 if ! exists instances describe "$BASTION" --zone "$BASTION_ZONE"; then
   compute instances create "$BASTION" --zone "$BASTION_ZONE" --machine-type e2-micro \

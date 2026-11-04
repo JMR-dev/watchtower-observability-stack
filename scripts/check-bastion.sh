@@ -110,7 +110,7 @@ fi
 : >"${work}/ruleset_state.sh"
 for fn in ruleset_state login_seen guest_attribute attribute_refusal bastion_attribute bastion_boot bastion_ruleset_wait \
   bastion_login_wait bastion_update bastion_final_check bastion_on_exit bastion_stop bastion_start \
-  new_nonce bastion_new_run_nonce; do
+  new_nonce bastion_new_run_nonce bastion_restart_nonce bastion_up bastion_userns_word; do
   sed -n "/^${fn}() {\$/,/^}\$/p" "${repo_root}/scripts/bootstrap.sh" >>"${work}/ruleset_state.sh"
   grep -q "^${fn}() {\$" "${work}/ruleset_state.sh" || {
     echo "FAIL  bootstrap.sh has no ${fn}"
@@ -385,12 +385,13 @@ main_order="$(
   ping_setup() { :; }
   ping_if_up() { echo ping; }
   report_tool() { echo tool; }
+  report_userns() { echo userns-said; }
   # The attribute's PUT, which comes with the line.
   curl() { [[ "$*" == *guest-attributes/watchtower/settled* ]] && echo settled-attribute; }
   main 2>/dev/null | tr '\n' ' '
 )"
-if [[ "$main_order" == "userns guard tool bastion: metadata guard loaded updates apt bastion: settled settled-attribute ping teardown " ]]; then
-  pass "apt: main turns user namespaces off before anything else, says settled only after the guard and apt, the guard goes next and then which tool it ran, and the ping comes before anything of telemetry"
+if [[ "$main_order" == "userns guard tool userns-said bastion: metadata guard loaded updates apt bastion: settled settled-attribute ping teardown " ]]; then
+  pass "apt: main turns user namespaces off before anything else, says settled only after the guard and apt, the guard goes next and then which tool it ran and the user namespaces, and the ping comes before anything of telemetry"
 else
   flunk "apt: main's order is: ${main_order}"
 fi
@@ -418,15 +419,26 @@ nonce_case() {
   esac
   if [[ -n "$ok" ]]; then pass "nonce ${name}: ${want}"; else flunk "nonce ${name}: ${got//$'\n'/ }"; fi
 }
+# Under a umask that would leave it readable to all: keep_run_nonce makes it 0600 itself.
 umask_before="$(umask)"
-umask 077
+umask 022
 nonce_case "one of its shape" "$(printf '%032x' 7)" kept
 nonce_case "none in metadata" none none
 nonce_case "not hex" "$(printf 'z%.0s' {1..32})" none
 nonce_case "too short" "$(printf '%031x' 7)" none
 nonce_case "a value that would add to the attribute" "$(printf '%032x' 7) boot x" none
+# A file there already, readable to all: not written into, so not left readable.
+nonce_left="$(
+  RUN_NONCE="$(mktemp)"
+  chmod 0644 "$RUN_NONCE"
+  mds() { printf '%032x' 8; }
+  keep_run_nonce 2>/dev/null
+  stat -c '%a %U' "$RUN_NONCE"
+)"
+if [[ "$nonce_left" == "600 root" ]]; then pass "nonce: one readable to all from before is replaced, 0600"; else flunk "nonce: left as ${nonce_left}"; fi
 umask "$umask_before"
-# What the settled and tool attributes are sent: <boot id> [<sha256>] and the run nonce.
+# What the settled, tool and userns attributes are sent: <boot id> [<sha256>] and the
+# run nonce.
 attribute_sent="$(
   RUN_NONCE="$(mktemp)"
   printf '%032x\n' 7 >"$RUN_NONCE"
@@ -435,7 +447,21 @@ attribute_sent="$(
   curl() { local a; for a in "$@"; do [[ "$a" != *" run "* ]] || echo "${*: -1} ${a}"; done; }
   report_settled
   report_tool
+  userns_state=off
+  report_userns
+  userns_state=""
+  report_userns
 )"
+if grep -qxF "http://169.254.169.254/computeMetadata/v1/instance/guest-attributes/watchtower/userns off boot $(cat /proc/sys/kernel/random/boot_id) run $(printf '%032x' 7)" <<<"$attribute_sent"; then
+  pass "nonce: userns carries off, the boot and its run nonce"
+else
+  flunk "nonce: userns was sent: ${attribute_sent}"
+fi
+if grep -qxF "http://169.254.169.254/computeMetadata/v1/instance/guest-attributes/watchtower/userns on boot $(cat /proc/sys/kernel/random/boot_id) run $(printf '%032x' 7)" <<<"$attribute_sent"; then
+  pass "nonce: userns, not known to be off, says on"
+else
+  flunk "nonce: userns, not known to be off, was sent: ${attribute_sent}"
+fi
 this_boot_now="$(cat /proc/sys/kernel/random/boot_id)"
 tool_sum="$(echo a-tool | sha256sum | cut -d' ' -f1)"
 if grep -qxF "http://169.254.169.254/computeMetadata/v1/instance/guest-attributes/watchtower/settled ${this_boot_now} run $(printf '%032x' 7)" <<<"$attribute_sent"; then
@@ -468,15 +494,17 @@ userns_case() {
       # The kernel takes what the file says.
       sed -n 's/^kernel\.unprivileged_userns_clone = \([0-9]\)$/\1/p' "$3" >"$USERNS_KNOB"
     }
+    userns_state=""
     userns_off 2>&1
+    echo "state ${userns_state}"
   )"
   rc=$?
   if [[ "$rc" != 0 ]]; then
     flunk "userns ${name}: returned ${rc}"
-  elif [[ "$want" == off && "$out" != *"unprivileged user namespaces: off"* ]]; then
+  elif [[ "$want" == off && ("$out" != *"unprivileged user namespaces: off"* || "$out" != *"state off") ]]; then
     flunk "userns ${name}: doesn't say they're off: ${out}"
-  elif [[ "$want" == warned && "$out" != *"warning: unprivileged user namespaces may be on"* ]]; then
-    flunk "userns ${name}: doesn't warn: ${out}"
+  elif [[ "$want" == warned && ("$out" != *"warning: unprivileged user namespaces may be on"* || "$out" != *"state on") ]]; then
+    flunk "userns ${name}: doesn't warn, or keep it as on: ${out}"
   else
     pass "userns ${name}: ${want}, and returns 0"
   fi
@@ -831,11 +859,17 @@ case "$*" in
       fi
     fi ;;
   "stop ssh.service")
-    [[ ! -e /stubs/sshd-runs-its-gate ]] || touch /stubs/sshd-down ;;
+    [[ ! -e /stubs/sshd-runs-its-gate && ! -e /stubs/sshd-ungated ]] || touch /stubs/sshd-down ;;
 esac
 STUB
 cat >"${stubs}/curl" <<'STUB'
 #!/bin/bash
+# In a network namespace with nothing but lo, as a self-check's is, the metadata server
+# is out of reach, as on the VM: nothing answers.
+if [[ -z "$(ip -o link show 2>/dev/null | grep -v ': lo:')" ]]; then
+  printf '000'
+  exit 7
+fi
 args=("$@")
 for ((i = 0; i < $#; i++)); do
   if [[ "${args[i]}" == --data ]]; then
@@ -1031,8 +1065,12 @@ fresh
 apply_ruleset a
 setpriv --reuid=65534 --regid=65534 --clear-groups touch "${dropbox}/confirm"
 check "a user may ask" test -e "${dropbox}/confirm"
+# The installed tool, which confirm names in watchtower/tool.
+install -m 0755 ruleset.sh /usr/local/sbin/watchtower-ruleset
+rm -f "${stubs}/attribute-tool"
 confirm
 check "confirm: says confirmed" state_is "$sha_a" confirmed
+check "confirm: says which tool, with the boot and its run nonce" grep -qxF "$(sha256sum ruleset.sh | cut -d' ' -f1) boot ${this_boot} run ${run_a}" "${stubs}/attribute-tool"
 check "confirm: nothing pending" no_file "${state_dir}/pending"
 check "confirm: records it" grep -qx "$sha_a" "${state_dir}/confirmed"
 check "confirm: stops the timer" called "stop ${timer}"
@@ -1118,8 +1156,13 @@ apply_ruleset a
 rm -f "${stubs}/attribute-broken"
 check "a lost word: nothing reached the attribute" test ! -s "${stubs}/attribute"
 check "a lost word: it did say so" reason_is 0
+# watchtower/tool too, which only startup.sh says at a boot: the installed tool's.
+install -m 0755 ruleset.sh /usr/local/sbin/watchtower-ruleset
+tool_word="$(sha256sum ruleset.sh | cut -d' ' -f1) boot ${this_boot} run ${run_a}"
+rm -f "${stubs}/attribute-tool"
 confirm
 check "a lost word: a login says it again" state_is "$sha_a" confirmed
+check "a lost word: and which tool this is, again" grep -qxF "$tool_word" "${stubs}/attribute-tool"
 # ... only while it's true.
 touch "${stubs}/sshd-down"
 confirm
@@ -1729,6 +1772,17 @@ login_case "only a login with no nonce: stops" 1 1 "$(login_word "$boot_a" -)"
 login_case "an earlier run's, then this run's: the job, then it counts" 0 1 "$(login_word "$boot_a" "$login_b")
 $(login_word "$boot_a" "${login_b},${login_a}")"
 login_case "this run's login nonce, with another run nonce: stops" 1 1 "$(login_word "$boot_a" "$login_a" "$run_b")"
+# What the final check then goes by: the boot the wait saw the login reach.
+seen_after_wait="$(
+  bastion_attribute() { login_word "$boot_a"; }
+  bastion_dispatch() { :; }
+  log() { :; }
+  sleep() { :; }
+  login_seen_boot=""
+  bastion_login_wait "$boot_a" >/dev/null
+  echo "$login_seen_boot"
+)"
+check "bootstrap waits for a login: keeps the boot it saw it on" test "$seen_after_wait" = "$boot_a"
 
 # --- bootstrap: bastion_update, in order, with gcloud stubbed --------------------
 # update_trace <metadata differs?> <account differs?> [the compute call that fails]
@@ -1807,12 +1861,16 @@ update_case "nothing differs, and no run nonce yet: started afresh to get one" \
   "compute-add-metadata compute-stop compute-run-nonce compute-start wait-after-nothing login-on-boot-1 exit 0" no no "" none
 update_case "metadata refused: never stopped, and the failure stands" \
   "compute-add-metadata exit 1" yes no add-metadata
-update_case "a stop that fails: started anyway, and the failure stands" \
-  "compute-add-metadata compute-stop compute-start exit 1" yes no stop
-update_case "the run nonce refused: the exit trap starts it, and the failure stands" \
-  "compute-add-metadata compute-stop compute-run-nonce compute-start exit 1" yes no run-nonce
-update_case "the account refused: the exit trap starts it, and the failure stands" \
-  "wait-after-nothing compute-stop compute-set-service-account compute-start exit 1" no yes set-service-account
+update_case "a stop that fails: started anyway, with a fresh run nonce, and the failure stands" \
+  "compute-add-metadata compute-stop compute-run-nonce compute-start exit 1" yes no stop
+# The exit trap's start gets a fresh run nonce too, or, refused one, none at all, so the
+# next run starts it afresh rather than trust one the boot before could show.
+update_case "the run nonce refused: the exit trap tries again, removes the old one, starts it, and the failure stands" \
+  "compute-add-metadata compute-stop compute-run-nonce compute-run-nonce compute-remove-metadata compute-start exit 1" yes no run-nonce
+update_case "the account refused: the exit trap starts it, with a fresh run nonce, and the failure stands" \
+  "wait-after-nothing compute-stop compute-set-service-account compute-run-nonce compute-start exit 1" no yes set-service-account
+update_case "the account on, then the run nonce refused: the old one removed before the boot with the account" \
+  "wait-after-nothing compute-stop compute-set-service-account compute-run-nonce compute-run-nonce compute-remove-metadata compute-start exit 1" no yes run-nonce
 # apt's word said with another run's nonce: no account goes on.
 settled_with="$run_b"
 update_case "settled with another run's nonce: never stopped for the account" \
@@ -1834,8 +1892,9 @@ if [[ "${trace_nonces[*]}" == "${run_a} ${run_a}" ]]; then pass "update: no star
 
 # The exit trap alone: the status it came with, whatever the start does.
 # trap_trace <in flight> <start's status> <polls still STOPPING before TERMINATED>
+#   [<the run nonce's add-metadata's status>]
 trap_trace() {
-  local in_flight=$1 start_rc=$2 stopping=${3:-0}
+  local in_flight=$1 start_rc=$2 stopping=${3:-0} nonce_rc=${4:-0}
   echo 0 >/tmp/trap-polls
   (
     cleanup=/tmp/update-trace-cleanup
@@ -1850,34 +1909,68 @@ trap_trace() {
         # Not a bare return: in a trap, that gives the status from before the trap.
         return 0
       fi
+      if [[ "$*" == *watchtower-run-nonce=* ]]; then
+        echo compute-run-nonce
+        return "$nonce_rc"
+      fi
       echo "compute-$2"
-      return "$start_rc"
+      [[ "$2" != start ]] || return "$start_rc"
     }
     trap bastion_on_exit EXIT
     exit 7
   ) 2>/dev/null
   echo "exit $?"
 }
-trap_is() { [[ "$(trap_trace "$2" "$3" "${4:-0}" | tr '\n' ' ')" == "$1 " ]]; }
-check "exit trap: a stop in flight: starts it, keeps the status" trap_is "compute-start exit 7" 1 0
-check "exit trap: the start fails too: keeps the status" trap_is "compute-start exit 7" 1 1
+trap_is() { [[ "$(trap_trace "$2" "$3" "${4:-0}" "${5:-0}" | tr '\n' ' ')" == "$1 " ]]; }
+check "exit trap: a stop in flight: a fresh run nonce, starts it, keeps the status" trap_is "compute-run-nonce compute-start exit 7" 1 0
+check "exit trap: the start fails too: keeps the status" trap_is "compute-run-nonce compute-start exit 7" 1 1
 check "exit trap: nothing in flight: leaves it alone" trap_is "exit 7" "" 0
-check "exit trap: still stopping: waits for that, then starts" trap_is "slept slept compute-start exit 7" 1 0 2
+check "exit trap: still stopping: waits for that, then starts" trap_is "slept slept compute-run-nonce compute-start exit 7" 1 0 2
+check "exit trap: the run nonce refused: the old one removed, then starts it" trap_is "compute-run-nonce compute-remove-metadata compute-start exit 7" 1 0 0 1
 trap_never="$(trap_trace 1 0 1000 | tr '\n' ' ')"
-if [[ "$trap_never" == "$(printf 'slept %.0s' {1..24})compute-start exit 7 " ]]; then
+if [[ "$trap_never" == "$(printf 'slept %.0s' {1..24})compute-run-nonce compute-start exit 7 " ]]; then
   pass "ruleset: exit trap: never stopped: waits 2 minutes at most, then tries anyway"
 else
   flunk "ruleset: exit trap: never stopped: ${trap_never}"
 fi
+# bastion_up, which starts a VM an earlier run left stopped: with a fresh run nonce too.
+# up_trace <the run nonce's add-metadata's status>
+up_trace() {
+  local nonce_rc=$1
+  (
+    log() { :; }
+    sleep() { :; }
+    compute() {
+      if [[ "$2" == describe ]]; then
+        echo TERMINATED
+        return 0
+      fi
+      if [[ "$*" == *watchtower-run-nonce=* ]]; then
+        echo compute-run-nonce
+        return "$nonce_rc"
+      fi
+      echo "compute-$2"
+    }
+    bastion_up
+  ) 2>/dev/null | tr '\n' ' '
+}
+up_is() { [[ "$(up_trace "$2")" == "$1 " ]]; }
+check "bastion_up: a stopped VM: a fresh run nonce, then started" up_is "compute-run-nonce compute-start" 0
+check "bastion_up: the run nonce refused: the old one removed, then started" up_is "compute-run-nonce compute-remove-metadata compute-start" 1
 
 # The last word before "Done".
 # final_is <want exit> <status> <boot attribute> <ruleset attribute> <login attribute>
 #   [<tool attribute>]
 tool_sha="$(sha256sum ruleset.sh | cut -d' ' -f1)"
+# What the login wait saw (login_seen_boot) and the userns attribute come from
+# final_seen and final_userns, set around a case.
+final_seen=""
+final_userns="off boot ${boot_a} run ${run_a}"
 final_is() {
   local want_rc=$1 vm_status=$2 says_boot=$3 ruleset=$4 login=$5 tool_says=${6-"${tool_sha} boot ${boot_a} run ${run_a}"} rc
   (
     bastion_boot_id="$boot_a"
+    login_seen_boot="$final_seen"
     compute() { echo "$vm_status"; }
     bastion_attribute() {
       case "$1" in
@@ -1885,11 +1978,12 @@ final_is() {
         ruleset) echo "$ruleset" ;;
         login) echo "$login" ;;
         tool) echo "$tool_says" ;;
+        userns) echo "$final_userns" ;;
       esac
     }
-    die() { exit 1; }
+    die() { echo "died: $*" >&2; exit 1; }
     bastion_final_check
-  ) >/dev/null 2>&1
+  ) >/dev/null 2>/tmp/final-stderr
   rc=$?
   [[ "$rc" == "$want_rc" ]]
 }
@@ -1910,6 +2004,27 @@ check "final check: running, and another tool" final_is 1 RUNNING "$boot_word" "
 check "final check: running, and no tool said" final_is 1 RUNNING "$boot_word" "$(word confirmed)" "$final_login" ""
 check "final check: running, and this tool said with another run's nonce" final_is 1 RUNNING "$boot_word" "$(word confirmed)" "$final_login" \
   "${tool_sha} boot ${boot_a} run ${run_b}"
+check "final check: another tool's message names a lost word, and a login or a reset" \
+  grep -q 'or the VM lost that word, which a login or a reset says again' /tmp/final-stderr
+# A login the wait saw on this boot stands, though a user on the VM has since pushed this
+# run's nonce out of the eight the attribute keeps; one it saw on another boot doesn't.
+pushed_out="$(login_word "$boot_a" "$(for n in 40 41 42 43 44 45 46 47; do printf '%032x\n' "$n"; done | paste -sd,)")"
+final_seen="$boot_a"
+check "final check: the login the wait saw, pushed out of the attribute since, stands" final_is 0 RUNNING "$boot_word" "$(word confirmed)" "$pushed_out"
+final_seen="$boot_b"
+check "final check: a login the wait saw on another boot doesn't" final_is 1 RUNNING "$boot_word" "$(word confirmed)" "$pushed_out"
+final_seen=""
+check "final check: and none seen, none in the attribute: no Done" final_is 1 RUNNING "$boot_word" "$(word confirmed)" "$pushed_out"
+# User namespaces: a warning when this boot says they're on, or says nothing, never a stop.
+final_userns="on boot ${boot_a} run ${run_a}"
+check "final check: user namespaces on: still Done" final_is 0 RUNNING "$boot_word" "$(word confirmed)" "$final_login"
+check "final check: user namespaces on: warns" grep -q 'has unprivileged user namespaces on' /tmp/final-stderr
+final_userns="off boot ${boot_a} run ${run_b}"
+check "final check: user namespaces said off with another run's nonce: still Done" final_is 0 RUNNING "$boot_word" "$(word confirmed)" "$final_login"
+check "final check: user namespaces said off with another run's nonce: warns it heard nothing" grep -q 'said nothing at this boot of whether unprivileged user namespaces are off' /tmp/final-stderr
+final_userns="off boot ${boot_a} run ${run_a}"
+check "final check: user namespaces off: no warning" final_is 0 RUNNING "$boot_word" "$(word confirmed)" "$final_login"
+refute "final check: user namespaces off: says nothing of them" grep -q 'user namespaces' /tmp/final-stderr
 
 # The units, as systemd reads them.
 fresh
@@ -2116,22 +2231,36 @@ sed 's/^guard_loaded() {$/&\n  return 0/' ruleset.sh >"${variants}/loaded-yes"
 sed 's/meta skuid != 0 counter reject with icmpx admin-prohibited$/meta skuid != 0 accept/' ruleset.sh >"${variants}/floor-open"
 sed 's/^\t\tip daddr 169.254.169.254 jump metadata$/\t\tip daddr 169.254.169.254 jump nowhere/' ruleset.sh >"${variants}/floor-broken"
 head -n 40 ruleset.sh >"${variants}/cut-short"
-# And one it can't: apply fails at a boot, before it starts sshd.
+# sshd's gate saying no even with the guard on.
+sed 's/^gate() {$/&\n  return 1/' ruleset.sh >"${variants}/gate-no"
+# And ones it can't: apply fails at a boot, before it starts sshd; apply ends at once,
+# saying all is well and starting nothing; apply hangs, holding the lock.
 sed 's/^cmd_apply() {$/&\n  exit 1/' ruleset.sh >"${variants}/apply-fails"
+sed 's/^cmd_apply() {$/&\n  exit 0/' ruleset.sh >"${variants}/apply-zero"
+sed '/^cmd_apply() {$/,/^}$/ s/^  lock$/  lock\n  sleep 1000/' ruleset.sh >"${variants}/apply-hangs"
 chmod 0755 "$variants"/*
 # Each mutant is what its name says, or the cases below prove nothing.
-for variant in gate-yes loaded-yes floor-open floor-broken apply-fails; do
+for variant in gate-yes loaded-yes floor-open floor-broken gate-no apply-fails apply-zero apply-hangs; do
   if cmp -s ruleset.sh "${variants}/${variant}"; then flunk "tool: the ${variant} mutant is the real tool"; fi
 done
 
-# tool_as <file or none> <last good copy, or none>: what's on disk before a boot, on a
-# VM with an account (so a gate with no guard must say no).
+# tool_as <file or none> <last good copy, or none> [settled]: what's on disk before a
+# boot, on a VM with an account (so a gate with no guard must say no), with sshd down
+# until something starts it through its gate, as with its drop-in. A first install
+# unless settled: then ruleset a is on and confirmed, so the boot has no trial.
 tool_as() {
   fresh
   echo 200 >"${stubs}/account-code"
+  touch "${stubs}/sshd-down" "${stubs}/sshd-runs-its-gate"
   rm -f "$real_tool" "$last_good"
   [[ "$1" == none ]] || install -m 0755 "$1" "$real_tool"
   [[ "$2" == none ]] || install -m 0755 "$2" "$last_good"
+  if [[ "${3:-}" == settled ]]; then
+    cp "${rules}/a" /etc/nftables.conf
+    install -d -m 0700 "$state_dir" "${state_dir}/rejected"
+    echo "$sha_a" >"${state_dir}/confirmed"
+    nft --file "${rules}/a"
+  fi
 }
 # boot_with_tool <the tool in metadata, or none>: startup.sh's guard, as at a boot, with
 # metadata offering that tool and nftables.conf. Sets out and rc.
@@ -2155,14 +2284,61 @@ boot_with_tool() {
   rc=$?
 }
 
-# A new tool that passes: in, and once it has brought sshd up, the last good copy.
+# A new tool that passes, on a first install: in, and sshd up through it. Not the last
+# good copy while its trial is pending (the review's fix, 2026-11-04): it hasn't yet
+# run that trial's confirmation or rollback. A boot after the trial keeps it.
 tool_as "${variants}/older" none
 boot_with_tool ruleset.sh
 check "tool, a new one that passes: the boot goes on" reason_is 0
 check "tool, a new one that passes: in place" same_file ruleset.sh "$real_tool"
-check "tool, a new one that passes: sshd, through it" called "start ssh.service"
-check "tool, a new one that passes: kept as the last good copy" same_file ruleset.sh "$last_good"
+check "tool, a new one that passes: sshd, through it" no_file "${stubs}/sshd-down"
 refute "tool, a new one that passes: no fallback" said 'falling back'
+check "tool, a new one that passes, its trial pending: not kept yet" no_file "$last_good"
+check "tool, a new one that passes, its trial pending: says so" said 'a ruleset trial is pending'
+confirm
+reboot_vm
+touch "${stubs}/sshd-down"
+boot_with_tool ruleset.sh
+check "tool, a new one that passes, a boot after its trial: the boot goes on" reason_is 0
+check "tool, a new one that passes, a boot after its trial: kept as the last good copy" same_file ruleset.sh "$last_good"
+
+# One whose apply ends at once, says all is well and starts nothing: passes the
+# self-check, and is never kept over a good last good copy.
+tool_as ruleset.sh ruleset.sh settled
+boot_with_tool "${variants}/apply-zero"
+check "tool, apply-zero: the boot goes on" reason_is 0
+check "tool, apply-zero: sshd never came up" test -e "${stubs}/sshd-down"
+check "tool, apply-zero: the last good copy stays the good one" same_file ruleset.sh "$last_good"
+check "tool, apply-zero: says why" said "sshd isn't active, so"
+
+# What a boot must show before the tool is kept, beyond its self-check.
+# promote_case <name> <sshd: up|down> <guard: on|off> <account: yes|no>
+#   <trial pending: yes|no> <want: kept|not>
+promote_case() {
+  local name=$1 sshd=$2 guard=$3 account=$4 pending=$5 want=$6 dir got result
+  dir="$(mktemp -d)"
+  install -m 0755 ruleset.sh "${dir}/tool"
+  install -m 0755 "${variants}/older" "${dir}/last-good"
+  got="$(
+    export PATH="${stubs}:${PATH}"
+    work="$(mktemp -d)"
+    RULESET_TOOL="${dir}/tool"
+    TOOL_LAST_GOOD="${dir}/last-good"
+    PENDING_TRIAL="${dir}/pending"
+    [[ "$pending" != yes ]] || touch "$PENDING_TRIAL"
+    systemctl() { [[ "$*" == "is-active --quiet ssh.service" && "$sshd" == up ]]; }
+    guard_loaded() { [[ "$guard" == on ]]; }
+    get() { if [[ "$account" == no ]]; then echo 404; else echo 200; fi; }
+    promote_tool 2>&1
+  )"
+  if cmp -s "${dir}/tool" "${dir}/last-good"; then result=kept; else result=not; fi
+  if [[ "$result" == "$want" ]]; then pass "tool, promotion: ${name}: ${want}"; else flunk "tool, promotion: ${name}: ${result}: ${got//$'\n'/ }"; fi
+}
+promote_case "sshd up, the guard on, no trial" up on yes no kept
+promote_case "sshd up, no guard, no account so no token" up off no no kept
+promote_case "sshd up, no guard, an account" up off yes no not
+promote_case "sshd down" down on yes no not
+promote_case "a trial pending, over a last good copy" up on yes yes not
 
 # Each bug the self-check sees: not put in place, the last good copy untouched, and why.
 # self_check_case <variant> <what it says>
@@ -2180,6 +2356,62 @@ self_check_case loaded-yes 'it takes an empty ruleset for a guard'
 self_check_case floor-open "its floor doesn't guard"
 self_check_case floor-broken "its floor doesn't pass nft --check"
 self_check_case cut-short 'is cut short or won'
+self_check_case gate-no 'its gate keeps sshd down with its floor on'
+
+# The real first install: no account, and the self-check's namespace has no way to the
+# metadata server (curl gets nothing there, as on the VM), so its gate must still keep
+# sshd down with no guard, and a correct tool passes. Nothing it loads, and nothing it
+# puts on lo, reaches the live namespace.
+tool_as "${variants}/older" none
+echo 404 >"${stubs}/account-code"
+metadata_on_lo=""
+ip -4 addr show dev lo | grep -q '169\.254\.169\.254' && metadata_on_lo=1
+ip addr del 169.254.169.254/32 dev lo 2>/dev/null
+nft --file "${rules}/marked"
+live_ruleset_before="$(nft list ruleset)"
+live_lo_before="$(ip -o addr show dev lo)"
+# Executable, as take_tool makes a tool before it's checked.
+install -m 0700 ruleset.sh /tmp/tool-to-check
+self_check_out="$(
+  export PATH="${stubs}:${PATH}"
+  work="$(mktemp -d)"
+  tool_self_check /tmp/tool-to-check 2>&1
+)"
+self_check_rc=$?
+check "tool, self-check with no account: a correct tool passes" test "$self_check_rc" = 0
+check "tool, self-check: the live ruleset is as it was" test "$(nft list ruleset)" = "$live_ruleset_before"
+check "tool, self-check: the live lo is as it was" test "$(ip -o addr show dev lo)" = "$live_lo_before"
+refute "tool, self-check: no metadata address left on the live lo" grep -q '169\.254\.169\.254' <<<"$(ip -4 addr show dev lo)"
+[[ -z "$metadata_on_lo" ]] || ip addr add 169.254.169.254/32 dev lo 2>/dev/null
+[[ "$self_check_rc" == 0 ]] || echo "      self-check said: ${self_check_out//$'\n'/ }"
+# ... and so, at a first install's boot, the new tool goes in.
+tool_as "${variants}/older" none
+echo 404 >"${stubs}/account-code"
+boot_with_tool ruleset.sh
+check "tool, no account (a first install): a new one that passes goes in" same_file ruleset.sh "$real_tool"
+check "tool, no account (a first install): the boot goes on" reason_is 0
+
+# An apply that hangs, holding the lock the rollback needs: stopped after TOOL_TIMEOUT
+# (here 3s), with all it started, and the last good copy has the boot, through the same
+# lock.
+tool_timeout_before="$TOOL_TIMEOUT"
+TOOL_TIMEOUT=3s
+tool_as ruleset.sh ruleset.sh settled
+boot_with_tool "${variants}/apply-hangs"
+TOOL_TIMEOUT="$tool_timeout_before"
+check "tool, apply hangs: says it was stopped" said 'apply took longer than 3s, and was stopped'
+check "tool, apply hangs: falls back" said 'falling back to its last good copy'
+check "tool, apply hangs: the boot goes on" reason_is 0
+check "tool, apply hangs: sshd up, through the last good copy" no_file "${stubs}/sshd-down"
+# No pgrep in this image: the processes' own command lines.
+hung_sleep_left() {
+  local cmdline
+  for cmdline in /proc/[0-9]*/cmdline; do
+    [[ "$(tr '\0' ' ' <"$cmdline" 2>/dev/null)" != "sleep 1000 " ]] || return 0
+  done
+  return 1
+}
+refute "tool, apply hangs: nothing of it left running" hung_sleep_left
 
 # Passes its self-check, and fails at the boot: the last good copy has the boot instead.
 tool_as ruleset.sh ruleset.sh
@@ -2210,10 +2442,11 @@ boot_with_tool "${variants}/gate-yes"
 check "tool, gone, metadata's fails: stops" reason_is 1
 check "tool, gone, metadata's fails: not put in place" no_file "$real_tool"
 refute "tool, gone, metadata's fails: nothing starts sshd" called "start ssh.service"
-check "tool, gone, metadata's fails: says sshd stays down" said 'sshd stays down'
+check "tool, gone, metadata's fails: says sshd stays as the boot left it" said 'it stays as the boot left it'
 
-# A tool on disk that never passed the self-check is never kept, though it brought sshd up.
-tool_as "${variants}/gate-yes" ruleset.sh
+# A tool on disk that never passed the self-check is never kept, though it brought sshd up
+# at a boot with no trial.
+tool_as "${variants}/gate-yes" ruleset.sh settled
 boot_with_tool none
 check "tool, never checked: the boot goes on" reason_is 0
 check "tool, never checked: not kept as the last good copy" same_file ruleset.sh "$last_good"
@@ -2437,16 +2670,39 @@ recovery
 check "recovery, a bad copy in metadata: not put in place" same_file "${stubs}/damaged-tool" "$real_tool"
 check "recovery, a bad copy in metadata: nothing left behind" no_file "${real_tool}.tmp"
 check "recovery, a bad copy in metadata: says it couldn't" said 'could not restore it'
-# No tool, and sshd's drop-in gone too, so a start would get sshd up with no gate at all
-# (the owner's decision, 2026-11-04): sshd isn't asked for, and stays down.
+# No tool, and sshd's drop-in gone too (the owner's decision, 2026-11-04). At a real boot
+# systemd has started sshd before any startup script, and with no drop-in nothing gated
+# it: so sshd is up here, with no guard, on a VM with an account. Never asked for, and
+# stopped (the review's fix, 2026-11-04).
 tool_setting
 tool_damage gone
-rm -f "${stubs}/sshd-runs-its-gate"
+rm -f "${stubs}/sshd-runs-its-gate" "${stubs}/sshd-down"
 touch "${stubs}/sshd-ungated"
+nft flush ruleset
 recovery
 refute "recovery, no tool and no gate on sshd: never asks for sshd" called "start ssh.service"
-check "recovery, no tool and no gate on sshd: sshd stays down" test -e "${stubs}/sshd-down"
+check "recovery, no tool and no gate on sshd, up from the boot with no guard: stopped" called "stop ssh.service"
+check "recovery, no tool and no gate on sshd: sshd down" test -e "${stubs}/sshd-down"
+check "recovery, no tool and no gate on sshd: says why it stopped it" said 'sshd is up with no guard, on a VM that may have an account: stopping it'
 check "recovery, no tool and no gate on sshd: says so" said 'bastion-recovery: sshd: NOT active'
+# ... left up with the guard there, by its name, as there's no tool to ask by its rules.
+tool_setting
+tool_damage gone
+rm -f "${stubs}/sshd-runs-its-gate" "${stubs}/sshd-down"
+touch "${stubs}/sshd-ungated"
+recovery
+refute "recovery, no tool, no gate on sshd, the guard there: left up" called "stop ssh.service"
+check "recovery, no tool, no gate on sshd, the guard there: up" no_file "${stubs}/sshd-down"
+# ... and on a VM with no account, so no token to guard.
+tool_setting
+tool_damage gone
+rm -f "${stubs}/sshd-runs-its-gate" "${stubs}/sshd-down"
+touch "${stubs}/sshd-ungated"
+echo 404 >"${stubs}/account-code"
+nft flush ruleset
+recovery
+refute "recovery, no tool, no gate on sshd, no account: left up" called "stop ssh.service"
+check "recovery, no tool, no gate on sshd, no account: up" no_file "${stubs}/sshd-down"
 # The last good copy, with nothing in metadata: back, and sshd through its gate.
 tool_setting
 tool_damage gone
@@ -2462,7 +2718,21 @@ install -m 0755 ruleset.sh "$last_good"
 recovery
 check "recovery, a tool that fails: falls back" said 'falling back to its last good copy'
 check "recovery, a tool that fails: the last good copy in its place" same_file ruleset.sh "$real_tool"
+check "recovery, a tool that fails: sets its units up again, as at a boot" called "enable --quiet nftables.service ${timer} watchtower-ruleset-confirm.path"
 check "recovery, a tool that fails: sshd up, through the gate" no_file "${stubs}/sshd-down"
+# A tool whose apply hangs: stopped after TOOL_TIMEOUT (3s in a copy of the script),
+# and its last good copy takes over, through the same lock.
+sed 's/^TOOL_TIMEOUT="5m"$/TOOL_TIMEOUT="3s"/' recovery.sh >/check/recovery-short.sh
+tool_setting
+install -m 0755 "${variants}/apply-hangs" "$real_tool"
+install -m 0755 ruleset.sh "$last_good"
+out="$(PATH="${recovery_bin}:${stubs}:${PATH}" bash /check/recovery-short.sh 2>&1)"
+rc=$?
+check "recovery, apply hangs: the copy has the short limit" grep -qx 'TOOL_TIMEOUT="3s"' /check/recovery-short.sh
+check "recovery, apply hangs: says it was stopped" said 'apply took longer than 3s, and was stopped'
+check "recovery, apply hangs: falls back" said 'falling back to its last good copy'
+check "recovery, apply hangs: sshd up, through the gate" no_file "${stubs}/sshd-down"
+refute "recovery, apply hangs: nothing of it left running" hung_sleep_left
 # ... and with none: sshd stays down.
 tool_setting
 install -m 0755 "${variants}/apply-fails" "$real_tool"

@@ -76,6 +76,12 @@
 #
 #   login <epoch> boot <boot id> for <login nonces, comma-separated, or -> run <nonce>
 #
+# and watchtower/tool, which startup.sh says at each boot, is
+#
+#   <sha256 of the installed tool> boot <boot id> run <nonce>
+#
+# said again here with every confirmed, so a lost word comes back with a login.
+#
 # The run nonce (the owner's decision, 2026-11-04) is the one bootstrap put in metadata
 # while the VM was stopped, which startup.sh keeps in /run for root alone, or "-" for
 # none. A value written on a boot that had no guard, where any user could write one,
@@ -193,10 +199,21 @@ status() {
 
 sshd_active() { systemctl is-active --quiet ssh.service; }
 
+# say_tool: which tool is installed, by its sha256, in watchtower/tool, as startup.sh
+# says it at a boot: bootstrap's final check asks for it. Said again with every
+# confirmed, so a word the attribute lost comes back with a login. Never fails.
+say_tool() {
+  local sha
+  sha="$(sha256sum <"$TOOL" 2>/dev/null | cut -d' ' -f1)" || sha=""
+  [[ -n "$sha" ]] || { warn "could not read ${TOOL} to say which tool this is"; return 0; }
+  put_attribute tool "${sha} boot $(boot_id)" || warn "could not put the tool in the guest attribute"
+}
+
 # say_confirmed <sha>: confirmed means the way in works too.
 say_confirmed() {
   if sshd_active; then
     status confirmed "$1"
+    say_tool
   else
     warn "the ruleset is confirmed, and sshd isn't active"
     status failed "$1"
@@ -610,6 +627,7 @@ say_confirmed_again() {
   esac
   if guard_loaded && sshd_active; then
     status confirmed "$confirmed"
+    say_tool
   fi
 }
 

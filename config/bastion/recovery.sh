@@ -21,16 +21,17 @@
 #      of a new tool. Whole or not at all.
 #   4. Asks that tool to end with sshd up: `watchtower-ruleset apply`, with no new
 #      ruleset. A rollback the full disk held up finishes here and reboots, and this
-#      script then runs once more. If the tool fails, its last good copy takes its
-#      place and is asked the same. sshd stays subject to the gate: no guard on a VM
-#      with an account, no sshd.
+#      script then runs once more. If the tool fails, or takes over 5 minutes, its last
+#      good copy takes its place, sets its units up again and is asked the same. sshd
+#      stays subject to the gate: no guard on a VM with an account, no sshd.
 #   5. If sshd still isn't up, reinstalls nftables and asks again, then shows why.
 #   6. Says where the guard and sshd ended up, and "done".
 #
 # Never sshd without the gate (the owner's decision, 2026-11-04): this script never
 # starts sshd itself, only the tool does, through its gate. With no usable tool at all
 # it doesn't ask for sshd, so it doesn't rely on sshd's drop-in being on disk to keep it
-# down. The way back from there is a rerun of scripts/bootstrap.sh.
+# down, and an sshd the boot started with no guard, on a VM that may have an account,
+# it stops. The way back from there is a rerun of scripts/bootstrap.sh.
 #
 # With nothing wrong it changes nothing but starting what should be running, so
 # it's safe to try on a healthy bastion. scripts/check-bastion.sh tests it.
@@ -42,6 +43,12 @@ RULESET_TOOL="/usr/local/sbin/watchtower-ruleset"
 # startup.sh keeps it: the last copy that passed its self-check and brought sshd up.
 TOOL_LAST_GOOD="/usr/local/sbin/watchtower-ruleset.last-good"
 TOOL_IN_METADATA="http://169.254.169.254/computeMetadata/v1/instance/attributes/watchtower-ruleset"
+# 404 here means a VM with no account, so no token to guard.
+ACCOUNT_URL="http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/email"
+# How long the tool's apply, or a self-check, may take before it's stopped: a tool
+# that hangs would hold this boot and the lock the rollback needs. startup.sh's too.
+TOOL_TIMEOUT="5m"
+SELF_CHECK_TIMEOUT="2m"
 ALLOY_DATA="/var/lib/alloy/data"
 FULL_PERCENT=90
 # ruleset.sh's exit status when it rolled back and is rebooting.
@@ -114,10 +121,13 @@ tool_in_namespace() {
 # tool_self_check <tool>: startup.sh's, the same checks, in a network namespace that's
 # gone when it ends, so nothing it loads reaches the live kernel.
 tool_self_check() {
-  local tool=$1 floor="${work}/floor.nft"
+  local tool=$1 floor="${work}/floor.nft" rc=0
   tool_whole "$tool" || { say "${tool} is cut short or won't parse"; return 1; }
-  "$tool" floor-rules >"$floor" 2>/dev/null || { say "${tool} won't render its floor"; return 1; }
-  unshare --net bash -c "$(declare -f say tool_in_namespace); tool_in_namespace \"\$@\"" bash "$tool" "$floor"
+  timeout -k 10s "$SELF_CHECK_TIMEOUT" "$tool" floor-rules >"$floor" 2>/dev/null || { say "${tool} won't render its floor"; return 1; }
+  timeout -k 10s "$SELF_CHECK_TIMEOUT" \
+    unshare --net bash -c "$(declare -f say tool_in_namespace); tool_in_namespace \"\$@\"" bash "$tool" "$floor" || rc=$?
+  [[ "$rc" != 124 && "$rc" != 137 ]] || say "its self-check took longer than ${SELF_CHECK_TIMEOUT}, and was stopped"
+  return "$rc"
 }
 
 # install_tool <file>: in the tool's place, whole or not at all: a temp file beside it,
@@ -164,28 +174,48 @@ fall_back() {
   install_tool "$TOOL_LAST_GOOD"
 }
 
-# apply_tool: the tool's own way to sshd, through its gate. Exits here when a rollback
-# finished and the VM is rebooting; else apply's exit status.
+# apply_tool: the tool's own way to sshd, through its gate, within TOOL_TIMEOUT. Exits
+# here when a rollback finished and the VM is rebooting; else apply's exit status.
 apply_tool() {
   local rc
-  "$RULESET_TOOL" apply 2>&1 | quote
+  timeout -k 10s "$TOOL_TIMEOUT" "$RULESET_TOOL" apply 2>&1 | quote
   rc=${PIPESTATUS[0]}
   if [[ "$rc" -eq "$RULESET_REBOOTING" ]]; then
     say "a rollback finished: rebooting, and this script runs once more"
     exit 0
   fi
+  [[ "$rc" != 124 && "$rc" != 137 ]] || say "${RULESET_TOOL} apply took longer than ${TOOL_TIMEOUT}, and was stopped"
   return "$rc"
 }
 
+# stop_ungated_sshd: sshd up with no guard, on a VM that may have an account, which is
+# what a boot leaves with the tool and sshd's drop-in both gone: systemd starts sshd
+# before any startup script, and with no drop-in nothing gates it. Stopped, as nothing
+# may run with a token and no guard. By the guard's name, as there's no tool to ask.
+stop_ungated_sshd() {
+  local code
+  sshd_active || return 0
+  nft list chain inet metadata_guard metadata >/dev/null 2>&1 && return 0
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --retry 2 --retry-connrefused \
+    -H 'Metadata-Flavor: Google' "$ACCOUNT_URL" 2>/dev/null || true)"
+  [[ "$code" != 404 ]] || return 0
+  say "sshd is up with no guard, on a VM that may have an account: stopping it"
+  systemctl stop ssh.service 2>&1 | quote
+}
+
 # Only the tool starts sshd, through its gate. With no usable tool, sshd isn't asked
-# for at all: nothing would gate it.
+# for at all, nothing would gate it, and one the boot left up with no guard is stopped.
+# A tool that fails gives way to its last good copy, which sets its units up again, as
+# at a boot, before it's asked.
 ask_for_sshd() {
   if ! tool_whole "$RULESET_TOOL"; then
     say "no usable ${RULESET_TOOL}: loading the guard, and not asking for sshd, as nothing would gate it (rerun scripts/bootstrap.sh)"
     systemctl start nftables.service 2>&1 | quote
+    stop_ungated_sshd
     return 0
   fi
   if ! apply_tool && fall_back; then
+    timeout -k 10s "$TOOL_TIMEOUT" "$RULESET_TOOL" setup 2>&1 | quote
     apply_tool || true
   fi
 }

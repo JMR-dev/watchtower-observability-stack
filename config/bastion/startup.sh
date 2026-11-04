@@ -66,6 +66,12 @@ RULESET_TOOL="/usr/local/sbin/watchtower-ruleset"
 # The last copy of it that passed its self-check and brought sshd up through its gate.
 # recovery.sh names it too.
 TOOL_LAST_GOOD="/usr/local/sbin/watchtower-ruleset.last-good"
+# ruleset.sh's record of a trial that is pending: nothing is promoted while it's there.
+PENDING_TRIAL="/var/lib/watchtower-bastion/pending"
+# How long the tool's setup or apply may take at a boot before it's stopped and, for
+# apply, the last good copy takes over; and the self-check of a new tool.
+TOOL_TIMEOUT="5m"
+SELF_CHECK_TIMEOUT="2m"
 # ruleset.sh's exit status when it rolled back and is rebooting.
 RULESET_REBOOTING=75
 # This boot's run nonce, from metadata, for ruleset.sh's guest attributes and the
@@ -163,13 +169,18 @@ put() {
 # two units as well. systemd-sysctl applies the file at every later boot, before any
 # login; this applies it now. Warns, never fails: a kernel without the knob keeps
 # sshd up.
+#
+# What came of it is kept in userns_state, off or on, for report_userns to tell
+# bootstrap, which warns when it's on.
 userns_off() {
+  userns_state=on
   printf '%s\n' '# config/bastion/startup.sh: user namespaces for root alone.' \
     'kernel.unprivileged_userns_clone = 0' >"${work}/userns.conf"
   # A subshell, as put dies on a failure.
   (put "${work}/userns.conf" "$USERNS_CONF" 0644 root) || true
   sysctl -q -p "$USERNS_CONF" >/dev/null 2>&1 || true
   if [[ "$(cat "$USERNS_KNOB" 2>/dev/null)" == 0 ]]; then
+    userns_state=off
     log "unprivileged user namespaces: off"
   else
     warn "unprivileged user namespaces may be on: ${USERNS_KNOB} isn't 0"
@@ -199,10 +210,11 @@ guard_refuses_users() { "$RULESET_TOOL" refuses-users >/dev/null 2>&1; }
 # would have no way back, and sshd's gate is that tool. So:
 #   - a tool from metadata goes in only once it has passed its self-check
 #     (tool_self_check), and one that fails it never runs, even with no other tool;
-#   - a tool that brings sshd up through its gate at a boot, and passes the self-check,
-#     becomes the last good copy (promote_tool);
-#   - a tool that fails at a boot gives way to the last good copy, which then has the
-#     boot to itself (fall_back). sshd still starts only through the gate.
+#   - a tool that has brought sshd up through its gate at a boot with no ruleset trial
+#     pending, and passes the self-check, becomes the last good copy (promote_tool);
+#   - a tool that fails at a boot, or takes longer than TOOL_TIMEOUT there, gives way
+#     to the last good copy, which then has the boot to itself (fall_back). sshd still
+#     starts only through the gate.
 # recovery.sh uses the last good copy the same way.
 
 # tool_whole <file>: executable, parses, and ends as the tool ends: a file cut at a
@@ -232,10 +244,13 @@ tool_in_namespace() {
 # kernel. Asked by this script rather than of the tool about itself, through the
 # commands the units and sshd's gate use. Says why it failed.
 tool_self_check() {
-  local tool=$1 floor="${work}/floor.nft"
+  local tool=$1 floor="${work}/floor.nft" rc=0
   tool_whole "$tool" || { warn "${tool} is cut short or won't parse"; return 1; }
-  "$tool" floor-rules >"$floor" 2>/dev/null || { warn "${tool} won't render its floor"; return 1; }
-  unshare --net bash -c "$(declare -f warn tool_in_namespace); tool_in_namespace \"\$@\"" bash "$tool" "$floor"
+  timeout -k 10s "$SELF_CHECK_TIMEOUT" "$tool" floor-rules >"$floor" 2>/dev/null || { warn "${tool} won't render its floor"; return 1; }
+  timeout -k 10s "$SELF_CHECK_TIMEOUT" \
+    unshare --net bash -c "$(declare -f warn tool_in_namespace); tool_in_namespace \"\$@\"" bash "$tool" "$floor" || rc=$?
+  [[ "$rc" != 124 && "$rc" != 137 ]] || warn "its self-check took longer than ${SELF_CHECK_TIMEOUT}, and was stopped"
+  return "$rc"
 }
 
 # take_tool <file>: the tool from metadata, in place of the one on disk, if it passed
@@ -270,10 +285,39 @@ fall_back() {
   cmp -s "$TOOL_LAST_GOOD" "$RULESET_TOOL"
 }
 
-# promote_tool: the tool that brought sshd up through its gate at this boot becomes the
-# last good copy, once it has passed the self-check too. Never fails.
+# no_account: the metadata server says this VM has no account, so no token to guard.
+# Only a 404 says so: anything else may be a VM with a token.
+no_account() {
+  [[ "$(get "${MDS}/instance/service-accounts/default/email" "${work}/account-email" -H 'Metadata-Flavor: Google')" == 404 ]]
+}
+
+# tool_proved: what this boot has shown of the tool, beyond its self-check: sshd is
+# active, through the gate as it stands now (the guard in the kernel, or no account
+# and so no token), and no ruleset trial is pending, whose confirmation or rollback the
+# tool hasn't run yet. A tool whose apply ends at once, starting nothing, shows none of
+# it. Says why not.
+tool_proved() {
+  if [[ -e "$PENDING_TRIAL" ]]; then
+    warn "a ruleset trial is pending, so ${RULESET_TOOL} isn't kept as the last good copy before a boot after it"
+    return 1
+  fi
+  if ! systemctl is-active --quiet ssh.service; then
+    warn "sshd isn't active, so ${RULESET_TOOL} isn't kept as the last good copy"
+    return 1
+  fi
+  if ! guard_loaded && ! no_account; then
+    warn "no guard in the kernel, on a VM that may have an account, so ${RULESET_TOOL} isn't kept as the last good copy"
+    return 1
+  fi
+}
+
+# promote_tool: the tool becomes the last good copy once this boot has shown it works
+# (tool_proved) and it has passed the self-check too. Never fails. With a trial pending
+# nothing is promoted, so a first install has no last good copy until a boot after its
+# trial has ended.
 promote_tool() {
   [[ -f "$TOOL_LAST_GOOD" ]] && cmp -s "$RULESET_TOOL" "$TOOL_LAST_GOOD" && return 0
+  tool_proved || return 0
   if ! tool_self_check "$RULESET_TOOL"; then
     warn "${RULESET_TOOL} failed its self-check, so it isn't kept as the last good copy"
     return 0
@@ -282,29 +326,34 @@ promote_tool() {
 }
 
 # run_tool <ruleset file, or nothing> <retry>: its units, then the ruleset, ending with
-# sshd up or a reason it isn't. apply's exit status.
+# sshd up or a reason it isn't. apply's exit status. Each within TOOL_TIMEOUT: a tool
+# that hangs at a boot would otherwise hold the boot, and the lock the rollback needs.
+# timeout ends the tool's whole process group, so nothing of it keeps that lock.
 run_tool() {
+  local rc=0
   # Without its timer no trial starts, so a failure here costs only that.
-  "$RULESET_TOOL" setup || warn "could not set up ${RULESET_TOOL}'s units"
+  timeout -k 10s "$TOOL_TIMEOUT" "$RULESET_TOOL" setup || warn "could not set up ${RULESET_TOOL}'s units"
   if [[ -n "$1" ]]; then
-    "$RULESET_TOOL" apply "$1" "$2"
+    timeout -k 10s "$TOOL_TIMEOUT" "$RULESET_TOOL" apply "$1" "$2" || rc=$?
   else
     warn "no watchtower-nftables in metadata; the ruleset on disk stays"
-    "$RULESET_TOOL" apply
+    timeout -k 10s "$TOOL_TIMEOUT" "$RULESET_TOOL" apply || rc=$?
   fi
+  [[ "$rc" != 124 && "$rc" != 137 ]] || warn "${RULESET_TOOL} apply took longer than ${TOOL_TIMEOUT}, and was stopped"
+  return "$rc"
 }
 
 # keep_run_nonce: the run nonce scripts/bootstrap.sh put in metadata while the VM was
 # stopped (the owner's decision, 2026-11-04), kept for root alone, for every guest
 # attribute this boot writes: bootstrap counts only values with its own. None, or not
-# one: no file, and they carry "-".
+# one: no file, and they carry "-". 0600 whatever umask this runs with, and never by
+# writing into a file that was there.
 keep_run_nonce() {
   local nonce
   nonce="$(mds instance/attributes/watchtower-run-nonce 2>/dev/null || true)"
+  rm -f "$RUN_NONCE"
   if [[ "$nonce" =~ ^[0-9a-f]{32}$ ]]; then
-    printf '%s\n' "$nonce" >"$RUN_NONCE" || warn "could not keep this boot's run nonce"
-  else
-    rm -f "$RUN_NONCE"
+    (umask 077 && printf '%s\n' "$nonce" >"$RUN_NONCE") || warn "could not keep this boot's run nonce"
   fi
 }
 
@@ -328,8 +377,11 @@ guard() {
   else
     warn "no watchtower-ruleset in metadata; using the one on disk"
   fi
+  # Nothing here then asks for sshd: it stays as the boot left it. That's down, at a
+  # boot with sshd's drop-in, whose gate needs the tool; and up, ungated, on a first
+  # install or a new VM, which has no drop-in yet and no account, so no token to guard.
   tool_whole "$RULESET_TOOL" || restore_last_good ||
-    die "no usable ${RULESET_TOOL} and no last good copy, so no way to load the guard: sshd stays down"
+    die "no usable ${RULESET_TOOL} and no last good copy, so no way to load the guard, and nothing here asks for sshd: it stays as the boot left it"
   retry="$(mds instance/attributes/watchtower-nftables-retry 2>/dev/null || true)"
   if mds_file instance/attributes/watchtower-nftables "${work}/nftables.conf" && [[ -s "${work}/nftables.conf" ]]; then
     ruleset="${work}/nftables.conf"
@@ -346,16 +398,29 @@ guard() {
   esac
 }
 
+# put_word <key> <value>: the guest attribute watchtower/<key>, as
+# `<value> boot <boot id> run <run nonce>`, which is how bootstrap reads them.
+put_word() {
+  curl -fsS -o /dev/null --max-time 5 --retry 2 --retry-connrefused -X PUT -H 'Metadata-Flavor: Google' \
+    --data "$2 boot $(cat /proc/sys/kernel/random/boot_id) run $(run_nonce)" "${MDS}/instance/guest-attributes/watchtower/$1"
+}
+
 # Which tool this boot runs, in a guest attribute, by its sha256: bootstrap reports
 # success only if it's the one it put in metadata, so a tool that failed its
-# self-check, or gave way to the last good copy, can't pass unseen.
+# self-check, or gave way to the last good copy, can't pass unseen. ruleset.sh says it
+# again whenever it says confirmed, so a lost word comes back with a login.
 report_tool() {
   local sha
   sha="$(sha256sum <"$RULESET_TOOL" 2>/dev/null | cut -d' ' -f1)" || sha=""
   [[ -n "$sha" ]] || { warn "could not read ${RULESET_TOOL} to report it"; return 0; }
-  curl -fsS -o /dev/null --max-time 5 --retry 2 --retry-connrefused -X PUT -H 'Metadata-Flavor: Google' \
-    --data "${sha} boot $(cat /proc/sys/kernel/random/boot_id) run $(run_nonce)" "${MDS}/instance/guest-attributes/watchtower/tool" ||
-    warn "could not put the tool in the guest attribute"
+  put_word tool "$sha" || warn "could not put the tool in the guest attribute"
+}
+
+# Whether unprivileged user namespaces are off at this boot (userns_off), in a guest
+# attribute: bootstrap warns when they're on, as the journal alone would say it to
+# no one.
+report_userns() {
+  put_word userns "${userns_state:-on}" || warn "could not put user namespaces in the guest attribute"
 }
 
 # What scripts/bootstrap.sh waits for, in a guest attribute: any user can put a
@@ -647,6 +712,7 @@ main() {
   userns_off
   guard
   report_tool
+  report_userns
   if guard_loaded; then
     log "metadata guard loaded"
   else
