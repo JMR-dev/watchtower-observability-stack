@@ -2382,8 +2382,24 @@ check "tool, self-check with no account: a correct tool passes" test "$self_chec
 check "tool, self-check: the live ruleset is as it was" test "$(nft list ruleset)" = "$live_ruleset_before"
 check "tool, self-check: the live lo is as it was" test "$(ip -o addr show dev lo)" = "$live_lo_before"
 refute "tool, self-check: no metadata address left on the live lo" grep -q '169\.254\.169\.254' <<<"$(ip -4 addr show dev lo)"
-[[ -z "$metadata_on_lo" ]] || ip addr add 169.254.169.254/32 dev lo 2>/dev/null
 [[ "$self_check_rc" == 0 ]] || echo "      self-check said: ${self_check_out//$'\n'/ }"
+# The same with nothing in the live kernel and a VM with an account, where a self-check
+# run in the live namespace would get as far as loading its floor and putting the
+# metadata server's address on lo (as the review saw): it must leave both as they were.
+nft flush ruleset
+echo 200 >"${stubs}/account-code"
+live_ruleset_before="$(nft list ruleset)"
+live_lo_before="$(ip -o addr show dev lo)"
+(
+  export PATH="${stubs}:${PATH}"
+  work="$(mktemp -d)"
+  tool_self_check /tmp/tool-to-check >/dev/null 2>&1
+)
+self_check_rc=$?
+check "tool, self-check from an empty kernel: a correct tool passes" test "$self_check_rc" = 0
+check "tool, self-check from an empty kernel: the live ruleset is still empty" test "$(nft list ruleset)" = "$live_ruleset_before"
+check "tool, self-check from an empty kernel: the live lo is as it was" test "$(ip -o addr show dev lo)" = "$live_lo_before"
+[[ -z "$metadata_on_lo" ]] || ip addr add 169.254.169.254/32 dev lo 2>/dev/null
 # ... and so, at a first install's boot, the new tool goes in.
 tool_as "${variants}/older" none
 echo 404 >"${stubs}/account-code"
