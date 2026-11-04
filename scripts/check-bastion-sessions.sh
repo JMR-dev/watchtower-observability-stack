@@ -11,6 +11,8 @@
 #   a connection in pre-auth across the trial, which ssh.service's KillMode=process
 #                    leaves running: dies, and confirms nothing
 #   no change        a boot with no ruleset change touches no one's session
+#   no user namespaces, the container's limit at 0: a user can't make one, and a trial,
+#                    a login and its confirmation still work, as none of them needs one
 #
 #   scripts/check-bastion-sessions.sh
 #
@@ -234,6 +236,29 @@ refute "no change: the user's process is still there" none_of_the_users
 check "no change: sshd is up" sshd_is_up
 check "no change: the sessions are all there" test "$(loginctl list-sessions --no-legend --no-pager | wc -l)" = "$sessions_before"
 clear_user
+
+# No user namespaces at all: this container's own limit at 0, which stops root and
+# systemd too, so it's stricter than the bastion's kernel.unprivileged_userns_clone=0
+# (that knob is Debian's, and this kernel is the host's). A trial, a login and its
+# confirmation need none, and a user can't make one. Only where the limit can be set,
+# and only if a user could make one before, or the refusal would show nothing.
+settle
+userns_limit="$(cat /proc/sys/user/max_user_namespaces 2>/dev/null)"
+if ! runuser -u "$USER_NAME" -- unshare --user true 2>/dev/null; then
+  echo "skip  no user namespaces: a user can't make one here even with the limit as it is"
+elif ! echo 0 >/proc/sys/user/max_user_namespaces 2>/dev/null; then
+  echo "skip  no user namespaces: this container can't set user.max_user_namespaces"
+else
+  refute "no user namespaces: a user can't make one" runuser -u "$USER_NAME" -- unshare --user true
+  check "no user namespaces: a login works" login true
+  trial
+  check "no user namespaces: a trial says pending" word_is pending
+  check "no user namespaces: sshd is back" sshd_is_up
+  login "touch ${DROPBOX}/new"
+  check "no user namespaces: a new login confirms" wait_word confirmed 8
+  echo "$userns_limit" >/proc/sys/user/max_user_namespaces
+  clear_user
+fi
 exit "$fail"
 INSIDE
 

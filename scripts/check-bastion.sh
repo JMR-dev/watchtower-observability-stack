@@ -11,6 +11,10 @@
 #          them from all but wg, without echoing the config.
 #   apt    startup.sh recovers from an install a stop interrupted, and main
 #          prints what bootstrap.sh waits for only after apt is done.
+#   userns startup.sh turns unprivileged user namespaces off with Debian's own knob,
+#          for good and at once, before the guard, and warns rather than fails on a
+#          kernel without it. This container's kernel is the host's, so only the VM
+#          shows the knob itself.
 #   fetch  only a missing or empty secret takes telemetry down: any other
 #          failure to read it, and a config that fails its checks, leave the
 #          tunnel and Alloy as they are.
@@ -355,6 +359,7 @@ if installed jq no-such-package; then flunk "apt: installed says yes to a missin
 
 # main, with everything that touches the system stubbed: the order is the test.
 main_order="$(
+  userns_off() { echo userns; }
   updates() { echo updates; }
   guard() { echo guard; }
   guard_loaded() { return 0; }
@@ -368,11 +373,57 @@ main_order="$(
   curl() { [[ "$*" == *guest-attributes/watchtower/settled* ]] && echo settled-attribute; }
   main 2>/dev/null | tr '\n' ' '
 )"
-if [[ "$main_order" == "guard bastion: metadata guard loaded updates apt bastion: settled settled-attribute ping teardown " ]]; then
-  pass "apt: main says settled only after the guard and apt, the guard goes first, and the ping comes before anything of telemetry"
+if [[ "$main_order" == "userns guard bastion: metadata guard loaded updates apt bastion: settled settled-attribute ping teardown " ]]; then
+  pass "apt: main turns user namespaces off before anything else, says settled only after the guard and apt, the guard goes next, and the ping comes before anything of telemetry"
 else
   flunk "apt: main's order is: ${main_order}"
 fi
+
+# --- userns: unprivileged user namespaces off ---------------------------------
+# This container runs the host's kernel, not Debian's, so it has no such knob: a file
+# stands in for it, and sysctl for what the kernel does with the setting. Only the VM
+# shows the real knob at 0 and a user's `unshare --user` refused.
+# userns_case <name> <the knob's answer: takes, absent or refuses> <want: off or warned>
+userns_case() {
+  local name=$1 knob=$2 want=$3 dir out rc
+  dir="$(mktemp -d)"
+  out="$(
+    USERNS_CONF="${dir}/90-watchtower-userns.conf"
+    USERNS_KNOB="${dir}/knob"
+    work="$(mktemp -d)"
+    [[ "$knob" == absent ]] || echo 1 >"$USERNS_KNOB"
+    sysctl() {
+      echo "sysctl $*" >>"${dir}/calls"
+      [[ "$knob" == takes ]] || return 255
+      # The kernel takes what the file says.
+      sed -n 's/^kernel\.unprivileged_userns_clone = \([0-9]\)$/\1/p' "$3" >"$USERNS_KNOB"
+    }
+    userns_off 2>&1
+  )"
+  rc=$?
+  if [[ "$rc" != 0 ]]; then
+    flunk "userns ${name}: returned ${rc}"
+  elif [[ "$want" == off && "$out" != *"unprivileged user namespaces: off"* ]]; then
+    flunk "userns ${name}: doesn't say they're off: ${out}"
+  elif [[ "$want" == warned && "$out" != *"warning: unprivileged user namespaces may be on"* ]]; then
+    flunk "userns ${name}: doesn't warn: ${out}"
+  else
+    pass "userns ${name}: ${want}, and returns 0"
+  fi
+  userns_file="${dir}/90-watchtower-userns.conf"
+  userns_calls="$(cat "${dir}/calls" 2>/dev/null)"
+}
+userns_case "the knob takes it" takes off
+# The setting itself, for good: Debian's knob at 0, and nothing that stops root too.
+if [[ "$(grep -v '^#' "$userns_file")" == "kernel.unprivileged_userns_clone = 0" ]]; then
+  pass "userns: the file sets kernel.unprivileged_userns_clone = 0, and nothing else"
+else
+  flunk "userns: the file holds: $(cat "$userns_file" 2>/dev/null)"
+fi
+if [[ "$(stat -c '%a %U' "$userns_file")" == "644 root" ]]; then pass "userns: the file is root's, 0644"; else flunk "userns: the file is $(stat -c '%a %U' "$userns_file")"; fi
+if [[ "$userns_calls" == "sysctl -q -p ${userns_file}" ]]; then pass "userns: applied now, from that file"; else flunk "userns: sysctl was asked: ${userns_calls}"; fi
+userns_case "a kernel without the knob" absent warned
+userns_case "a kernel that refuses it" refuses warned
 
 # --- fetch: only a missing or empty secret takes telemetry down ----------------
 # fetch_case <name> <want> <email code> <token code> <secret code> <body>

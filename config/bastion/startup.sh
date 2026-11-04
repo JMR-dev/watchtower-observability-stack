@@ -7,6 +7,8 @@
 # or the VM's token: its output goes to the serial console and the journal,
 # which Alloy ships.
 #
+#   0. Unprivileged user namespaces off, for good (a file in /etc/sysctl.d), so
+#      no user gets one before this boot's sshd: users have no need of them.
 #   1. The metadata guard (nftables.conf): only root reaches the metadata
 #      server, so only root can use the VM's token. First, since sshd waits
 #      on it. A new ruleset goes on under a 10-minute rollback that a login
@@ -61,6 +63,9 @@ ALLOY_DROPIN="/etc/systemd/system/alloy.service.d/watchtower.conf"
 RULESET_TOOL="/usr/local/sbin/watchtower-ruleset"
 # ruleset.sh's exit status when it rolled back and is rebooting.
 RULESET_REBOOTING=75
+# Unprivileged user namespaces, off: Debian's own knob, and where it's set for good.
+USERNS_CONF="/etc/sysctl.d/90-watchtower-userns.conf"
+USERNS_KNOB="/proc/sys/kernel/unprivileged_userns_clone"
 
 log() { printf 'bastion: %s\n' "$*"; }
 warn() { printf 'bastion: warning: %s\n' "$*" >&2; }
@@ -138,6 +143,28 @@ put() {
   if ! mv -f "$tmp" "$dest"; then
     rm -f "$tmp"
     die "could not put ${dest} in place; what was there stays"
+  fi
+}
+
+# Unprivileged user namespaces off (the owner's decision, 2026-11-04): kernel attack
+# surface that no user here needs. Debian's own knob, which Debian 13's kernel has,
+# stops users alone: root and PID 1 still make them, as systemd does for
+# chrony-wait.service's and fstrim.service's PrivateUsers=, and as nothing else here
+# needs (sshd, OS Login, wg-quick, Alloy, and the guard's `unshare --net`, which is
+# root's and asks for no user namespace). user.max_user_namespaces=0 would stop those
+# two units as well. systemd-sysctl applies the file at every later boot, before any
+# login; this applies it now. Warns, never fails: a kernel without the knob keeps
+# sshd up.
+userns_off() {
+  printf '%s\n' '# config/bastion/startup.sh: user namespaces for root alone.' \
+    'kernel.unprivileged_userns_clone = 0' >"${work}/userns.conf"
+  # A subshell, as put dies on a failure.
+  (put "${work}/userns.conf" "$USERNS_CONF" 0644 root) || true
+  sysctl -q -p "$USERNS_CONF" >/dev/null 2>&1 || true
+  if [[ "$(cat "$USERNS_KNOB" 2>/dev/null)" == 0 ]]; then
+    log "unprivileged user namespaces: off"
+  else
+    warn "unprivileged user namespaces may be on: ${USERNS_KNOB} isn't 0"
   fi
 }
 
@@ -474,6 +501,7 @@ main() {
     return 0
   fi
 
+  userns_off
   guard
   if guard_loaded; then
     log "metadata guard loaded"
