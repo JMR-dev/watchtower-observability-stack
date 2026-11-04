@@ -331,14 +331,18 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
     tool: the boot says `the watchtower-ruleset in metadata failed its self-check`
     and why, and goes on with the tool it has.
   - **Kept once it has worked** (as the review fixed it, 2026-11-04). A tool becomes
-    the last good copy at a boot where its own `apply` went through to the end and
-    said its ruleset is `confirmed` (its word in `/run/watchtower-ruleset.word`, which
-    the startup script clears before the apply), sshd is active, the guard is in the
-    kernel (or the VM has no account, so no token), no ruleset trial is pending, and
-    it passes the self-check. sshd up and the guard on prove nothing alone: at a real
-    boot both are there before the new tool runs, through the tool before's gate and
-    nftables.service. So a tool whose `apply` ends at once, saying nothing, isn't
-    kept, even on a boot with no trial, as a run that changes only `ruleset.sh` has.
+    the last good copy at a boot where its own `apply` went through to its end with
+    its ruleset `confirmed` and sshd up, sshd is active, the guard is in the kernel (or
+    the VM has no account, so no token), no ruleset trial is pending, and it passes the
+    self-check. The proof of the apply is its own marker,
+    `/run/watchtower-ruleset.applied` (`confirmed <sha256 of the tool>`, root's,
+    0600). The startup script clears it before the apply, and only the apply writes
+    it, never a confirm, a rollback or anything else. ruleset.sh's word on its ruleset
+    won't do: a login's confirm during a do-nothing apply writes `confirmed` there too.
+    sshd up and the guard on prove nothing alone either: at a real boot both are there
+    before the new tool runs, through the tool before's gate and nftables.service. So a
+    tool whose `apply` ends at once, saying nothing, isn't kept, even on a boot with no
+    trial, as a run that changes only `ruleset.sh` has, and even with a login meanwhile.
     Neither is one with its trial still pending, whose confirmation or rollback it
     hasn't run yet, nor one at a boot whose apply said `pending`, `refused` or
     `failed`. So **a first install has no last good copy until its second boot**, the
