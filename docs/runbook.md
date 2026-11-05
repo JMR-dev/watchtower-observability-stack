@@ -401,9 +401,6 @@ reset the VM with no SSH at all. `config/bastion/recovery.sh` is that script, ke
 fixed and ready. It frees the disk if it's full, asks the ruleset's tool for sshd,
 which only ever starts it through the gate, and says where everything ended up.
 
-**Written by reading the code, and not yet tried on the real VM.** Try it once
-during the first rollout ("To try it", below), then remove this line.
-
 Run these from a checkout of what the bastion last got from bootstrap.
 
 1. **Put the script in metadata and reset.** This replaces `startup-script` and no
@@ -524,11 +521,9 @@ gcloud compute instances set-service-account watchtower-bastion --zone us-east1-
 gcloud compute instances start watchtower-bastion --zone us-east1-b --project watchtower-observe
 ```
 
-**To try it,** once, during the first rollout: after bootstrap has reported `Done`
-with the account attached, and not during a deploy with `ssh_via=bastion`, run steps
-1 to 4 on the healthy bastion. It should say `not full: removing nothing`, let you
-log in, and come back to `confirmed` and a ping. Then remove the "not yet tried"
-line above.
+**Tried once on the real VM** (2026-11-05, during the first rollout): steps 1 to 4
+on the healthy bastion said `not full: removing nothing`, let the owner log in, and
+came back to `confirmed` and a ping. The full-disk paths above are still untried.
 
 ## WireGuard peers
 
