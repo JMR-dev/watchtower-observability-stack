@@ -61,7 +61,7 @@ write telemetry, into the shared tenant `jasonmross`
 | Hosts | Updates, journald, SELinux, nftables, fail2ban, the wg1 mesh, the LUKS volume, gated reboots, Fluent Bit | `ansible/roles/{base,firewall,fail2ban,mesh,storage,reboot,logship}` |
 | Services | One role each; every container a quadlet in `/etc/containers/systemd` | `ansible/roles/{loki,mimir,kafka,tempo,etcd,patroni,grafana,edge}` |
 | Images | Caddy, wg-easy (on Alpine) and Patroni, built natively on the arm64 runner, checked and scanned. The Alpine images are rebuilt with the day's packages by the day's first deploy, and tagged version, Alpine release, revision and day | `build/`, `scripts/{image-tag,build-image,publish-image}.sh` |
-| Break glass | `watchtower-bastion`: a GCE e2-micro reached only through IAP with OS Login, whose Cloud NAT address the proxy admits for SSH; the way in when the VPN is down, and the deploy's when the proxy is rebuilt | `scripts/bootstrap.sh` (step 7), `scripts/ssh-config.sh` |
+| Break glass | `watchtower-bastion`: a GCE e2-micro reached only through IAP with OS Login, whose Cloud NAT address the proxy admits for SSH; the way in when the VPN is down, and the deploy's when the proxy is rebuilt. It ships its own telemetry as an agent peer, and only root on it may reach the metadata server | `scripts/bootstrap.sh` (step 7), `scripts/ssh-config.sh`, `config/bastion/`, `config/alloy/bastion.alloy` |
 
 ## Data flow
 

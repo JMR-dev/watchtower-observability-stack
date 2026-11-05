@@ -65,6 +65,11 @@ const (
 	BastionZone = "us-east1-b"
 )
 
+// BastionSA is the bastion's own service account, also made by
+// scripts/bootstrap.sh: it reads the bastion's agent peer and its Healthchecks.io
+// ping URL (BastionSecrets), and nothing else.
+const BastionSA = BastionName + "@" + GCPProject + ".iam.gserviceaccount.com"
+
 // NodeName is data node i (1-based).
 func NodeName(i int) string {
 	return fmt.Sprintf("watchtower-%d", i)
@@ -129,6 +134,11 @@ const (
 	// every run pings it, /fail when a job failed, and the daily run's
 	// absence alerts too.
 	SecretHealthchecksDeployURL = "healthchecks-deploy-url"
+	// The Healthchecks.io ping URL of the break-glass bastion
+	// (scripts/healthchecks.sh): the VM reads it itself, as BastionSA, and pings
+	// after each boot and every day (config/bastion/startup.sh). In BastionSecrets,
+	// never read by the deploy.
+	SecretHealthchecksBastionURL = "healthchecks-bastion-url"
 
 	// SecretGARPushKey is copied to the GAR_PUSH_KEY Actions secret by the
 	// owner (scripts/secret.sh gitea). The deployer is never granted it.
@@ -161,8 +171,9 @@ type AgentPeer struct {
 
 // AgentPeers are the agent peers, each at a fixed address in AgentCIDR.
 var AgentPeers = []AgentPeer{
-	// Fetched at boot by the bastion's own service account (made later).
-	{"bastion", "wireguard-bastion-peer", "10.8.0.129", ""},
+	// Fetched at boot by the bastion's own service account
+	// (config/bastion/startup.sh).
+	{"bastion", "wireguard-bastion-peer", "10.8.0.129", BastionSA},
 	// Fetched on the VM by its service account.
 	{"gitea-vm", "wireguard-gitea-vm-peer", "10.8.0.130", "gitea-vm@gitea-496920.iam.gserviceaccount.com"},
 	// Fetched by the deploy job, as the deployer of that project.
@@ -194,6 +205,11 @@ var DeployReadBackSecrets = []string{SecretWireGuardDeployPeer}
 // deployer (scripts/bootstrap.sh grants what deploy.yml reads).
 var OwnerOnlySecrets = []string{SecretGARPushKey, SecretHealthchecksAPIKey}
 
+// BastionSecrets are never read by the deploy either: the bastion reads them
+// itself, as BastionSA, and scripts/bootstrap.sh grants it each one. Its agent
+// peer is in AgentPeers.
+var BastionSecrets = []string{SecretHealthchecksBastionURL}
+
 // S3AccessKeySecret and S3SecretKeySecret name the two secrets holding one
 // Hetzner S3 credential: KeyAdmin or a Keys entry.
 func S3AccessKeySecret(key string) string { return "s3-" + key + "-access-key" }
@@ -207,7 +223,7 @@ func Secrets() []string {
 		SecretGrafanaAdminPassword, SecretGrafanaSecretKey, SecretGrafanaDBPassword,
 		SecretPostgresSuperuserPassword, SecretPostgresReplicationPassword, SecretPatroniRESTAPIPassword,
 		SecretWGEasyPassword, SecretCaddyDNSKey, SecretHealthchecksPGBackupURL, SecretHealthchecksHostURLs,
-		SecretHealthchecksDeployURL,
+		SecretHealthchecksDeployURL, SecretHealthchecksBastionURL,
 		SecretGARPushKey, SecretHealthchecksAPIKey,
 		SecretWireGuardOwnerPeer, SecretWireGuardDeployPeer,
 	}

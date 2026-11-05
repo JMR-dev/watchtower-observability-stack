@@ -195,6 +195,13 @@ func TestWorkflowReadsEverySecret(t *testing.T) {
 		}
 		ownerOnly[id] = true
 	}
+	// Read by the bastion, never by the deploy: as off limits to it as those.
+	for _, id := range BastionSecrets {
+		if !known[id] {
+			t.Errorf("bastion secret %s is not in Secrets()", id)
+		}
+		ownerOnly[id] = true
+	}
 	written := map[string]bool{}
 	for _, id := range DeployWrittenSecrets {
 		if !known[id] {
@@ -275,6 +282,90 @@ func TestBootstrapMakesTheBastion(t *testing.T) {
 		if m == nil || m[1] != want {
 			t.Errorf("bootstrap.sh %s = %v, want %q", v, m, want)
 		}
+	}
+	if !regexp.MustCompile(`(?m)^ensure_sa ` + strings.TrimSuffix(BastionSA, "@"+GCPProject+".iam.gserviceaccount.com") + ` "`).Match(b) {
+		t.Errorf("bootstrap.sh does not ensure_sa %s", BastionSA)
+	}
+}
+
+// scripts/bastion-confirm.sh logs in to the bastion the inventory names, and
+// leaves its file where the path unit in config/bastion/ruleset.sh watches: a
+// confirmation that goes elsewhere rolls the ruleset back.
+func TestBastionConfirmReachesTheBastion(t *testing.T) {
+	b, err := os.ReadFile("../../../scripts/bastion-confirm.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := os.ReadFile("../../../config/bastion/ruleset.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropbox := regexp.MustCompile(`(?m)^DROPBOX="([^"]*)"$`).FindSubmatch(r)
+	if dropbox == nil {
+		t.Fatal("ruleset.sh has no DROPBOX")
+	}
+	for v, want := range map[string]string{
+		"BASTION":      BastionName,
+		"BASTION_ZONE": BastionZone,
+		"GCP_PROJECT":  GCPProject,
+		"DROPBOX":      string(dropbox[1]),
+	} {
+		m := regexp.MustCompile(`(?m)^` + v + `="([^"]*)"$`).FindStringSubmatch(string(b))
+		if m == nil || m[1] != want {
+			t.Errorf("bastion-confirm.sh %s = %v, want %q", v, m, want)
+		}
+	}
+}
+
+// The bastion's startup script reads the bastion's own agent peer: the one
+// secret its service account may read.
+func TestBastionReadsItsOwnPeer(t *testing.T) {
+	b, err := os.ReadFile("../../../config/bastion/startup.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want string
+	for _, p := range AgentPeers {
+		if p.Reader == BastionSA {
+			want = "projects/" + GCPProject + "/secrets/" + p.Secret
+		}
+	}
+	m := regexp.MustCompile(`(?m)^PEER_SECRET="([^"]*)"$`).FindStringSubmatch(string(b))
+	if want == "" || m == nil || m[1] != want {
+		t.Errorf("startup.sh PEER_SECRET = %v, want %q", m, want)
+	}
+}
+
+// The bastion pings with the secret scripts/healthchecks.sh stores its check's
+// URL in, and scripts/bootstrap.sh makes that secret and lets the bastion read it:
+// under another name, the ping fails quietly and the check never starts.
+func TestBastionReadsItsOwnPingURL(t *testing.T) {
+	startup, err := os.ReadFile("../../../config/bastion/startup.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "projects/" + GCPProject + "/secrets/" + SecretHealthchecksBastionURL
+	m := regexp.MustCompile(`(?m)^PING_SECRET="([^"]*)"$`).FindStringSubmatch(string(startup))
+	if m == nil || m[1] != want {
+		t.Errorf("startup.sh PING_SECRET = %v, want %q", m, want)
+	}
+	healthchecks, err := os.ReadFile("../../../scripts/healthchecks.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(healthchecks), `secret.sh" put `+SecretHealthchecksBastionURL) {
+		t.Errorf("healthchecks.sh does not store %s", SecretHealthchecksBastionURL)
+	}
+	bootstrap, err := os.ReadFile("../../../scripts/bootstrap.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = regexp.MustCompile(`(?m)^bastion_readable=\(([a-z0-9 -]*)\)$`).FindStringSubmatch(string(bootstrap))
+	if m == nil {
+		t.Fatal("bootstrap.sh has no bastion_readable=(...) list")
+	}
+	if got := strings.Fields(m[1]); !reflect.DeepEqual(got, BastionSecrets) {
+		t.Errorf("bootstrap.sh bastion_readable = %v, want %v", got, BastionSecrets)
 	}
 }
 
