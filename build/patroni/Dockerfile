@@ -16,11 +16,20 @@ FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf56
 
 FROM docker.io/library/postgres:18.6@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
 LABEL org.opencontainers.image.version="4.1.5"
-LABEL watchtower.image.revision="1"
+LABEL watchtower.image.revision="2"
 
 ENV UV_PYTHON_INSTALL_DIR=/opt/python \
     UV_PYTHON_PREFERENCE=only-managed \
     UV_NO_CACHE=1
+
+# Debian's security fixes that the pinned base doesn't carry yet, one package at
+# a time: a blanket upgrade would also move PostgreSQL itself, whose packages
+# come from apt.postgresql.org in the base. Drop a line once the base has the
+# fix (postgres:18.6 rebuilt on Debian's update), and this step with the last.
+#   apt, libapt-pkg7.0: CVE-2026-109518, fixed in 3.0.4 (trixie-security).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends --only-upgrade apt libapt-pkg7.0 \
+ && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv /uv /usr/local/bin/uv
 COPY requirements.txt /tmp/requirements.txt
