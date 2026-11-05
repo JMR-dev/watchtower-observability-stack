@@ -26,7 +26,7 @@ gopass.
    scripts/secret.sh put hcloud-token
    scripts/secret.sh put healthchecks-pg-backup-url
    scripts/secret.sh put healthchecks-jasonmross-dev-api-key
-   scripts/healthchecks.sh   # a check per host and one for the deploy; stores their ping URLs
+   scripts/healthchecks.sh   # a check per host, one for the deploy, one for the bastion; stores their ping URLs
    for k in admin cluster; do
      scripts/secret.sh put "s3-$k-access-key"
      scripts/secret.sh put "s3-$k-secret-key"
@@ -49,7 +49,7 @@ gopass.
    the image registry, the secrets' access grants), then the four GCP keys:
    ```bash
    source scripts/env.sh
-   scripts/bootstrap.sh
+   scripts/bootstrap.sh                      # a new bastion: confirm its ruleset by hand when it asks (below)
    dig +short NS watchtower.jasonmross.dev   # four ns-cloud-* names
    scripts/rotate-gcp-key.sh deployer        # Actions secret GCP_DEPLOYER_KEY + gopass
    scripts/rotate-gcp-key.sh caddy           # secret caddy-dns-key
@@ -133,23 +133,251 @@ ssh -F ansible/inventory/ssh_config watchtower-proxy
 
 - **What it is:** `watchtower-bastion`, an e2-micro in us-east1-b, the free
   tier.
-  - It has no external address and no service account.
+  - It has no external address.
   - Its SSH is open only to IAP (35.235.240.0/20), with OS Login.
   - Its traffic leaves through Cloud NAT from the one address in
     `breakGlassCidrs`, the only public SSH source the proxy admits.
   - It installs security updates daily and reboots at 04:00 UTC when one
     needs it.
+  - It pings its Healthchecks.io check, `watchtower-bastion`, after each boot and
+    at 05:00 UTC every day, once its guard is verified loaded and sshd is active.
+    One that didn't come back from a reboot, or is up without either, emails by
+    07:00. The daily ping is there because the reboot comes only when an update
+    needs it, and a check pinged only at boot would have nothing to go overdue by.
+    The ping URL is a secret, `healthchecks-bastion-url`, which root reads with
+    the VM's token and hands to curl on stdin. A failed ping logs one line and
+    touches nothing else.
+  - It runs as `watchtower-bastion@`, which may read its own agent peer
+    (`wireguard-bastion-peer`) and that ping URL and nothing else, and ships its
+    journal and metrics to watchtower through `wg-watchtower`
+    (docs/client-telemetry.md).
+    Until its guard's ruleset is confirmed (below), it runs as no one and
+    ships nothing. Only a missing or empty `wireguard-bastion-peer` takes that
+    down: any other failure to read it warns and leaves the tunnel and Alloy
+    as they are. To revoke the bastion's peer, delete its client in wg-easy.
+  - Only root may reach the metadata server, and with it the VM's token:
+    nftables (`config/bastion/nftables.conf`) refuses every other uid but
+    for DNS, DHCP and NTP. `nft list chain inet metadata_guard metadata`
+    counts the refusals. A restart of `nftables.service` reloads and never
+    flushes it (a drop-in clears `ExecStop`). A ruleset that won't load at a
+    boot brings a small copy of the guard built into the tool, the floor,
+    before the network comes up.
+  - **A user the VM hasn't cached yet:** a non-root process looking up an OS Login
+    name that isn't in the VM's cache asks the metadata server and is refused, so
+    `id someone` or `ls -l` on their files says "no such user", at once. That's
+    expected, and no reason to open the guard. sshd, sudo, logind and PID 1 look up
+    as root, so logging in still works. To check on the real VM, below.
+  - sshd runs only with the guard in the kernel, or on a VM with no account
+    and so no token: `watchtower-ruleset gate`, before every start. It goes by the
+    guard's rules in the kernel, not only its name. A package upgrade of either
+    leaves both running. Nothing of a user's runs without a login, so nothing gets
+    past that gate: cron and at are root's, polkit refuses lingering, and any
+    crontab, at job or linger file from before is removed at every boot.
+  - **No unprivileged user namespaces** (the owner's decision, 2026-11-04):
+    `/etc/sysctl.d/90-watchtower-userns.conf` sets
+    `kernel.unprivileged_userns_clone = 0`, Debian's own knob, which Debian 13's
+    kernel has. It stops users alone: root and systemd still make them, as
+    `chrony-wait.service` and `fstrim.service` need for `PrivateUsers=`, which is
+    why it isn't `user.max_user_namespaces=0`, which would stop those too. sshd, OS
+    Login, wg-quick, Alloy and the guard need none (the guard's `unshare --net` is
+    root's and makes no user namespace). The startup script applies it first thing,
+    and `systemd-sysctl` at every later boot. It tells bootstrap in
+    `watchtower/userns` (`off` or `on`, with the boot and run nonce), and bootstrap
+    warns, without stopping, when they're on or it heard nothing. To check, as your
+    own user: `sysctl kernel.unprivileged_userns_clone` says 0, and
+    `unshare --user true` is refused.
+  - Its startup script (`config/bastion/startup.sh`) sets all of this up
+    at every boot; its output is in `journalctl -u google-startup-scripts`
+    and on the serial console, and never holds the peer config or the ping URL.
 - **Who may use it:** you (project owner), and `watchtower-deployer`, which
   has OS Login on that VM and an IAP tunnel to its port 22, nothing more.
   The deploy uses it when dispatched with `ssh_via=bastion`: when wg-easy
-  is down, the proxy is being rebuilt, or the environment is new.
+  is down, the proxy is being rebuilt, or the environment is new. OS Login
+  admits a user to a VM that runs as a service account only if they may act
+  as it, so bootstrap gives the deployer `roles/iam.serviceAccountUser` on
+  `watchtower-bastion@`. The guard is what keeps it from the VM's token.
 - **Rebuilding it:**
   - `scripts/bootstrap.sh` (step 7) makes the bastion, and writes its NAT
     address and SSH host key into `infra/cloud/Pulumi.prod.yaml`
     (`breakGlassCidrs`, `bastionHostKey`).
+  - A change to `config/bastion/` or `config/alloy/bastion.alloy` reaches
+    it when you rerun bootstrap: it sets the bastion's metadata, stops it,
+    and starts it again. The boot disk, and with it the host key, stays;
+    anyone on the bastion then is cut off.
+  - The first time, or on a new bastion, that takes two restarts: bootstrap
+    attaches the account only once this boot has confirmed its ruleset (below)
+    and finished apt, and asks again of the boot with the account, so don't run
+    it during a deploy with `ssh_via=bastion`. Bootstrap goes by guest attributes
+    (`watchtower/boot`, `ruleset`, `settled`, `login`, `tool`, `userns`), which the guard keeps from
+    every uid but root, and never by the serial console, where any user can put
+    a line. On a VM with no guard yet a user could write them too, which is why
+    it asks again. Each carries the kernel's boot id, as a stop, a reset and a
+    reboot all leave the last boot's values behind.
+  - **Each also carries its boot's run nonce** (the owner's decision, 2026-11-04),
+    and bootstrap counts only values with its own. Each start a run makes gets a
+    fresh one in metadata (`watchtower-run-nonce`) while the VM is stopped, which the
+    startup script keeps in `/run` for root alone. So a value a user wrote on the
+    boot with no account, or planted there for the next boot to be taken by, can't
+    carry the nonce of the boot with the account: that one went in after the
+    unguarded boot had stopped, and the boot with the account has its guard from
+    early boot, before any user's process. Metadata is fine for it for that reason:
+    the boots that see a nonce before the guard are the ones whose word bootstrap
+    already doesn't trust. Anyone who may describe the VM can read it through the
+    API too, but writing an attribute takes the metadata server, from inside the VM,
+    as root. A run that starts nothing goes by the nonce its boot was started with,
+    and a VM with none is restarted to get one. Every start bootstrap makes gets a
+    fresh one, its exit trap's after a failure and that of a VM an earlier run left
+    stopped among them (the review's fix, 2026-11-04). If metadata won't take a fresh
+    one, the old one is removed, as the boot before may have shown it to its users,
+    and the next run starts the VM afresh.
+  - Every run ends by dispatching `bastion-confirm.yml` again, or asking you to do
+    it by hand, and waiting for a real login to reach the boot it ends on
+    (`watchtower/login`): on the boot with the account above all, as only a login
+    shows OS Login still lets anyone onto it. Only a login of this run counts (the
+    owner's decision, 2026-11-04): bootstrap makes a login nonce for each run, the
+    job (or the hand command it prints) leaves `/run/watchtower-ruleset/confirm-<nonce>`,
+    and the VM lists that nonce in `watchtower/login`. So a rerun can't be satisfied
+    by an earlier run's login, a session left from it, or its attribute. The login
+    that confirmed this run's ruleset on that boot counts too. It prints `Done` only
+    with the VM running, on the boot that said `confirmed` with this run's nonce, and
+    that login seen. The attribute keeps a boot's last eight login nonces, so a user
+    on the VM could push this run's out of it; once the wait has seen it on that boot,
+    the final check takes it as seen.
+  - If a run fails between a stop and its start, its exit trap starts the bastion
+    again, with a fresh run nonce, and keeps the failure. If that start fails too (no capacity in the zone,
+    a lost connection), break glass is down, and it says so. Rerun bootstrap, which
+    starts a stopped bastion first, or
+    `gcloud compute instances start watchtower-bastion --zone us-east1-b`.
   - To replace it: `gcloud compute instances delete watchtower-bastion
     --zone us-east1-b`, rerun bootstrap, commit `Pulumi.prod.yaml`, and
     deploy. The NAT address is reserved and stays; the host key changes.
+- **A new ruleset** (`config/bastion/ruleset.sh`): one that locked everyone
+  out would strand break glass, so a new one undoes itself.
+  - The boot that finds it in metadata tries it first in a network namespace of
+    its own, where nothing can see it: with the metadata server's addresses on `lo`
+    and something listening, root must connect and a user must not. Then it keeps
+    the old file, records the trial on disk, arms a 10-minute timer, and installs
+    it. It stops sshd, has the kernel kill everything under `user.slice` and under
+    `ssh.service`, and kills anything else at a login's uid (1000 and up). Then it
+    loads it and starts sshd. A reboot in those 10 minutes starts them again. A boot
+    with no change touches no one's session.
+  - Any login cancels it, no sudo needed: an interactive shell does so by
+    itself, or `touch /run/watchtower-ruleset/confirm`. Bootstrap's own login check
+    needs the file named by its run's nonce, which the command it prints has.
+    Nothing of a login's from
+    before the load counts, connections still in pre-auth included, as none of it is
+    left running. Root isn't held to that: a root process outside those two groups
+    could confirm, as it could do anything else. Bootstrap dispatches
+    `bastion-confirm.yml` for the branch it's run from, which logs in as the
+    deployer over IAP, and waits for `confirmed` in the guest attribute, which also
+    means sshd is active. The account goes on only after that, and bootstrap
+    reports success only if the boot it ends on has said `confirmed`. A login on a
+    full disk isn't lost: it keeps trying every 5 seconds until there's room or the
+    rollback fires.
+  - **The word didn't reach the attribute** (a network blip at that moment): the VM
+    is fine, and bootstrap stops with "reported nothing final". A login says
+    `confirmed` again, if that's still true: nothing pending, the file on disk the
+    confirmed one, the guard on and sshd active. So does a boot:
+    `gcloud compute instances reset watchtower-bastion --zone us-east1-b --project
+    watchtower-observe`. Then rerun bootstrap.
+  - No login in time: `rolled back`, the old file back, the new one's sha256
+    recorded as rejected so the next boot leaves it alone, and a reboot. Bootstrap
+    stops there, with the VM on the old ruleset and, if it has no account yet,
+    running as no one. It says so again at every boot while metadata holds that
+    file.
+  - **Gitea down, or the dispatch fails:** bootstrap says so. It prints the
+    command to confirm by hand whenever a ruleset goes pending, which any account
+    with OS Login on the VM may run. Otherwise the rollback is what happens.
+  - **To recover, rerun bootstrap.** A fixed file has a new sha256 and is tried
+    afresh. The same file is tried again too, since nothing need be wrong with
+    it: bootstrap asks for it once more (`watchtower-nftables-retry` in
+    metadata).
+  - **A file that won't load, or doesn't do a guard's job,** never goes on, whatever
+    its comments say: `refused`, what runs now stays, and bootstrap stops, on a
+    rerun too.
+  - **A first install** has no old ruleset, and the VM has no account yet, so
+    no token to guard. Rollback puts back the package's empty ruleset, and sshd
+    still runs, on the floor, so break glass stays up. A new environment's first
+    run has no `GCP_DEPLOYER_KEY` yet (`rotate-gcp-key.sh deployer` comes after
+    bootstrap), so the job can't log in: confirm by hand when bootstrap prints how.
+  - **A rollback the disk won't take** (`failed`, on a full or read-only disk):
+    the old ruleset goes into the kernel at once, and that needs no disk, so sshd
+    keeps running on it. The trial's file stays on disk with its record, nothing
+    new goes on, and the rollback retries every minute with no reboot, then
+    reboots once it works. A login can't confirm it now. A fixed file in metadata
+    can't help, as it needs the same disk. The way in is a startup script that frees
+    the disk: "The bastion with SSH gone", below.
+  - **The guard won't load at a boot with no change:** `failed`, and bootstrap
+    stops. The floor came on before the network, or the startup script loads the
+    old ruleset into the kernel, and sshd starts on that, so the VM stays guarded
+    and reachable. A file that has stopped loading never becomes the old ruleset:
+    the last one that loaded stays the way back. The next boot tries the current
+    file again.
+  - **nft loads nothing at all, not even the floor,** on a VM with an account:
+    sshd stays down, since nothing may run with a token and no guard. The way back
+    is new metadata: rerun bootstrap with a ruleset that loads, or "The bastion
+    with SSH gone", below, which also says why it's down. The serial console only
+    reads.
+- **A new ruleset tool** (`config/bastion/ruleset.sh`, the owner's decision,
+  2026-11-04): the dead man's switch covers a new ruleset, not a bug in the tool
+  that runs it, and sshd's gate is that tool. So it has a last good copy,
+  `/usr/local/sbin/watchtower-ruleset.last-good`.
+  - **A self-check before it goes in.** The startup script asks the tool from
+    metadata, in a network namespace of its own: with no rules, `loaded` must say no
+    and `gate` must keep sshd down (the metadata server is out of reach there); its
+    floor, printed by `floor-rules`, must pass `nft --check`, and `probe` must show it
+    guards (root reaches the server's addresses, a user doesn't); and with it on,
+    `gate` must let sshd run. One that fails never goes in, even with no other
+    tool: the boot says `the watchtower-ruleset in metadata failed its self-check`
+    and why, and goes on with the tool it has.
+  - **Kept once it has worked** (as the review fixed it, 2026-11-04). A tool becomes
+    the last good copy at a boot where its own `apply` went through to its end with
+    its ruleset `confirmed` and sshd up, sshd is active, the guard is in the kernel (or
+    the VM has no account, so no token), no ruleset trial is pending, and it passes the
+    self-check. The proof of the apply is its own marker,
+    `/run/watchtower-ruleset.applied` (`confirmed <sha256 of the tool>`, root's,
+    0600). The startup script clears it before the apply, and only the apply writes
+    it, never a confirm, a rollback or anything else. ruleset.sh's word on its ruleset
+    won't do: a login's confirm during a do-nothing apply writes `confirmed` there too.
+    sshd up and the guard on prove nothing alone either: at a real boot both are there
+    before the new tool runs, through the tool before's gate and nftables.service. So a
+    tool whose `apply` ends at once, saying nothing, isn't kept, even on a boot with no
+    trial, as a run that changes only `ruleset.sh` has, and even with a login meanwhile.
+    Neither is one with its trial still pending, whose confirmation or rollback it
+    hasn't run yet, nor one at a boot whose apply said `pending`, `refused` or
+    `failed`. So **a first install has no last good copy until its second boot**, the
+    one after its trial ends: until then a tool that fails has nothing to fall back to,
+    as before this change.
+  - **A tool that fails at a boot** (its `apply` ends with sshd not allowed or not
+    up), or whose `apply` takes over 5 minutes (`took longer than 5m, and was
+    stopped`), gives way to the last good copy, which sets its units up again and has
+    the boot to itself: `falling back to its last good copy`. The time limit ends
+    the tool's whole process group, so nothing of it keeps the lock the rollback
+    needs. The self-check has a limit of 2 minutes. sshd still starts only through
+    the gate. That happens at each boot while metadata holds the new tool. With no
+    last good copy the boot stops there, and nothing more asks for sshd: it stays as
+    the boot left it, down through the gate, or, on a first install or a new VM with
+    no drop-in yet, up and ungated on a VM with no account, so no token to guard. With
+    no usable tool at all and the drop-in gone too, an sshd the boot left up with no
+    guard, on a VM that may have an account, is stopped first, by the same check
+    `recovery.sh` makes.
+  - **A trial cut short by the time limit** rolls back at 10 minutes, as any
+    unconfirmed trial does, and bootstrap stops on `rolled back` (or `failed`). Its
+    message says to look for `apply took longer than` in the serial output: then the
+    tool hung, and a retry would hang the same way, so fix `ruleset.sh`, not
+    `nftables.conf`.
+  - **Bootstrap hears of either:** the VM reports the sha256 of the tool it runs in
+    `watchtower/tool`, with its boot and run nonce, and bootstrap prints `Done` only
+    if it's the `ruleset.sh` it put in metadata. Otherwise it stops and says so: see
+    the serial output, fix `ruleset.sh`, and rerun. Two other causes: the file coming
+    back from metadata changed by a byte (then the sha256 in `watchtower/tool` is the
+    tool's as fetched, and the serial output shows no self-check failure or
+    fallback), or the VM's word lost on the way to the attribute. The startup script
+    keeps the word it said, in `/run/watchtower-ruleset.tool` (root's alone), and the
+    tool says it again with every `confirmed`, so a login (the hand command) or a reset
+    says it again; then rerun. The word is kept only once that boot's apply ended
+    well, so a login never says it for a tool whose apply failed.
+  - A tool on disk gone or cut short comes back from the last good copy.
 
 Every service is a quadlet: `/etc/containers/systemd/<name>.container`
 generates `<name>.service`.
@@ -162,6 +390,140 @@ podman ps
 
 Change a service through its role and a deploy, never by hand: the next
 deploy would put it back.
+
+### The bastion with SSH gone
+
+New metadata is the way in. The serial console is for reading only: the bastion
+has only OS Login users and no local password, so a console's login prompt has
+no credential to accept, and it isn't getting one. A startup script needs no
+login: GCE runs it as root at the next boot, and `gcloud` can put it there and
+reset the VM with no SSH at all. `config/bastion/recovery.sh` is that script, kept
+fixed and ready. It frees the disk if it's full, asks the ruleset's tool for sshd,
+which only ever starts it through the gate, and says where everything ended up.
+
+Run these from a checkout of what the bastion last got from bootstrap.
+
+1. **Put the script in metadata and reset.** This replaces `startup-script` and no
+   other key. The reset is immediate; the disk and host key stay, and anyone on
+   the bastion is cut off.
+   ```bash
+   gcloud compute instances add-metadata watchtower-bastion --zone us-east1-b --project watchtower-observe \
+     --metadata-from-file startup-script=config/bastion/recovery.sh
+   gcloud compute instances reset watchtower-bastion --zone us-east1-b --project watchtower-observe
+   ```
+   The guard and the gate don't depend on the startup script: their units are on
+   disk, so that boot loads the guard and asks the gate as any other does.
+2. **Read what it says,** a minute or two after the reset. This needs no login and
+   no `serial-port-enable`. The output keeps earlier boots, so read from the last
+   `start:` line.
+   ```bash
+   gcloud compute instances get-serial-port-output watchtower-bastion --zone us-east1-b --project watchtower-observe --port 1 |
+     grep 'bastion-recovery:'
+   ```
+   With nothing full, you should see:
+   ```
+   bastion-recovery: start: 2026-11-02 04:10:11 UTC
+   bastion-recovery: disk: 41% of / used, 9% of its inodes
+   bastion-recovery: not full: removing nothing
+   bastion-recovery: guard: loaded
+   bastion-recovery: sshd: active
+   bastion-recovery: disk: 41% of / used, 9% of its inodes
+   bastion-recovery: done
+   ```
+3. **Log in.** That is the proof: anyone on the VM can put a line on the console,
+   though the reset has just put them out.
+   ```bash
+   gcloud compute ssh watchtower-bastion --zone us-east1-b --project watchtower-observe --tunnel-through-iap
+   sudo journalctl -b -u nftables -u ssh -u google-startup-scripts   # what happened
+   ```
+4. **Put the normal startup script back.** Until you do, every boot runs the fixed
+   script instead: harmless, but no new ruleset, peer or Alloy config reaches the
+   VM. What's running keeps running, and the daily ping goes on, from its copy on
+   disk.
+   ```bash
+   gcloud compute instances add-metadata watchtower-bastion --zone us-east1-b --project watchtower-observe \
+     --metadata-from-file startup-script=config/bastion/startup.sh
+   gcloud compute instances reset watchtower-bastion --zone us-east1-b --project watchtower-observe
+   gcloud compute instances get-guest-attributes watchtower-bastion --zone us-east1-b --project watchtower-observe \
+     --query-path watchtower/ruleset
+   ```
+   The attribute should say `confirmed`, with the sha256 of
+   `config/bastion/nftables.conf` and a time after the reset. The console should say
+   `bastion: pinged the Healthchecks.io check`. Or rerun bootstrap instead of those
+   commands: it sees the metadata differ, stops the VM, sets it, starts it and waits
+   for that word itself. After a rollback, rerun bootstrap either way: it's what
+   asks for the rejected file again.
+
+**A full disk** (`failed` in the guest attribute, "A rollback the disk won't take"
+above, or logins failing for want of room): the same four steps. Over 90% used, in
+blocks or inodes, the script empties apt's cache, old rotated logs and the journal
+past 64M, and says so:
+
+```
+bastion-recovery: disk: 100% of / used, 12% of its inodes
+bastion-recovery: over 90%: emptying apt's cache, old rotated logs and the journal past 64M
+bastion-recovery: disk: 58% of / used, 11% of its inodes
+```
+
+- **If a rollback was stuck,** it now finishes and the VM reboots:
+  `bastion: ruleset rolled back <sha256> at <epoch>`, then
+  `a rollback finished: rebooting, and this script runs once more`, and a second
+  run from `start:` to `done`. The rollback's own retry may get there first, and
+  then that second run comes without those two lines. Then step 3, step 4, and rerun
+  bootstrap.
+- **Still over 90%:** Alloy's buffer goes next, so what it hadn't shipped is lost,
+  and then the script lists the largest paths. It never removes a user's files.
+  Copy it, add a line that removes what you've read there, at the top of `main`,
+  and repeat from step 1 with the copy.
+- **No `bastion-recovery:` line at all after 5 minutes:** the guest agent writes the
+  script to disk before running it, so a disk with not a byte free may never run
+  it. Grow the disk, which needs no room on it and can't be undone (the free tier
+  covers 30 GB of standard disk), then read on from step 2. Debian's GCE image
+  should grow its root filesystem to fit at boot, and the `disk:` lines will show
+  whether it did; this is the least proven line here.
+  ```bash
+  gcloud compute disks resize watchtower-bastion --zone us-east1-b --project watchtower-observe --size 20GB
+  gcloud compute instances reset watchtower-bastion --zone us-east1-b --project watchtower-observe
+  ```
+
+**`sshd: NOT active`:** try step 4 first, the normal startup script. It puts the
+ruleset's tool and the ruleset back from metadata and sets the units up again, which
+the fixed script doesn't. The fixed script restores a broken tool too: from its last
+good copy (`restored it from its last good copy`), or else from metadata, only if
+that copy passes the same self-check as at a boot (`restored it from metadata`). A
+tool that fails, or whose `apply` takes over 5 minutes, gives way to its last good
+copy here too (`falling back to its last good copy`), which sets its units up again
+before it's asked, as at a boot.
+
+**It never gets sshd past the gate** (the owner's decision, 2026-11-04): only the tool
+starts sshd, through its gate, and with no usable tool the script doesn't ask for
+sshd at all (`not asking for sshd, as nothing would gate it`). That case is decided,
+not left open. With sshd's drop-in gone too, systemd will already have started sshd
+at the boot, ungated: if sshd is up, the guard isn't in the kernel (by its name) and
+the VM may have an account (the metadata server doesn't say 404), the script stops it
+(`sshd is up with no guard, on a VM that may have an account: stopping it`, as the
+review fixed it, 2026-11-04). With the guard there, or no account, it leaves sshd as
+the boot started it. If it said `could not restore it` because metadata has lost the
+tool, rerun bootstrap, which puts it back.
+
+If that doesn't do it, the lines under `why sshd isn't up:` hold `sshd -t` and the
+journal of `nftables` and `ssh`. The script has already reinstalled nftables once.
+For anything else, add the fix to a copy of the script and repeat from step 1. If it
+is `guard: NOT loaded`, because nft loads nothing at all, take the account off: on a
+VM with no token there's nothing to guard, so the gate lets sshd run. The tunnel and
+Alloy stay as they are, and the ping stops, so its check goes overdue. Once it's
+fixed, step 4 and a rerun of bootstrap, which attaches the account again over a
+confirmed ruleset.
+
+```bash
+gcloud compute instances stop watchtower-bastion --zone us-east1-b --project watchtower-observe
+gcloud compute instances set-service-account watchtower-bastion --zone us-east1-b --project watchtower-observe --no-service-account --no-scopes
+gcloud compute instances start watchtower-bastion --zone us-east1-b --project watchtower-observe
+```
+
+**Tried once on the real VM** (2026-11-05, during the first rollout): steps 1 to 4
+on the healthy bastion said `not full: removing nothing`, let the owner log in, and
+came back to `confirmed` and a ping. The full-disk paths above are still untried.
 
 ## WireGuard peers
 
@@ -189,8 +551,9 @@ Never move a person's peer into the agent half, or an agent's out of it.
 
 **Rekey an agent peer:** delete its client in the UI. The next deploy makes
 a new one and publishes it; each service picks it up on its next deploy or
-boot (Vaultwarden only on a dispatch). Then `scripts/secret.sh pull
-wireguard-<peer>-peer` for the gopass copy.
+boot (Vaultwarden only on a dispatch; the bastion at boot, or at once with
+`sudo google_metadata_script_runner startup` on it). Then
+`scripts/secret.sh pull wireguard-<peer>-peer` for the gopass copy.
 
 **Check the gating** after any change to it, from a host that is an agent
 peer (each must fail as shown, and a line pushed with any tenant must
@@ -348,7 +711,8 @@ It reports to the host's own Healthchecks.io check (`watchtower-proxy`,
 `scripts/healthchecks.sh` creates the checks (one per host from
 `nodeCount`; re-run it after changing that) and stores their ping URLs as
 `healthchecks-host-urls`. The deploy gives each host only its own URL. The
-same script creates `watchtower-deploy` (see "Our images").
+same script creates `watchtower-deploy` (see "Our images") and
+`watchtower-bastion` ("Break glass"), whose URL only the bastion reads.
 On a host, `watchtower-health check` prints what it sees now, without
 reporting. Every deploy's verify step runs it on each host.
 
@@ -529,6 +893,7 @@ copy. The hosts get it on the next deploy (push to main, or dispatch
 | Backup check's ping URL | a new check → `secret.sh put healthchecks-pg-backup-url` → deploy → delete the old check |
 | Healthchecks.io API key | a new key in the project's settings → `secret.sh put healthchecks-jasonmross-dev-api-key` → revoke the old one (only `scripts/healthchecks.sh` uses it) |
 | Hosts' ping URLs | delete a host's check, `scripts/healthchecks.sh` (it makes a new one), then deploy |
+| The bastion's ping URL | delete its check, `scripts/healthchecks.sh` (it makes a new one and stores the URL); the bastion reads it at its next boot or daily ping |
 | Agent peers' WireGuard keys | delete the client in the wg-easy UI, then deploy ("WireGuard peers") |
 
 Old versions stay in Secret Manager's history until destroyed:
@@ -549,6 +914,7 @@ Old versions stay in Secret Manager's history until destroyed:
 | Deploy: `S3Bucket ... expected non-nil error with nil state during Create` | Hetzner created the bucket, but it didn't show yet when the provider read it back, so Pulumi never recorded it | Adopt it, then rerun: `pulumi import minio:index/s3Bucket:S3Bucket <bucket> <bucket> --provider hetzner-s3=urn:pulumi:prod::watchtower-cloud::pulumi:providers:minio::hetzner-s3 --generate-code=false` from `infra/cloud` after `source scripts/env.sh` |
 | Healthchecks.io: a host's check is down | The host reported problems twice in a row, or stopped reporting (down, cut off from the internet, its timer dead) | The alert lists the problems. If it went silent: is the server up (Hetzner Console), and `systemctl status watchtower-health.timer` on it. `watchtower-health check` shows what it sees now |
 | Healthchecks.io: `watchtower-deploy` is down | A deploy job failed, or the 05:00 UTC run (Monday to Saturday) never came | The ping's body links the failed run; its log says which job. If `hosts` failed with "the tunnel to 10.8.0.1:22 never came up", wg-easy or the proxy is down: dispatch with `ssh_via=bastion`, which reinstalls the proxy without the VPN. No run at all: is Gitea's scheduler running, and is `deploy.yml` on main intact? Fix, then dispatch `deploy.yml` (or merge); the next success clears it |
+| Healthchecks.io: `watchtower-bastion` is down | No ping by 07:00 UTC: the bastion didn't come back from a reboot, is up without its guard or sshd, or couldn't reach Secret Manager or Healthchecks.io. A bastion you stopped does this too | `gcloud compute instances describe watchtower-bastion --zone us-east1-b --project watchtower-observe --format 'value(status)'`, then log in ("Break glass"). No login: "The bastion with SSH gone". Logged in: `sudo systemctl start watchtower-ping.service`, then `sudo journalctl -u watchtower-ping.service -n 5` says what stopped the ping |
 | Healthchecks.io: the backup check is down | The nightly backup failed or never ran | The alert carries the run's log; else `journalctl -u watchtower-pg-backup -n 50` on the leader. Usual causes: a cluster S3 key replaced but not yet deployed, no Patroni leader, or the volume not mounted. `systemctl start watchtower-pg-backup` on every node retries |
 | Tempo queries miss recent traces | A live-store or the Kafka path | `systemctl status 'tempo-*'` on each node; Kafka's under-replicated partitions |
 

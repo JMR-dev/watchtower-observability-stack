@@ -32,7 +32,8 @@ scripts/secret.sh check
   The cloud and hosts jobs' setup step uses it to read that job's secrets
   into masked environment variables (key files as 0600 files). The Pulumi
   program reads the access key IDs for its bucket policies with the same
-  key while it runs.
+  key while it runs. `bastion-confirm.yml` holds it too, to log in to the
+  bastion, and reads no secret with it.
 - `watchtower-deployer@` can read each listed secret but `gar-push-key`,
   through a grant on that secret, never `secretAccessor` on the project. It
   also has `dns.admin` on the one zone, so the cloud stack can write its
@@ -91,6 +92,12 @@ every 90 days.
 | `healthchecks-host-urls` | One JSON object, host name to the ping URL of its Healthchecks.io check, written by `scripts/healthchecks.sh`. Each host gets only its own URL |
 | `healthchecks-deploy-url` | Ping URL of the Healthchecks.io check `watchtower-deploy`, written by `scripts/healthchecks.sh`. The deploy's last job pings it, or its `/fail` when a job failed. Anyone holding it can ping the check |
 
+### Read by the bastion
+
+| Id | What |
+|---|---|
+| `healthchecks-bastion-url` | Ping URL of the Healthchecks.io check `watchtower-bastion`, written by `scripts/healthchecks.sh`. The bastion reads it as `watchtower-bastion@`, as root through the metadata token, after each boot and every day, and pings only with its guard loaded and sshd active. Never granted to the deployer. Anyone holding it can ping the check |
+
 ### Owner only
 
 | Id | What |
@@ -104,7 +111,7 @@ every 90 days.
 |---|---|
 | `wireguard-owner-peer` | The owner's first WireGuard peer config, created by the first deploy in wg-easy (client `owner`). The deployer holds `secretVersionAdder` on it alone: it may add a version, never read one. Fetch it with `scripts/secret.sh pull wireguard-owner-peer`; `secret.sh check` reports it pending until the first deploy |
 | `wireguard-deploy-peer` | The deploy's own WireGuard peer config, created the same way (client `deploy`): the deploy's way to the proxy over the VPN. The deployer holds `secretVersionAdder` and `secretAccessor` on it: it writes it once and reads it back on every run |
-| `wireguard-<peer>-peer` | One per agent peer (`names.AgentPeers`): `bastion`, `gitea-vm`, `vaultwarden-production`, `vaultwarden-disposable`, `silverbullet-vm`, `blog-vm`. Each is the WireGuard config of a service that ships its telemetry here, created the same way at its fixed address in the agent half (docs/client-telemetry.md). The deployer may only add versions. `scripts/bootstrap.sh` lets one identity of that service, in its own project, read it (`agent_readers`): the VM's service account for the blog and Gitea, the deploy's for SilverBullet and Vaultwarden. The bastion's has no reader yet |
+| `wireguard-<peer>-peer` | One per agent peer (`names.AgentPeers`): `bastion`, `gitea-vm`, `vaultwarden-production`, `vaultwarden-disposable`, `silverbullet-vm`, `blog-vm`. Each is the WireGuard config of a service that ships its telemetry here, created the same way at its fixed address in the agent half (docs/client-telemetry.md). The deployer may only add versions. `scripts/bootstrap.sh` lets one identity of that service, in its own project, read it (`agent_readers`): the VM's service account for the blog, Gitea and the bastion (`watchtower-bastion@`, in this project), the deploy's for SilverBullet and Vaultwarden |
 
 The agent peers' secrets stay in `watchtower-observe` rather than being
 copied into each service's project: one source of truth, payloads kept in

@@ -168,7 +168,10 @@ Nothing on watchtower scrubs. What a host sends is stored.
 - **Gitea CI:** the sink excludes `cloudaudit` (it carries the owner's
   email); scrub `httpRequest.remoteIp`, `userAgent`, and the login in
   webhook "author … is not allowed" lines.
-- **Bastion:** OS Login user names (the example's rule).
+- **Bastion:** OS Login user names (the example's rule); certificate key IDs
+  and OS Login uids, also out of the `unit` label (`user@.service`,
+  `session.scope`); sudo's `COMMAND=` to the end of the line ("someone ran
+  sudo" still ships), and whatever follows `invalid user`.
 
 ## Agent peers
 
@@ -389,7 +392,7 @@ As built:
 ### W3: here, the bastion
 
 - `scripts/bootstrap.sh` step 7: service account `watchtower-bastion@`,
-  reader of `wireguard-bastion-peer` only, and an in-place update (stop, set
+  reader of `wireguard-bastion-peer` and, as built, its ping URL only, and an in-place update (stop, set
   the account, metadata, start; the disk and host key stay).
 - The startup script: `wireguard-tools` and the Alloy `.deb` (checked
   against `SHA256SUMS`, apt with a lock timeout), a 192 MiB drop-in, the
@@ -399,6 +402,76 @@ As built:
   deployer among them) can't read the peer with the VM's token. Tested
   before it ships.
 - `config/alloy/bastion.alloy`, validated and fixture-tested in CI.
+
+As built: the account is made with the others (step 4) and granted through
+`agent_readers`. Step 7 gives `watchtower-deployer`
+`roles/iam.serviceAccountUser` on it, because OS Login admits a user to a VM
+that runs as a service account only then (the owner's decision, 2026-11-01).
+It attaches the account only after the guard's ruleset is confirmed, by a guest
+attribute only root can write once the guard is on, and asks again of the boot
+with the account: two restarts the first time.
+
+A new ruleset goes on under a 10-minute rollback (the owner's decision,
+2026-11-01; `config/bastion/ruleset.sh`, and the runbook's "A new ruleset"). A
+login cancels it, and bootstrap dispatches `bastion-confirm.yml` to log in as
+the deployer. sshd runs only with the guard in the kernel, or on a VM with no
+account. An account goes on only over a confirmed ruleset, and a ruleset that
+won't load at a boot brings the floor, a small copy of the guard built into the
+tool, before the network comes up. Nothing of a user's runs without a login: no
+crontab, at job or lingering. So nothing of a user's runs with a token and no
+guard. The one case left is nft itself loading nothing, not even the floor, and
+then sshd stays down.
+
+The startup script, the ruleset, its tool and the Alloy config are files
+(`config/bastion/`, `config/alloy/bastion.alloy`) that bootstrap puts in the
+VM's metadata. The guard leaves DNS (53), DHCP (67) and NTP (123) open to every
+uid, since Alloy, apt, systemd-networkd and chrony need them and they carry no
+credential, and refuses the rest at once (reject, not drop), so a lookup that
+hits it fails fast instead of hanging. A drop-in clears `nftables.service`'s
+`ExecStop`, so a package upgrade's restart reloads rather than flushes.
+`scripts/check-bastion.sh` tests the guard, the rollback and the peer checks in
+Debian 13 (CI's `configs` job), and says what only the VM can show. Only a
+missing or empty secret takes the tunnel and Alloy down; any other failure to
+read it warns and leaves them running, and so does a config that fails the
+checks. The peer checks go past the contract's: the host reads a line as `wg`
+does and admits only the settings an agent needs, in their shape, so a config
+with a stray character in a key is refused here rather than echoed by `wg` into
+the journal.
+
+The owner added two things to this (2026-11-01). The bastion pings a
+Healthchecks.io check of its own, `watchtower-bastion`, after each boot and every
+day, once the guard is loaded and sshd is active, with a URL kept in
+`healthchecks-bastion-url` that only it may read. And new metadata is the way in
+when SSH is gone, with `config/bastion/recovery.sh` ready to put there; the serial
+console only reads, and there is no local password user (the runbook's "The
+bastion with SSH gone").
+
+The owner settled five more on 2026-11-04 (the runbook has the detail):
+
+- **Recovery stays gated.** `recovery.sh` never starts sshd itself, only the tool
+  does, through its gate, and with no usable tool it doesn't ask for sshd at all.
+- **A last good copy of the ruleset's tool.** A new `watchtower-ruleset` goes in
+  only once it passes a self-check in a network namespace of its own: no rules
+  must not pass for a guard, and its gate must keep sshd down with no guard; its
+  floor must pass `nft --check`, load and guard; and its gate must let sshd run with
+  the floor on. The last tool that passed and brought sshd up is kept, and a tool
+  that fails at a boot gives way to it.
+- **No unprivileged user namespaces:** `kernel.unprivileged_userns_clone = 0`,
+  Debian's own knob, which leaves root's and systemd's (`PrivateUsers=`) alone.
+- **A per-run login nonce:** bootstrap's login check counts only a login whose file
+  is named by its run's nonce, so a rerun can't be satisfied by an earlier run's
+  login, session or attribute.
+- **A run nonce against forged attributes:** each start bootstrap makes gets a fresh
+  nonce in metadata while the VM is stopped, every attribute carries its boot's, and
+  only values with it count. A value written on the unguarded boot with no account,
+  where any user may write one, can't carry the nonce of the boot with the account.
+
+A review of those, answered the same day, tightened them: a tool becomes the last good
+copy only at a boot with sshd active, the guard on (or no account) and no trial
+pending; `recovery.sh` stops an sshd the boot left up with no guard on a VM that may
+have an account; every start bootstrap makes, its exit trap's included, gets a fresh
+run nonce; a tool's `apply` at a boot has 5 minutes and its self-check 2; and bootstrap
+warns when unprivileged user namespaces are on.
 
 ### G2: gitea, the VM (after the Ansible cutover)
 
@@ -434,7 +507,9 @@ In order, each after the one before is verified:
 3. **V1**: a disposable cycle from its branch, then production.
 4. **G1** (the owner runs `make ci-up` from its branch), then **W2** (the
    owner runs `bootstrap.sh` and `rotate-gcp-key.sh reader`).
-5. **W3** (the owner runs `bootstrap.sh` from its branch).
+5. **W3** (the owner runs `healthchecks.sh`, then `bootstrap.sh`, from its branch,
+   then tries the recovery once, as the runbook's "The bastion with SSH gone"
+   says).
 6. **G2**, after the Gitea cutover.
 7. **W4**.
 
