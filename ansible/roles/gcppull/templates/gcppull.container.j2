@@ -4,6 +4,13 @@ Description=Alloy (pulls Gitea CI's logs and metrics from GCP)
 Wants=network-online.target wg-quick@wg1.service
 After=network-online.target wg-quick@wg1.service
 RequiresMountsFor={{ watchtower_data }}
+# A pull that keeps crashing gives up: systemd refuses a 7th start within an hour,
+# which is any run that dies within about 10 minutes of starting, every time. The
+# unit is then failed, and watchtower-health alerts on it. Without this, Restart=
+# would start it forever, and the 5-minute check would mostly find it running.
+# A deploy clears it (tasks/install.yml); by hand, see docs/runbook.md.
+StartLimitIntervalSec=1h
+StartLimitBurst=6
 
 [Container]
 Image={{ alloy_image }}

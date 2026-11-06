@@ -292,8 +292,8 @@ reads a secret's value or SSHes anywhere.
     serial console, `kube-system`, `gmp-system` or `gitea-ops`.
 - For `watchtower-gcp-reader@watchtower-observe.iam.gserviceaccount.com`:
   `pubsub.subscriber` on each subscription, and a **custom role** with only
-  `monitoring.timeSeries.list`, `monitoring.metricDescriptors.list` and
-  `monitoring.monitoredResourceDescriptors.list` (not `monitoring.viewer`,
+  `monitoring.timeSeries.list` and `monitoring.metricDescriptors.list`, the
+  only two calls `prometheus.exporter.gcp` makes (not `monitoring.viewer`,
   which reads notification channels and the owner's email).
 - `infra/pkg/project/apis.go`: `pubsub.googleapis.com`. Docs: `runners.md`,
   `cicd.md`.

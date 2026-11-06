@@ -68,6 +68,20 @@
       ansible.builtin.systemd_service:
         daemon_reload: true
 
+    # A pull that crash-looped hit its start limit (gcppull.container.j2) and stays
+    # failed: systemd refuses to start it again within the hour. A deploy is a
+    # deliberate retry, often the fix, so it clears that first.
+    - name: Is Alloy stopped at its start limit
+      ansible.builtin.command: systemctl is-failed --quiet gcppull # noqa command-instead-of-module -- the systemd module can't only read a unit's state
+      register: gcppull_failed
+      changed_when: false
+      failed_when: false
+
+    - name: Clear Alloy's start limit
+      ansible.builtin.command: systemctl reset-failed gcppull
+      when: gcppull_failed.rc == 0
+      changed_when: true
+
     # An entry already in loki.write's queue has been acknowledged, so if Loki is down
     # a restart loses that queue (config.alloy.j2 says how much). Pub/Sub redelivers
     # only what hadn't reached it.

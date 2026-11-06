@@ -856,7 +856,15 @@ can produce: `loki_write_dropped_entries_total{service="gitea-ci"}` shows it.
 
 **If it doesn't flow:** `journalctl -u gcppull` on a node. `PERMISSION_DENIED` naming
 an API means it's off in the project named; on a subscription, gitea's half isn't
-applied. A bad key has the unit restarting, which `watchtower-health` reports.
+applied.
+
+**If it keeps crashing:** a bad key, or anything else that kills Alloy within about 10
+minutes of starting, every time, uses up its start limit (6 starts in an hour). The unit
+is then `failed`, so `watchtower-health` alerts, and systemd won't start it again within
+the hour. Find the cause in `journalctl -u gcppull` and fix it. Then `systemctl
+reset-failed gcppull && systemctl start gcppull` on the node, or deploy: the deploy
+clears the limit itself. Pub/Sub keeps what it hasn't delivered for 7 days. A pull that
+lives longer between crashes stays under the limit, and nothing alerts on that yet.
 
 **Moving the metrics:** `gcppull_metrics_host` in
 `ansible/inventory/group_vars/all/placement.yml`, and a deploy. Only one node may list
