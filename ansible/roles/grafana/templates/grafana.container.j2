@@ -20,6 +20,11 @@ Volume={{ watchtower_config }}/grafana/provisioning:/etc/grafana/provisioning:ro
 Secret=grafana-admin-password,type=mount,uid=472,mode=0400
 Secret=grafana-secret-key,type=mount,uid=472,mode=0400
 Secret=grafana-db-password,type=mount,uid=472,mode=0400
+{% if grafana_telemetry_notify | bool %}
+# The telemetry alerts' ping URL, read through the contact point's $__file{}
+# (provisioning/alerting/telemetry-notifications.yaml); only with that file.
+Secret=grafana-telemetry-alert-url,type=mount,uid=472,mode=0400
+{% endif %}
 # lib/pq tries [database] host's addresses in order until one takes writes:
 # Grafana follows a Patroni failover by itself.
 Environment=PGTARGETSESSIONATTRS=read-write

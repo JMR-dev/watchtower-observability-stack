@@ -139,6 +139,11 @@ const (
 	// after each boot and every day (config/bastion/startup.sh). In BastionSecrets,
 	// never read by the deploy.
 	SecretHealthchecksBastionURL = "healthchecks-bastion-url"
+	// The Healthchecks.io ping URL of watchtower-telemetry-alerts
+	// (scripts/healthchecks.sh): Grafana posts the telemetry alerts'
+	// notifications there (ansible/roles/grafana). In OptionalSecrets: until the
+	// owner stores it, the deploy goes on and provisions no contact point.
+	SecretHealthchecksTelemetryAlertURL = "healthchecks-telemetry-alert-url"
 
 	// SecretGARPushKey is copied to the GAR_PUSH_KEY Actions secret by the
 	// owner (scripts/secret.sh gitea). The deployer is never granted it.
@@ -210,6 +215,19 @@ var OwnerOnlySecrets = []string{SecretGARPushKey, SecretHealthchecksAPIKey}
 // peer is in AgentPeers.
 var BastionSecrets = []string{SecretHealthchecksBastionURL}
 
+// OptionalSecrets are read by the deploy only as optional (`?NAME=id` in
+// deploy.yml): a deploy before the owner stores one goes on without it.
+var OptionalSecrets = []string{SecretWireGuardDeployPeer, SecretHealthchecksTelemetryAlertURL}
+
+// TelemetryAlertsFiring and TelemetryAlertsResolved open the body of every
+// notification Grafana sends watchtower-telemetry-alerts
+// (roles/grafana/templates/telemetry-notifications.yaml.j2), and
+// scripts/healthchecks.sh makes them the check's failure and success keywords.
+const (
+	TelemetryAlertsFiring   = "TELEMETRY-ALERTS-FIRING"
+	TelemetryAlertsResolved = "TELEMETRY-ALERTS-RESOLVED"
+)
+
 // S3AccessKeySecret and S3SecretKeySecret name the two secrets holding one
 // Hetzner S3 credential: KeyAdmin or a Keys entry.
 func S3AccessKeySecret(key string) string { return "s3-" + key + "-access-key" }
@@ -223,7 +241,7 @@ func Secrets() []string {
 		SecretGrafanaAdminPassword, SecretGrafanaSecretKey, SecretGrafanaDBPassword,
 		SecretPostgresSuperuserPassword, SecretPostgresReplicationPassword, SecretPatroniRESTAPIPassword,
 		SecretWGEasyPassword, SecretCaddyDNSKey, SecretHealthchecksPGBackupURL, SecretHealthchecksHostURLs,
-		SecretHealthchecksDeployURL, SecretHealthchecksBastionURL,
+		SecretHealthchecksDeployURL, SecretHealthchecksBastionURL, SecretHealthchecksTelemetryAlertURL,
 		SecretGARPushKey, SecretHealthchecksAPIKey,
 		SecretWireGuardOwnerPeer, SecretWireGuardDeployPeer,
 	}

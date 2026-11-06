@@ -1,0 +1,169 @@
+# Managed by Ansible (roles/grafana): the telemetry alerts, one rule group per
+# source in watchtower_telemetry_sources, every threshold from
+# watchtower_telemetry_alert (group_vars/all/telemetry.yml). What each means and
+# what to check first: docs/runbook.md, "Telemetry alerts".
+#
+# Every rule carries telemetry="true", which routes it to the one notification
+# group (telemetry-notifications.yaml). A query that returns nothing is OK, not
+# NoData: a silent source is the silence rules' to report, once. A query that
+# fails keeps the rule's last state, so a node's restart during a deploy can't
+# fire or clear anything. CI parses every expression and starts the pinned
+# Grafana on this file (scripts/check-grafana.sh).
+{% set t = watchtower_telemetry_alert %}
+{% set mimir = 'mimir-' ~ watchtower_agent_tenant %}
+{% set loki = 'loki-' ~ watchtower_agent_tenant %}
+{% set real_fs = 'fstype!~"tmpfs|ramfs|devtmpfs|overlay|squashfs|vfat|nsfs|fuse.*"' %}
+{% set runbook = 'https://gitea.jasonmross.dev/JMR-dev/watchtower-observability-stack/src/branch/main/docs/runbook.md#telemetry-alerts' %}
+{% macro rule(src, key, title, ds, expr, op, threshold, hold, summary) %}
+      - uid: {{ ('tw-' ~ src.name ~ '-' ~ key) | to_json }}
+        title: {{ (src.name ~ ': ' ~ title) | to_json }}
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: {{ ds | to_json }}
+            model:
+              expr: {{ expr | to_json }}
+{% if ds == loki %}
+              queryType: instant
+{% else %}
+              instant: true
+              range: false
+{% endif %}
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: {{ op }}, params: [{{ threshold }}]}
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: {{ hold }}
+        labels:
+          telemetry: "true"
+          host: {{ src.name | to_json }}
+          service: {{ src.service | to_json }}
+          check: {{ key | to_json }}
+        annotations:
+          summary: {{ summary | to_json }}
+          runbook_url: {{ runbook | to_json }}
+          dashboard_url: {{ ('https://' ~ watchtower_domain ~ '/d/telemetry-fleet?var-host=' ~ src.name) | to_json }}
+{% endmacro %}
+{# Every check a source can have. Grafana never deletes a rule just because it
+   left this file: the ones a source doesn't have, and every one of a retired
+   source, go in deleteRules at the end (a uid that never existed is fine). #}
+{% set standard = ['metrics-silent', 'target-down', 'logs-silent', 'metrics-shipping', 'logs-shipping',
+                   'memory', 'swap', 'disk', 'units-failed', 'probe', 'cert', 'caddy-5xx'] %}
+{% set gone = namespace(uids=[]) %}
+apiVersion: 1
+groups:
+{% for src in watchtower_telemetry_sources %}
+{% set sel = src.selector | default('host="' ~ src.name ~ '"') %}
+{% set jobs = src.jobs | default([]) %}
+{% set logs = src.logs_silent_after is defined %}
+{# What this source has, from its jobs: the one list both the rules below and
+   deleteRules go by. #}
+{% set made = (['metrics-silent', 'target-down'] if jobs else [])
+            + (['logs-silent'] if logs else [])
+            + (['metrics-shipping'] if 'alloy' in jobs else [])
+            + (['logs-shipping'] if 'alloy' in jobs and logs else [])
+            + (['memory', 'swap', 'disk'] if 'integrations/unix' in jobs else [])
+            + (['units-failed'] if src.systemd | default(false) else [])
+            + (['probe', 'cert'] if 'blackbox' in jobs else [])
+            + (['caddy-5xx'] if 'caddy' in jobs else []) %}
+{% set gone.uids = gone.uids + (standard | reject('in', made) | map('regex_replace', '^', 'tw-' ~ src.name ~ '-') | list) %}
+{# What a blackbox series probed, as a Grafana template: its `probe` label
+   looked up in the source's probes ("" for none), or `instance` (only the
+   exporter's name) for a source that doesn't say. A series without the label
+   is `not $labels.probe`: in Grafana, a missing label isn't `eq` to "". #}
+{% set pn = namespace(t='') %}
+{% for p, what in (src.probes | default({})).items() %}
+{% set test = ('not $labels.probe' if p == '' else 'eq $labels.probe "' ~ p ~ '"') %}
+{% set pn.t = pn.t ~ ('{{ if ' if loop.first else '{{ else if ') ~ test ~ ' }}' ~ what %}
+{% endfor %}
+{% set probed = (pn.t ~ '{{ else }}{{ $labels.instance }}{{ end }}') if pn.t else '{{ $labels.instance }}' %}
+  - orgId: 1
+    name: {{ ('telemetry-' ~ src.name) | to_json }}
+    folder: Telemetry
+    interval: 1m
+    rules:
+{% if 'metrics-silent' in made %}
+{# One absent_over_time per job, so each missing job is an alert of its own. #}
+{% set ns = namespace(absent=[]) %}
+{% for job in jobs %}
+{% set ns.absent = ns.absent + ['absent_over_time(up{' ~ sel ~ ', job="' ~ job ~ '"}[' ~ t.metrics_silent.window ~ '])'] %}
+{% endfor %}
+{{ rule(src, 'metrics-silent', 'no metrics', mimir, ns.absent | join(' or '), 'gt', 0, t.metrics_silent['for'],
+   'No metrics from job {{ $labels.job }} on ' ~ src.name ~ ' for ' ~ t.metrics_silent.window ~ ': the host, its Alloy, its tunnel or that scrape is down.') }}
+{{ rule(src, 'target-down', 'scrape target down', mimir, 'min by (job, instance, probe) (up{' ~ sel ~ '})', 'lt', 1, t.target_down['for'],
+   '{{ if eq $labels.job "blackbox" }}The blackbox probe of ' ~ probed ~ '{{ else }}Job {{ $labels.job }} ({{ $labels.instance }}){{ end }} on ' ~ src.name ~ ' answers its scrape with up == 0.') }}
+{% endif %}
+{% if 'logs-silent' in made %}
+{{ rule(src, 'logs-silent', 'no logs', loki, 'absent_over_time({' ~ sel ~ '}[' ~ src.logs_silent_after ~ '])', 'gt', 0, t.logs_silent['for'],
+   'No log line from ' ~ src.name ~ ' for ' ~ src.logs_silent_after ~ '.') }}
+{% endif %}
+{% if 'metrics-shipping' in made %}
+{{ rule(src, 'metrics-shipping', 'metrics shipping errors', mimir,
+   'sum(increase(prometheus_remote_storage_samples_failed_total{' ~ sel ~ '}[' ~ t.metrics_shipping.window ~ ']))', 'gt', 0, t.metrics_shipping['for'],
+   'Mimir has rejected samples from ' ~ src.name ~ ' in every ' ~ t.metrics_shipping.window ~ ' for ' ~ t.metrics_shipping['for'] ~ ' ({{ humanize $values.A.Value }} in the last ' ~ t.metrics_shipping.window ~ ').') }}
+{% endif %}
+{% if 'logs-shipping' in made %}
+{# loki_write_* carry Loki's address as `host` (Loki's client sets it, and it
+   beats Alloy's external labels): the source is in `instance`. #}
+{{ rule(src, 'logs-shipping', 'log shipping errors', mimir,
+   '(sum(increase(loki_write_dropped_entries_total{instance="' ~ src.name ~ '"}[' ~ t.logs_shipping.window ~ '])) or vector(0)) + (sum(increase(loki_write_request_duration_seconds_count{instance="' ~ src.name ~ '", status_code!~"2.."}[' ~ t.logs_shipping.window ~ '])) or vector(0))',
+   'gt', 0, t.logs_shipping['for'],
+   'Loki writes from ' ~ src.name ~ ' have failed, or lines were dropped, in every ' ~ t.logs_shipping.window ~ ' for ' ~ t.logs_shipping['for'] ~ ' ({{ humanize $values.A.Value }} in the last ' ~ t.logs_shipping.window ~ ').') }}
+{% endif %}
+{% if 'memory' in made %}
+{{ rule(src, 'memory', 'memory low', mimir,
+   'node_memory_MemAvailable_bytes{' ~ sel ~ '} / node_memory_MemTotal_bytes{' ~ sel ~ '}', 'lt', t.memory_available_below, t.memory['for'],
+   'Memory available on ' ~ src.name ~ ' is {{ humanizePercentage $values.A.Value }}, under ' ~ (t.memory_available_below * 100) | round(1) ~ '%.') }}
+{{ rule(src, 'swap', 'swap in use', mimir,
+   '(1 - node_memory_SwapFree_bytes{' ~ sel ~ '} / node_memory_SwapTotal_bytes{' ~ sel ~ '}) and node_memory_SwapTotal_bytes{' ~ sel ~ '} > 0', 'gt', t.swap_used_above, t.swap['for'],
+   'Swap in use on ' ~ src.name ~ ' is {{ humanizePercentage $values.A.Value }}, over ' ~ (t.swap_used_above * 100) | round(1) ~ '%.') }}
+{{ rule(src, 'disk', 'disk filling', mimir,
+   '1 - node_filesystem_avail_bytes{' ~ sel ~ ', ' ~ real_fs ~ '} / node_filesystem_size_bytes{' ~ sel ~ ', ' ~ real_fs ~ '}', 'gt', t.disk_used_above, t.disk['for'],
+   '{{ $labels.mountpoint }} on ' ~ src.name ~ ' is {{ humanizePercentage $values.A.Value }} full, over ' ~ (t.disk_used_above * 100) | round(1) ~ '%.') }}
+{% endif %}
+{% if 'units-failed' in made %}
+{# Only the failed ones: every unit has the series, and an alert instance
+   apiece (225 on vault-production) would be state for nothing. #}
+{{ rule(src, 'units-failed', 'systemd unit failed', mimir,
+   'max by (name) (node_systemd_unit_state{' ~ sel ~ ', state="failed"}) == 1', 'gt', 0, t.units_failed['for'],
+   '{{ $labels.name }} on ' ~ src.name ~ ' is in state failed.') }}
+{% endif %}
+{% if 'probe' in made %}
+{{ rule(src, 'probe', 'probe failing', mimir,
+   'max by (instance, probe) (max_over_time(probe_success{' ~ sel ~ ', job="blackbox"}[' ~ t.probe.window ~ ']))', 'lt', 1, t.probe['for'],
+   'Every probe of ' ~ probed ~ ' from ' ~ src.name ~ ' has failed for over ' ~ t.probe.window ~ '.') }}
+{{ rule(src, 'cert', 'certificate expiring', mimir,
+   'min by (instance, probe) (probe_ssl_earliest_cert_expiry{' ~ sel ~ ', job="blackbox"} - time()) / 86400', 'lt', t.cert_days_below, t.cert['for'],
+   'The certificate of ' ~ probed ~ ', probed from ' ~ src.name ~ ', expires in {{ printf "%.1f" $values.A.Value }} days: Caddy has not renewed it.') }}
+{% endif %}
+{% if 'caddy-5xx' in made %}
+{% set requests = 'caddy_http_request_duration_seconds_count{' ~ sel %}
+{% set w = '[' ~ t.caddy_5xx.window ~ ']' %}
+{{ rule(src, 'caddy-5xx', 'Caddy 5xx', mimir,
+   '(sum(increase(' ~ requests ~ ', code=~"5.."}' ~ w ~ ')) / sum(increase(' ~ requests ~ '}' ~ w ~ '))) and on () (sum(increase(' ~ requests ~ ', code=~"5.."}' ~ w ~ ')) >= ' ~ t.caddy_5xx_min ~ ')',
+   'gt', t.caddy_5xx_ratio_above, t.caddy_5xx['for'],
+   'Caddy on ' ~ src.name ~ ' answered {{ humanizePercentage $values.A.Value }} of requests with a 5xx over ' ~ t.caddy_5xx.window ~ '.') }}
+{% endif %}
+{% for r in src.extra_rules | default([]) %}
+{{ rule(src, r.key, r.title, mimir if r.datasource == 'mimir' else loki, r.expr, r.op, r.threshold, r['for'], r.summary) }}
+{% endfor %}
+{% endfor %}
+{% for name in watchtower_telemetry_retired_sources | default([]) %}
+{% set gone.uids = gone.uids + (standard | map('regex_replace', '^', 'tw-' ~ name ~ '-') | list) %}
+{% endfor %}
+{% set gone.uids = gone.uids + (watchtower_telemetry_retired_rules | default([])) %}
+{% if gone.uids %}
+deleteRules:
+{% for uid in gone.uids %}
+  - orgId: 1
+    uid: {{ uid | to_json }}
+{% endfor %}
+{% endif %}

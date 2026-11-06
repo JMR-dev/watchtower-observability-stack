@@ -36,7 +36,10 @@ description: |
   deploy.yml names here). NAME=id exports the value as NAME (one line
   only); @NAME=id writes it to a 0600 file and exports its path as NAME (for
   key files). A leading ? (?NAME=id, ?@NAME=id) makes it optional: a secret
-  with no version yet leaves NAME unset instead of failing the job. Lines
+  with no value yet (no version, or its newest disabled or destroyed) leaves
+  NAME unset instead of failing the job. So does a denied read (a secret not
+  yet made or not yet granted reads the same), with a warning on the run that
+  names it; any other error still fails the job. Lines
   starting with # are comments. Every line of every value is masked in the log first. Reading
   needs `gcp-key` and installs gcloud.
 
@@ -263,13 +266,32 @@ runs:
           optional="${BASH_REMATCH[1]}" as_file="${BASH_REMATCH[2]}" name="${BASH_REMATCH[3]}" id="${BASH_REMATCH[4]}"
           file="${dir}/${id}"
           if ! "$gcloud" secrets versions access latest --secret "$id" --project "$PROJECT" --out-file "$file" 2>"${dir}/.err"; then
-            # ?NAME=id: a secret that may have no version yet, which the job
-            # copes with (the deploy's own VPN peer, before the first deploy).
+            rm -f "$file"
+            # ?NAME=id: a secret that may have no value yet, which the job
+            # copes with (the deploy's own VPN peer, before the first deploy;
+            # the telemetry alerts' ping URL, before the owner stores it).
             if [[ -n "$optional" ]]; then
-              echo "${id} has no version yet; ${name} stays unset"
-              rm -f "$file" "${dir}/.err"
-              continue
+              # No version (NOT_FOUND), or its newest disabled or destroyed.
+              if grep -qE 'NOT_FOUND|is in (DISABLED|DESTROYED) state' "${dir}/.err"; then
+                echo "${id} has no value yet; ${name} stays unset"
+                rm -f "${dir}/.err"
+                continue
+              fi
+              # Denied: Secret Manager can't tell the deployer "doesn't exist"
+              # from "not yours", so this is also a secret bootstrap.sh hasn't
+              # made yet. The job goes on without it, but never silently: a
+              # warning on the run, every time, until bootstrap.sh grants it.
+              if grep -q 'PERMISSION_DENIED' "${dir}/.err"; then
+                msg="${id} can't be read (PERMISSION_DENIED): it doesn't exist yet, or exists and scripts/bootstrap.sh hasn't let the deployer read it. If it was created, run scripts/bootstrap.sh. This run goes on without ${name}."
+                echo "::warning title=Optional secret not readable::${msg}"
+                echo "warning: ${msg}" >&2
+                rm -f "${dir}/.err"
+                continue
+              fi
             fi
+            # Anything else (the network, a 5xx, the key, unexpected output)
+            # fails the job. gcloud's error names the secret, never its value.
+            echo "reading secret ${id} for ${name} failed:" >&2
             cat "${dir}/.err" >&2
             exit 1
           fi
