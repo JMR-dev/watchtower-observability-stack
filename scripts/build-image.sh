@@ -23,6 +23,10 @@
 #   2. If there are any, Copa (project-copacetic) upgrades just those
 #      packages, with the image's own package manager, in one new layer, and
 #      the patched image becomes <image-ref>. Nothing else in the image moves.
+#      PostgreSQL's own packages are never Copa's: Patroni's image has them
+#      from apt.postgresql.org (every version says "pgdg"), and moving
+#      PostgreSQL is a decision, not a patch. A hole in one is left in, so
+#      the gate fails on it and it waits for a person.
 #   3. The checks below run on that image, the one that ships.
 #   4. Trivy gates it: the build fails on any fixable HIGH/CRITICAL finding
 #      still there in what we control, the image's OS packages and everything
@@ -33,8 +37,9 @@
 #      release fixes them.
 #
 # Copa only runs when this builds a new tag. The deploy reuses a tag that's
-# in the registry (scripts/publish-image.sh), and Patroni's tag has no date,
-# so a fix for the Patroni already deployed still needs its next revision.
+# in the registry (scripts/publish-image.sh), but every tag has the day in it
+# (scripts/image-tag.sh), so each day's first deploy rebuilds and patches
+# every image.
 #
 # Checks, per image:
 #   caddy    `caddy validate` on the proxy's rendered Caddyfile, run the way
@@ -98,10 +103,10 @@ fi
 
 DOCKER_BUILDKIT=1 docker build "${build_args[@]}" -t "$ref" "${repo_root}/build/${what}"
 
-# 1. What Trivy finds to fix in the OS packages, as Copa reads it.
-report="$(mktemp)"
+# 1. What Trivy finds to fix in the OS packages, and of that, what Copa gets.
+scan="$(mktemp)" report="$(mktemp)"
 patched="${ref%:*}:${ref##*:}-patched"
-trap 'rm -f "$report"; docker image rm "$patched" >/dev/null 2>&1 || true' EXIT
+trap 'rm -f "$scan" "$report"; docker image rm "$patched" >/dev/null 2>&1 || true' EXIT
 
 echo "==> Listing ${ref}'s fixable HIGH/CRITICAL findings in its OS packages"
 docker save "$ref" | docker run --rm -i -v "${TRIVY_CACHE}:/root/.cache/trivy" --entrypoint sh "$TRIVY_IMAGE" -c '
@@ -109,7 +114,18 @@ docker save "$ref" | docker run --rm -i -v "${TRIVY_CACHE}:/root/.cache/trivy" -
   cat >/tmp/image.tar
   exec trivy image --input /tmp/image.tar --pkg-types os --severity HIGH,CRITICAL --ignore-unfixed \
     --no-progress --format json
-' >"$report"
+' >"$scan"
+
+# PostgreSQL's own packages: from apt.postgresql.org (a "pgdg" version), or
+# named as its packages are.
+postgres='def postgres: (.InstalledVersion // "" | test("pgdg")) or (.PkgName | test("^(postgresql|libpq|libecpg|libpgtypes)"));'
+jq "${postgres}"' .Results[]? |= (.Vulnerabilities |= (if . == null then . else map(select(postgres | not)) end))' \
+  "$scan" >"$report"
+held="$(jq -r "${postgres}"' [.Results[]?.Vulnerabilities[]? | select(postgres) | "  \(.PkgName) \(.InstalledVersion) -> \(.FixedVersion) (\(.VulnerabilityID), \(.Severity))"] | unique | .[]' "$scan")"
+if [[ -n "$held" ]]; then
+  echo "==> Left for a person, PostgreSQL's own (the gate below fails on them):"
+  echo "$held"
+fi
 fixable="$(jq '[.Results[]?.Vulnerabilities[]?] | length' "$report")"
 
 # 2. Copa upgrades those packages, and the patched image takes the tag.

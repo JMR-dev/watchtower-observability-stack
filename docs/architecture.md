@@ -159,6 +159,7 @@ write telemetry, into the shared tenant `jasonmross`
   shellcheck, actionlint, the Alloy example and its scrub rules against a
   PII fixture.
 - **`deploy.yml`** on merge to main, and at 05:00 UTC Monday to Saturday:
-  our images (to Artifact Registry, on Alpine's newest patch release and
-  the day's packages), `infra/cloud`, `ansible/playbooks/site.yml`,
+  our images (to Artifact Registry, rebuilt each day: the Alpine ones on
+  Alpine's newest patch release and the day's packages, all of them
+  Copa-patched), `infra/cloud`, `ansible/playbooks/site.yml`,
   `scripts/verify.sh`, then a ping to its Healthchecks.io check.

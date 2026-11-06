@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The tag of one of our images. On Alpine: its version, the Alpine release,
 # its revision and the day it was built, e.g. 15.5.0-alpine3.24.3-r1-20261025.
-# Patroni, which isn't on Alpine: version and revision, 4.1.5-r1.
+# Patroni, which isn't on Alpine: version, revision and the day,
+# 4.1.5-r1-20261106.
 #
 #   scripts/image-tag.sh <name>          one image's tag
 #   scripts/image-tag.sh --names         every image's name, one a line
@@ -22,17 +23,20 @@
 # mid-run. Without them, this resolves them itself.
 #
 # The day in the tag makes the first deploy of each day (UTC) rebuild every
-# Alpine image with that day's packages; the deploy runs at 05:00 UTC Monday
-# to Saturday for that (deploy.yml), so the images are at most a day behind
-# Alpine's package fixes, two over Sunday. Later deploys that day reuse
-# those builds.
+# image: each Alpine image with that day's packages, and every image with
+# Copa's patches for the fixable holes Trivy knows of that day
+# (scripts/build-image.sh). The deploy runs at 05:00 UTC Monday to Saturday
+# for that (deploy.yml), so the images are at most a day behind the fixes,
+# two over Sunday. Later deploys that day reuse those builds. For Patroni
+# that's a rolling restart of the nodes each day, the leader's after a
+# switchover.
 #
 # Tags in Artifact Registry are immutable and a tag that's there is reused
 # (scripts/publish-image.sh), so any other change to build/<name>/ needs a
 # new tag, or a deploy later the same day would keep the morning's image: a
 # new version (org.opencontainers.image.version), or else the next revision
 # (watchtower.image.revision; back to 1 with a new version). CI's --check
-# makes sure of it, and Patroni's tag has nothing else to change it.
+# makes sure of it.
 
 set -euo pipefail
 
@@ -100,19 +104,19 @@ tag() {
     die "build/$1/Dockerfile needs the org.opencontainers.image.version and watchtower.image.revision labels"
   [[ "$revision" =~ ^[1-9][0-9]*$ ]] || die "build/$1/Dockerfile: watchtower.image.revision must be 1, 2, ..."
   minor="$(alpine_minor "$df")"
+  need_inputs
+  [[ "${IMAGE_DATE:-}" =~ ^[0-9]{8}$ ]] || die "IMAGE_DATE is '${IMAGE_DATE:-}', not YYYYMMDD"
   if [[ -z "$minor" ]]; then
-    printf '%s-r%s\n' "$version" "$revision"
+    printf '%s-r%s-%s\n' "$version" "$revision" "$IMAGE_DATE"
     return
   fi
-  need_inputs
   [[ "${ALPINE_RELEASE:-}" == "${minor}".* ]] ||
     die "build/$1 builds on Alpine ${minor}, but ALPINE_RELEASE is '${ALPINE_RELEASE:-}' (scripts/image-tag.sh --inputs)"
-  [[ "${IMAGE_DATE:-}" =~ ^[0-9]{8}$ ]] || die "IMAGE_DATE is '${IMAGE_DATE:-}', not YYYYMMDD"
   printf '%s-alpine%s-r%s-%s\n' "$version" "$ALPINE_RELEASE" "$revision" "$IMAGE_DATE"
 }
 
-# The Alpine tags need the release and the day; resolve them unless the
-# caller did.
+# Every tag needs the day, and the Alpine tags the release too; resolve them
+# unless the caller did.
 need_inputs() {
   [[ -n "${ALPINE_RELEASE:-}" && -n "${ALPINE_DIGEST:-}" && -n "${IMAGE_DATE:-}" ]] && return
   local out kv

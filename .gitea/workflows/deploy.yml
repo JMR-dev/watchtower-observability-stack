@@ -2,8 +2,10 @@
 #
 #   push to main       deploys
 #   05:00 UTC,         deploys main again: the day's first deploy rebuilds
-#   Monday-Saturday    every Alpine image with the day's packages
-#                      (scripts/image-tag.sh) and rolls them out. Never on
+#   Monday-Saturday    every image, the Alpine ones with the day's packages,
+#                      Copa-patches them (scripts/build-image.sh) and rolls
+#                      them out, Patroni with a leader switchover
+#                      (scripts/image-tag.sh). Never on
 #                      Sunday, the hosts' reboot morning (roles/reboot,
 #                      from 07:00 UTC)
 #   workflow_dispatch  allow_replace=true to let a preview replace or delete a
