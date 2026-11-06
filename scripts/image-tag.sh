@@ -54,19 +54,27 @@ alpine_minor() {
 }
 
 # The newest patch release of the Dockerfiles' one Alpine minor, from Docker
-# Hub: the X.Y.Z tag that is the same image (index digest) as X.Y.
+# Hub: the X.Y.Z tag whose linux/arm64 image is X.Y's. Compared by that image,
+# the only one we build on and run, not by the whole index: the two indexes can
+# list different platforms for hours (on 2026-11-05 alpine:3.24 gained riscv64
+# and 3.24.4 didn't, every other platform's image the same). The build pins
+# that release's own index (ALPINE_DIGEST), so its tag and digest agree.
 alpine() {
-  local minor tags release digest
+  local minor tags arm64 release digest
   minor="$(for n in $(names); do alpine_minor "${repo_root}/build/${n}/Dockerfile"; done | sort -u)"
   [[ -n "$minor" ]] || die "no Dockerfile builds on Alpine (ARG ALPINE=docker.io/library/alpine:X.Y)"
   [[ "$minor" != *$'\n'* ]] || die "the Dockerfiles build on different Alpine releases: $(tr '\n' ' ' <<<"$minor")"
   tags="$(curl -fsSL --retry 3 "https://hub.docker.com/v2/namespaces/library/repositories/alpine/tags?name=${minor}&page_size=100")"
-  digest="$(jq -r --arg m "$minor" '.results[] | select(.name == $m) | .digest' <<<"$tags")"
-  [[ "$digest" == sha256:* ]] || die "Docker Hub has no alpine:${minor}"
-  release="$(jq -r --arg m "$minor" --arg d "$digest" \
-    '[.results[] | select(.digest == $d and (.name | startswith($m + ".")) and (.name | test("^[0-9]+\\.[0-9]+\\.[0-9]+$")))][0].name // empty' <<<"$tags")"
+  arm64="$(jq -r --arg m "$minor" \
+    '[.results[] | select(.name == $m) | .images[] | select(.os == "linux" and .architecture == "arm64") | .digest][0] // empty' <<<"$tags")"
+  [[ "$arm64" == sha256:* ]] || die "Docker Hub has no linux/arm64 alpine:${minor}"
+  release="$(jq -r --arg m "$minor" --arg a "$arm64" \
+    '[.results[] | select((.name | startswith($m + ".")) and (.name | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
+      and any(.images[]; .os == "linux" and .architecture == "arm64" and .digest == $a))][0].name // empty' <<<"$tags")"
   # Hub's tags can briefly disagree while a release is being published.
-  [[ -n "$release" ]] || die "alpine:${minor} (${digest}) is no alpine:${minor}.Z on Docker Hub yet; retry shortly"
+  [[ -n "$release" ]] || die "alpine:${minor}'s arm64 image (${arm64}) is no alpine:${minor}.Z's on Docker Hub yet; retry shortly"
+  digest="$(jq -r --arg r "$release" '.results[] | select(.name == $r) | .digest' <<<"$tags")"
+  [[ "$digest" == sha256:* ]] || die "Docker Hub lists alpine:${release} without an index digest"
   printf 'ALPINE_RELEASE=%s\nALPINE_DIGEST=%s\n' "$release" "$digest"
 }
 
