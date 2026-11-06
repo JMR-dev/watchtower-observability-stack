@@ -44,7 +44,7 @@ Alerts and a fleet dashboard (W4, here) come last, for verified hosts only.
 | Loki | `https://watchtower.jasonmross.dev:3100/loki/api/v1/push` (OTLP `/otlp/v1/logs`) |
 | Mimir | `https://watchtower.jasonmross.dev:8080/api/v1/push` (OTLP `/otlp/v1/metrics`) |
 | Tempo | `watchtower.jasonmross.dev:4317` (gRPC), `https://watchtower.jasonmross.dev:4318/v1/traces`. Open to agents, unused in v1 |
-| Agent | Grafana Alloy **v1.21.2**, pinned: an image by digest (`docker.io/grafana/alloy:v1.21.2@sha256:…`), a release zip or `.deb` by sha256 from the release's `SHA256SUMS`. No `AutoUpdate=` |
+| Agent | Grafana Alloy **v1.21.3**, pinned: an image by digest (`docker.io/grafana/alloy:v1.21.3@sha256:…`), a release zip or `.deb` by sha256 from the release's `SHA256SUMS`. No `AutoUpdate=` |
 | Form | A **rootful podman quadlet** with `Network=host` on SilverBullet, the blog and the Gitea VM; a **host binary with a systemd unit** on Vaultwarden (its quadlets are rootless) and the bastion (`.deb`) |
 | Memory | 2 GB hosts: 256 MiB cap (`MemoryMax=` or `PodmanArgs=--memory`), `GOMEMLIMIT=200MiB`. 1 GB hosts (blog, bastion): 192 MiB, `GOMEMLIMIT=150MiB`. An OOM then kills Alloy, not the app |
 | Listeners | Alloy's UI on `127.0.0.1:12345` only. No OTLP receiver in v1 |
@@ -524,7 +524,12 @@ host `H`:
 - `count by (job) (up{host="H"})`: one per job, all 1.
 - `sum by (unit, container) (count_over_time({host="H"}[15m]))`: logs flow.
 - `rate(prometheus_remote_storage_samples_failed_total{host="H"}[10m])` is
-  0; `loki_write_dropped_entries_total{host="H"}` is flat.
+  0; `loki_write_dropped_entries_total{instance="H"}` is flat. The
+  `loki_write_*` series select on `instance`, not `host`: Loki's client sets
+  its own `host` label on them (Loki's address,
+  `watchtower.jasonmross.dev:3100`), and a series' own label beats
+  `external_labels`, so `{host="H"}` matches nothing and looks flat. Alerts on
+  them must use `instance` too.
 - `node_memory_MemAvailable_bytes{host="H"} / node_memory_MemTotal_bytes{host="H"}`
   stays above 0.15 for 48 h (the blog above all).
 
@@ -533,7 +538,7 @@ host `H`:
 ```
 {host="H"} |~ "(?:^|[^0-9])(?:\\d{1,3}\\.){3}\\d{1,3}(?:$|[^0-9])"
 {host="H"} |~ `[\p{L}\p{N}._%+'!#$*^~-]+(?:@|%40|%2540|\\u0040)[\p{L}\p{N}.-]+\.[A-Za-z]{2,}` !~ `@[\w.:\\-]+\.(?:service|socket|timer|target|mount|path|slice|scope)\.?(?:$|[^\w.-])`
-{host="H"} |= "eyJ"
+{host="H"} |~ "eyJ[A-Za-z0-9_-]{5,}"
 {host="H"} |= "\"transaction\""
 {host="H"} |~ `(?i)\\*"[\w-]*(cookie|authorization)[\w-]*\\*"\s*:\s*\[?\s*\\*"`
 {host="H"} |~ "_(gmail|googlemail)_com"
@@ -551,7 +556,7 @@ host `H`:
 {service="gitea-ci"} |~ `\b(author|pusher) [^\[]+ is not allowed|\bhead is in [^\[]|\bdelivery for \\*"[^\[]`
 {service="gitea-ci"} |~ `"(logName|insertId|httpRequest|protoPayload)"\s*:`
 {service="gitea-ci"} |= "cloudaudit"
-{service="gitea-ci"} |= "eyJ"
+{service="gitea-ci"} |~ "eyJ[A-Za-z0-9_-]{5,}"
 {service="gitea-ci", resource_type="k8s_container", namespace!="gitea-runner"}
 {service="gitea-ci", resource_type="k8s_container", container!="runner"}
 {service="gitea-ci", resource_type="k8s_container"} !~ `^time="\d{4}-[^"]+" level=\w+ msg=`
@@ -567,6 +572,10 @@ pod_name!=""}[15m]))` and the same with `nat_ip!=""` are empty too.
 The email query skips a line that names an instantiated systemd unit
 (`wg-quick@wg-watchtower.service`), so an address on the same line as one goes
 unseen.
+
+The JWT queries want at least five characters after `eyJ`: a bare `eyJ` at
+the end of a random WAF transaction id matched on blog-vm on 2026-11-03. Any
+real token still matches, with or without its dots.
 
 The fingerprint query also hits a hash in lower-case hex after `SHA1:` or
 `SHA-256:`, which the scrub leaves alone; a hit in that shape is no leak.

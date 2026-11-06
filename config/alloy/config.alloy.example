@@ -1,4 +1,4 @@
-// Grafana Alloy (v1.21.2) for a service that ships its telemetry to
+// Grafana Alloy (v1.21.3) for a service that ships its telemetry to
 // watchtower; docs/client-telemetry.md is the contract. The host must be one
 // of watchtower's agent peers (its config is in Secret Manager,
 // watchtower-observe/wireguard-<peer>-peer): watchtower.jasonmross.dev
