@@ -814,7 +814,10 @@ Tested with the pinned Grafana on a database that outlives its container:
    gcloud secrets versions list healthchecks-telemetry-alert-url --project watchtower-observe
    gcloud secrets versions disable <newest> --secret healthchecks-telemetry-alert-url --project watchtower-observe
    ```
-2. Deploy (dispatch `deploy.yml`). Every node drops the notifications file and the
+2. Deploy (dispatch `deploy.yml`). If it fails at its setup step naming this
+   secret, gcloud worded the disabled version differently from what
+   `.gitea/actions/setup/action.yml` matches (`is in DISABLED state`): add its
+   wording there, and deploy again. Every node drops the notifications file and the
    quadlet's `Secret=` line. The contact points and the policy tree are still in the
    database, and the check still gets pings.
 3. On one node (`ssh -J root@10.8.0.1 root@<node>`), the one-off, then a restart:
