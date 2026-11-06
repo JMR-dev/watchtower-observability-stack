@@ -744,8 +744,11 @@ stays "new". Grafana's HA cluster sends each notification from one node.
   `scripts/healthchecks.sh` hasn't filled it): the deploy goes on, Grafana gets the
   rules and the dashboard, and no contact point or policy tree of ours. Alerts show
   in Grafana and go to its own default contact point, which can't send. Run
-  `scripts/healthchecks.sh`, then deploy. A deploy that may not read the secret (no
-  `bootstrap.sh` since it was added) fails, rather than go on without it.
+  `scripts/healthchecks.sh`, then deploy. A deploy that may not read the secret
+  (not made yet, or not yet granted by `scripts/bootstrap.sh`: Secret Manager
+  answers `PERMISSION_DENIED` to both) goes on the same way, but never silently:
+  each run carries a warning naming the secret until bootstrap grants it, and
+  `healthchecks.sh` says so as it stores the URL.
 - **After the URL is gone again** (its newest version disabled or destroyed), the
   deploy stops writing the notifications file, and that's all: Grafana never
   deletes a provisioned contact point or policy tree whose file is gone. The

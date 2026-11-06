@@ -207,7 +207,8 @@ jobs:
             ?@WIREGUARD_DEPLOY_PEER_FILE=wireguard-deploy-peer
             # None until the owner runs scripts/healthchecks.sh: the deploy then
             # provisions the telemetry alerts but no contact point
-            # (roles/grafana/defaults). A denied read still fails the job.
+            # (roles/grafana/defaults). Not yet granted by bootstrap.sh: the
+            # same, with a warning on the run.
             ?HEALTHCHECKS_TELEMETRY_ALERT_URL=healthchecks-telemetry-alert-url
       - name: Inventory and pinned host keys from the cloud stack
         working-directory: infra/cloud

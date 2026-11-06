@@ -400,7 +400,8 @@ func TestOptionalSecretsAreReadAsOptional(t *testing.T) {
 // fakeGcloud answers `gcloud secrets versions access latest --secret ID ...
 // --out-file F` the way Secret Manager does, by the id's first word: val- has a
 // value, none- has no version, off- has its newest version disabled, denied- is
-// a secret the caller may not read (or that doesn't exist: the same answer).
+// a secret the caller may not read (or that doesn't exist: the same answer),
+// token- is gcloud failing to authenticate at all.
 const fakeGcloud = `#!/usr/bin/env bash
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -414,6 +415,7 @@ case "$id" in
   none-*) echo "ERROR: (gcloud.secrets.versions.access) NOT_FOUND: Secret [projects/1/secrets/${id}] not found or has no versions." >&2; exit 1 ;;
   off-*) echo "ERROR: (gcloud.secrets.versions.access) FAILED_PRECONDITION: Secret Version [projects/1/secrets/${id}/versions/2] is in DISABLED state." >&2; exit 1 ;;
   denied-*) echo "ERROR: (gcloud.secrets.versions.access) PERMISSION_DENIED: Permission 'secretmanager.versions.access' denied for resource 'projects/p/secrets/${id}/versions/latest' (or it may not exist)." >&2; exit 1 ;;
+  token-*) echo "ERROR: (gcloud.secrets.versions.access) There was a problem refreshing your current auth tokens: ('invalid_grant: Invalid JWT Signature.')" >&2; exit 1 ;;
   *) echo "fake gcloud: unknown id ${id}" >&2; exit 2 ;;
 esac
 `
@@ -432,16 +434,17 @@ func readSecretsStep(t *testing.T) string {
 	return regexp.MustCompile(`(?m)^        `).ReplaceAllString(m[1], "")
 }
 
-// An optional secret (?NAME=id, ?@NAME=id) is skipped only when it has no value:
-// no version, or its newest disabled. A read that's denied fails the job, as a
-// required secret's failure does: otherwise a deploy whose deployer was never
-// granted the secret would go on without it and say nothing.
+// An optional secret (?NAME=id, ?@NAME=id) is skipped when it has no value (no
+// version, or its newest disabled), and when the read is denied, which is also
+// what a secret not yet made looks like to the deployer: a merge must not break
+// every deploy until the owner runs bootstrap.sh. A denied read is never silent,
+// though: a warning annotation names the secret. Any other error fails the job.
 func TestSetupActionSkipsOnlyMissingOptionalSecrets(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("no bash")
 	}
 	script := readSecretsStep(t)
-	run := func(t *testing.T, secrets string) (env, stderr string, err error) {
+	run := func(t *testing.T, secrets string) (env, output string, err error) {
 		tmp := t.TempDir()
 		bin := filepath.Join(tmp, "tools", "google-cloud-sdk", "bin")
 		if err := os.MkdirAll(bin, 0o755); err != nil {
@@ -461,11 +464,13 @@ func TestSetupActionSkipsOnlyMissingOptionalSecrets(t *testing.T) {
 		}
 		cmd := exec.Command("bash", stepFile)
 		cmd.Env = append(os.Environ(), "RUNNER_TEMP="+tmp, "GITHUB_ENV="+envFile, "PROJECT=p", "SECRETS="+secrets)
-		var errOut strings.Builder
-		cmd.Stderr = &errOut
+		// The job log: stdout (where workflow commands go) and stderr.
+		var out strings.Builder
+		cmd.Stdout = &out
+		cmd.Stderr = &out
 		err = cmd.Run()
 		b, _ := os.ReadFile(envFile)
-		return string(b), errOut.String(), err
+		return string(b), out.String(), err
 	}
 
 	t.Run("no version or a disabled one: unset, and the job goes on", func(t *testing.T) {
@@ -487,19 +492,36 @@ func TestSetupActionSkipsOnlyMissingOptionalSecrets(t *testing.T) {
 		}
 	})
 	for _, line := range []string{"?OPT=denied-f", "?@OPT_FILE=denied-f"} {
-		t.Run("a denied read of "+line+" fails the job, naming the secret", func(t *testing.T) {
-			env, stderr, err := run(t, line+"\n")
-			if err == nil {
-				t.Fatalf("succeeded; GITHUB_ENV = %q", env)
+		t.Run("a denied read of "+line+": unset, the job goes on, and a warning names it", func(t *testing.T) {
+			env, output, err := run(t, line+"\nREQ=val-g\n")
+			if err != nil {
+				t.Fatalf("failed: %v\n%s", err, output)
 			}
-			if !strings.Contains(stderr, "reading secret denied-f") || !strings.Contains(stderr, "PERMISSION_DENIED") || !strings.Contains(stderr, "bootstrap.sh") {
-				t.Errorf("stderr = %q", stderr)
+			if strings.Contains(env, "OPT") || !strings.Contains(env, "REQ=value of val-g\n") {
+				t.Errorf("GITHUB_ENV = %q, want REQ alone", env)
+			}
+			warning := regexp.MustCompile(`(?m)^::warning[^:]*::denied-f can't be read \(PERMISSION_DENIED\).*scripts/bootstrap\.sh.*goes on without OPT`)
+			if !warning.MatchString(output) {
+				t.Errorf("no warning annotation naming denied-f, bootstrap.sh and OPT in the job log:\n%s", output)
 			}
 		})
 	}
-	t.Run("a required secret with no version fails the job", func(t *testing.T) {
-		if env, _, err := run(t, "REQ=none-g\n"); err == nil {
-			t.Fatalf("succeeded; GITHUB_ENV = %q", env)
+	for _, line := range []string{"?OPT=token-h", "?@OPT_FILE=token-h"} {
+		t.Run("any other error reading "+line+" fails the job, naming the secret", func(t *testing.T) {
+			env, output, err := run(t, line+"\n")
+			if err == nil {
+				t.Fatalf("succeeded; GITHUB_ENV = %q", env)
+			}
+			if !strings.Contains(output, "reading secret token-h") || !strings.Contains(output, "auth tokens") {
+				t.Errorf("job log = %q", output)
+			}
+		})
+	}
+	t.Run("a required secret, with no version or denied, fails the job", func(t *testing.T) {
+		for _, line := range []string{"REQ=none-i", "REQ=denied-j"} {
+			if env, _, err := run(t, line+"\n"); err == nil {
+				t.Errorf("%s succeeded; GITHUB_ENV = %q", line, env)
+			}
 		}
 	})
 }
@@ -529,6 +551,16 @@ func TestTelemetryAlertsReachTheirCheck(t *testing.T) {
 	healthchecks := read("scripts/healthchecks.sh")
 	if !strings.Contains(healthchecks, `secret.sh" put `+SecretHealthchecksTelemetryAlertURL) {
 		t.Errorf("healthchecks.sh does not store %s", SecretHealthchecksTelemetryAlertURL)
+	}
+	// A deploy the deployer may not read it for only warns, so healthchecks.sh
+	// says, as it stores it, whether bootstrap.sh has granted it, and never
+	// grants it itself (bootstrap.sh owns IAM).
+	if !strings.Contains(healthchecks, "gcloud secrets get-iam-policy "+SecretHealthchecksTelemetryAlertURL) ||
+		!strings.Contains(healthchecks, "roles/secretmanager.secretAccessor") || !strings.Contains(healthchecks, "run scripts/bootstrap.sh") {
+		t.Errorf("healthchecks.sh does not check that the deployer may read %s and point at bootstrap.sh", SecretHealthchecksTelemetryAlertURL)
+	}
+	if strings.Contains(healthchecks, "add-iam-policy-binding") || strings.Contains(healthchecks, "set-iam-policy") {
+		t.Error("healthchecks.sh changes IAM: that is bootstrap.sh's")
 	}
 	for v, want := range map[string]string{"TELEMETRY_SUCCESS_KW": TelemetryAlertsResolved, "TELEMETRY_FAILURE_KW": TelemetryAlertsFiring} {
 		m := regexp.MustCompile(`(?m)^` + v + `="([^"]*)"$`).FindStringSubmatch(healthchecks)
