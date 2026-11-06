@@ -142,7 +142,7 @@ const (
 	// The Healthchecks.io ping URL of watchtower-telemetry-alerts
 	// (scripts/healthchecks.sh): Grafana posts the telemetry alerts'
 	// notifications there (ansible/roles/grafana). In OptionalSecrets: until the
-	// owner stores it, the deploy goes on and Grafana notifies no one.
+	// owner stores it, the deploy goes on and provisions no contact point.
 	SecretHealthchecksTelemetryAlertURL = "healthchecks-telemetry-alert-url"
 
 	// SecretGARPushKey is copied to the GAR_PUSH_KEY Actions secret by the

@@ -29,6 +29,18 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 SOURCES = REPO / "ansible/inventory/group_vars/all/telemetry.yml"
 HEALTHCHECKS = REPO / "scripts/healthchecks.sh"
 QUADLET = REPO / "ansible/.render/watchtower-1/quadlets/grafana.container"
+TASKS = REPO / "ansible/roles/grafana/tasks/main.yml"
+# What each of roles/grafana's tasks does to the four things the contact point
+# file needs, by task name: (state when the URL is there, state when it isn't).
+# None leaves it as it was; "quadlet" copies what the quadlet on disk says.
+TASK_EFFECTS = {
+    "No contact point file without the ping URL": {"file": (None, False)},
+    "Grafana's secrets": {"secret": (True, None)},
+    "Grafana quadlet": {"quadlet": (True, False)},
+    "Load the quadlet before the contact point file can need its secret": {"loaded": ("quadlet", "quadlet")},
+    "The telemetry alerts' contact point and notification policy": {"file": (True, None)},
+    "Start Grafana": {"loaded": ("quadlet", "quadlet")},
+}
 SECRET_PATH = "/run/secrets/grafana-telemetry-alert-url"
 DURATION = re.compile(r"^([0-9]+(ms|s|m|h|d|w|y))+$")
 # Grafana's own limit on a rule's uid, and the characters it allows.
@@ -200,6 +212,44 @@ def check_notifications(prov, success_kw, failure_kw):
     quadlet = QUADLET.read_text(encoding="utf-8") if QUADLET.exists() else ""
     if f"Secret={pathlib.PurePath(SECRET_PATH).name}," not in quadlet:
         fail("the rendered quadlet has no Secret= line for the URL the contact point reads")
+    return template
+
+
+def check_task_order():
+    """The contact point file reads its URL through $__file{} from the podman
+    secret the quadlet mounts, and Grafana won't start with the file and without
+    the mount. A run can stop after any task, and Grafana can restart then (a
+    crash under Restart=always takes the unit systemd has loaded; a reboot, the
+    quadlet on disk). So after every task, from every starting state, with the
+    URL there and gone: a file means the secret exists, and both the quadlet on
+    disk and the loaded unit mount it."""
+    tasks = yaml.safe_load(TASKS.read_text(encoding="utf-8"))
+    names = [t.get("name") for t in tasks]
+    for name in TASK_EFFECTS:
+        if names.count(name) != 1:
+            fail(f"roles/grafana/tasks/main.yml: no single task named {name!r} (check-grafana-provisioning.py models it)")
+            return
+    order = [n for n in names if n in TASK_EFFECTS]
+    starts = {
+        "notifying": {"file": True, "secret": True, "quadlet": True, "loaded": True},
+        "never had the URL": {"file": False, "secret": False, "quadlet": False, "loaded": False},
+        "had it, its secret left": {"file": False, "secret": True, "quadlet": False, "loaded": False},
+    }
+    for url in (True, False):
+        for start, first in starts.items():
+            state = dict(first)
+            for name in order:
+                for thing, (with_url, without) in TASK_EFFECTS[name].items():
+                    effect = with_url if url else without
+                    if effect == "quadlet":
+                        state[thing] = state["quadlet"]
+                    elif effect is not None:
+                        state[thing] = effect
+                if state["file"] and not (state["secret"] and state["quadlet"] and state["loaded"]):
+                    fail(f"a run with the URL {'there' if url else 'gone'}, from {start}, that stops after "
+                         f"{name!r} leaves the contact point file without its secret mounted: {state}")
+                    return
+    print(f"ok    order: no run that stops after any of {len(order)} tasks leaves the contact point file without its secret")
 
 
 def dashboard_queries(prov, datasource_uids):
@@ -240,7 +290,8 @@ def static(prov, out):
     success_kw, failure_kw = keywords()
     datasource_uids = check_datasources(prov)
     promql, logql, expected = check_rules(prov, datasource_uids, sources)
-    check_notifications(prov, success_kw, failure_kw)
+    payload = check_notifications(prov, success_kw, failure_kw)
+    check_task_order()
     dash_promql, dash_logql, dash_title = dashboard_queries(prov, datasource_uids)
     promql += dash_promql
     logql += dash_logql
@@ -250,7 +301,7 @@ def static(prov, out):
     with open(out / "logql.tsv", "w", encoding="utf-8") as f:
         for name, expr in logql:
             f.write(f"{name}\t{urllib.parse.quote(expr, safe='')}\n")
-    (out / "expected.json").write_text(json.dumps({"rules": expected, "dashboard": dash_title}), encoding="utf-8")
+    (out / "expected.json").write_text(json.dumps({"rules": expected, "dashboard": dash_title, "payload": payload}), encoding="utf-8")
     print(f"ok    structure: {len(expected)} rules in {len(sources)} groups, {len(dash_promql) + len(dash_logql)} dashboard queries, "
           f"{len(promql)} PromQL and {len(logql)} LogQL expressions to parse")
 
@@ -290,6 +341,10 @@ def api(out, variant, api_dir):
             fail("full: no file-provisioned contact point telemetry-healthchecks")
         elif hook.get("settings", {}).get("url") != (api_dir / "stand-in-url").read_text(encoding="utf-8"):
             fail("full: the contact point's URL is not the one in the secret file")
+        # A Grafana that dropped the custom payload would send its default
+        # JSON body, with neither keyword: every ping ignored, the check never down.
+        elif ((hook.get("settings") or {}).get("payload") or {}).get("template") != expected["payload"]:
+            fail("full: Grafana didn't keep the contact point's payload template as written")
         if policy.get("receiver") != "unrouted" or policy.get("provenance") != "file":
             fail(f"full: the policy tree's root is {policy.get('receiver')!r}, provenance {policy.get('provenance')!r}")
     else:

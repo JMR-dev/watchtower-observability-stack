@@ -1,9 +1,15 @@
 ---
-# Whether Grafana notifies anyone of the telemetry alerts: only once the owner
-# has stored the Healthchecks.io ping URL (scripts/healthchecks.sh), which the
-# deploy then reads as an optional secret. Without it the rules and the
-# dashboard are still provisioned, with no contact point and no policy tree:
-# the alerts show in Grafana and go nowhere. This one value decides both the
-# notifications file and the quadlet's Secret= line, which must go together
-# (a $__file{} naming a missing file stops Grafana).
+# Whether the deploy provisions the telemetry alerts' contact point and policy
+# tree: only while it has the Healthchecks.io ping URL (scripts/healthchecks.sh),
+# which it reads as an optional secret. Without it, the rules and the dashboard
+# are still provisioned, and:
+#   - a Grafana that never had the URL has no contact point or policy tree of
+#     ours: the alerts go to its own default contact point, an email it can't
+#     send;
+#   - one that had it keeps them: Grafana never deletes a provisioned contact
+#     point or policy tree whose file is gone, so the alerts still reach the
+#     check, at the URL it last read. docs/runbook.md, "Telemetry alerts", has
+#     the one-off that turns them off.
+# This one value decides both the notifications file and the quadlet's Secret=
+# line, which must go together (a $__file{} naming a missing file stops Grafana).
 grafana_telemetry_notify: "{{ watchtower_optional_secret.healthchecks_telemetry_alert_url | length > 0 }}"

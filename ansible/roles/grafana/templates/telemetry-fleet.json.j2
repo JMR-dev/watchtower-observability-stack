@@ -191,7 +191,7 @@
       "datasource": {{ mimir }},
       "fieldConfig": {
         "defaults": {
-          "displayName": "${__field.labels.host} ${__field.labels.instance} ${__field.labels.probe}",
+          "displayName": "${__field.labels.host} ${__field.labels.probe}",
           "mappings": [{"type": "value", "options": {"0": {"text": "failing", "color": "red"}, "1": {"text": "ok", "color": "green"}}}],
           "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]},
           "color": {"mode": "thresholds"}
@@ -212,7 +212,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "d", "min": 0, "max": 90, "decimals": 0,
-          "displayName": "${__field.labels.host} ${__field.labels.instance} ${__field.labels.probe}",
+          "displayName": "${__field.labels.host} ${__field.labels.probe}",
           "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": {{ watchtower_telemetry_alert.cert_days_below }}}, {"color": "green", "value": 30}]},
           "color": {"mode": "thresholds"}
         },

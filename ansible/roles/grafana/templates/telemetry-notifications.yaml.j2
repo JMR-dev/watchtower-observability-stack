@@ -8,7 +8,13 @@
 # Only here when the deploy has the ping URL (healthchecks-telemetry-alert-url):
 # Grafana reads it from the podman secret as it starts, and it is never in this
 # file. A $__file{} that names a missing file stops Grafana, so the task that
-# writes this file and the quadlet's Secret= line go by the same variable.
+# writes this file and the quadlet's Secret= line go by the same variable, in an
+# order no partial run can break (roles/grafana/tasks/main.yml).
+#
+# Taking this file away does not take what it made out of Grafana: the contact
+# points (the URL Grafana last read included) and the policy tree stay in its
+# database, and the alerts still reach the check. docs/runbook.md, "Telemetry
+# alerts", has the one-off that turns them off.
 #
 # Provisioning a policy tree replaces the whole tree. Its root goes to
 # `unrouted`, an email contact point that can't send (no SMTP here, an

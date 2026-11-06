@@ -36,7 +36,9 @@ description: |
   deploy.yml names here). NAME=id exports the value as NAME (one line
   only); @NAME=id writes it to a 0600 file and exports its path as NAME (for
   key files). A leading ? (?NAME=id, ?@NAME=id) makes it optional: a secret
-  with no version yet leaves NAME unset instead of failing the job. Lines
+  with no value yet (no version, or its newest disabled or destroyed) leaves
+  NAME unset instead of failing the job; any other error, a denied read
+  included, still fails it. Lines
   starting with # are comments. Every line of every value is masked in the log first. Reading
   needs `gcp-key` and installs gcloud.
 
@@ -263,14 +265,23 @@ runs:
           optional="${BASH_REMATCH[1]}" as_file="${BASH_REMATCH[2]}" name="${BASH_REMATCH[3]}" id="${BASH_REMATCH[4]}"
           file="${dir}/${id}"
           if ! "$gcloud" secrets versions access latest --secret "$id" --project "$PROJECT" --out-file "$file" 2>"${dir}/.err"; then
-            # ?NAME=id: a secret that may have no version yet, which the job
+            rm -f "$file"
+            # ?NAME=id: a secret that may have no value yet, which the job
             # copes with (the deploy's own VPN peer, before the first deploy).
-            if [[ -n "$optional" ]]; then
-              echo "${id} has no version yet; ${name} stays unset"
-              rm -f "$file" "${dir}/.err"
+            # Only "no value" counts: no version (NOT_FOUND), or its newest
+            # version disabled or destroyed. Anything else, PERMISSION_DENIED
+            # above all (bootstrap.sh never granted it, or never made it: a
+            # secret the deployer can't see reads as denied), fails the job,
+            # or a deploy would go on without it and say nothing.
+            if [[ -n "$optional" ]] && grep -qE 'NOT_FOUND|is in (DISABLED|DESTROYED) state' "${dir}/.err"; then
+              echo "${id} has no value yet; ${name} stays unset"
+              rm -f "${dir}/.err"
               continue
             fi
+            # gcloud's error names the secret, never its value.
+            echo "reading secret ${id} for ${name} failed:" >&2
             cat "${dir}/.err" >&2
+            [[ -z "$optional" ]] || echo "${id} is optional, but only a missing value may be skipped: run scripts/bootstrap.sh, which creates it and lets the deployer read it" >&2
             exit 1
           fi
           rm -f "${dir}/.err"

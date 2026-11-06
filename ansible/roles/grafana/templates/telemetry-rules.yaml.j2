@@ -75,6 +75,16 @@ groups:
             + (['probe', 'cert'] if 'blackbox' in jobs else [])
             + (['caddy-5xx'] if 'caddy' in jobs else []) %}
 {% set gone.uids = gone.uids + (standard | reject('in', made) | map('regex_replace', '^', 'tw-' ~ src.name ~ '-') | list) %}
+{# What a blackbox series probed, as a Grafana template: its `probe` label
+   looked up in the source's probes ("" for none), or `instance` (only the
+   exporter's name) for a source that doesn't say. A series without the label
+   is `not $labels.probe`: in Grafana, a missing label isn't `eq` to "". #}
+{% set pn = namespace(t='') %}
+{% for p, what in (src.probes | default({})).items() %}
+{% set test = ('not $labels.probe' if p == '' else 'eq $labels.probe "' ~ p ~ '"') %}
+{% set pn.t = pn.t ~ ('{{ if ' if loop.first else '{{ else if ') ~ test ~ ' }}' ~ what %}
+{% endfor %}
+{% set probed = (pn.t ~ '{{ else }}{{ $labels.instance }}{{ end }}') if pn.t else '{{ $labels.instance }}' %}
   - orgId: 1
     name: {{ ('telemetry-' ~ src.name) | to_json }}
     folder: Telemetry
@@ -89,7 +99,7 @@ groups:
 {{ rule(src, 'metrics-silent', 'no metrics', mimir, ns.absent | join(' or '), 'gt', 0, t.metrics_silent['for'],
    'No metrics from job {{ $labels.job }} on ' ~ src.name ~ ' for ' ~ t.metrics_silent.window ~ ': the host, its Alloy, its tunnel or that scrape is down.') }}
 {{ rule(src, 'target-down', 'scrape target down', mimir, 'min by (job, instance, probe) (up{' ~ sel ~ '})', 'lt', 1, t.target_down['for'],
-   'Job {{ $labels.job }} ({{ $labels.instance }}{{ if $labels.probe }}, probe {{ $labels.probe }}{{ end }}) on ' ~ src.name ~ ' answers its scrape with up == 0.') }}
+   '{{ if eq $labels.job "blackbox" }}The blackbox probe of ' ~ probed ~ '{{ else }}Job {{ $labels.job }} ({{ $labels.instance }}){{ end }} on ' ~ src.name ~ ' answers its scrape with up == 0.') }}
 {% endif %}
 {% if 'logs-silent' in made %}
 {{ rule(src, 'logs-silent', 'no logs', loki, 'absent_over_time({' ~ sel ~ '}[' ~ src.logs_silent_after ~ '])', 'gt', 0, t.logs_silent['for'],
@@ -129,10 +139,10 @@ groups:
 {% if 'probe' in made %}
 {{ rule(src, 'probe', 'probe failing', mimir,
    'max by (instance, probe) (max_over_time(probe_success{' ~ sel ~ ', job="blackbox"}[' ~ t.probe.window ~ ']))', 'lt', 1, t.probe['for'],
-   'Every probe of {{ $labels.instance }}{{ if $labels.probe }} ({{ $labels.probe }}){{ end }} from ' ~ src.name ~ ' has failed for over ' ~ t.probe.window ~ '.') }}
+   'Every probe of ' ~ probed ~ ' from ' ~ src.name ~ ' has failed for over ' ~ t.probe.window ~ '.') }}
 {{ rule(src, 'cert', 'certificate expiring', mimir,
    'min by (instance, probe) (probe_ssl_earliest_cert_expiry{' ~ sel ~ ', job="blackbox"} - time()) / 86400', 'lt', t.cert_days_below, t.cert['for'],
-   'The certificate {{ $labels.instance }}{{ if $labels.probe }} ({{ $labels.probe }}){{ end }} probes on ' ~ src.name ~ ' expires in {{ printf "%.1f" $values.A.Value }} days: Caddy has not renewed it.') }}
+   'The certificate of ' ~ probed ~ ', probed from ' ~ src.name ~ ', expires in {{ printf "%.1f" $values.A.Value }} days: Caddy has not renewed it.') }}
 {% endif %}
 {% if 'caddy-5xx' in made %}
 {% set requests = 'caddy_http_request_duration_seconds_count{' ~ sel %}

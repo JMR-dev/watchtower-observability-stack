@@ -439,8 +439,9 @@ first):
 - The notifications (`telemetry-notifications.yaml.j2`): a webhook to the check's
   ping URL, read from a podman secret, with a body whose first line the check's
   keyword filter sorts into a failure or a success; one route on
-  `telemetry="true"`, grouped on that label alone. Only with the URL; without it
-  the alerts notify no one.
+  `telemetry="true"`, grouped on that label alone. Provisioned only while the
+  deploy has the URL; once provisioned, they stay in Grafana's database until a
+  one-off removes them (docs/runbook.md, "Telemetry alerts").
 - The **Telemetry fleet** dashboard (`telemetry-fleet.json.j2`), with a host
   variable over the list.
 - CI (`scripts/check-grafana.sh`, the configs job): promtool and Loki parse every
@@ -460,8 +461,9 @@ exporter (in their own repos) they can take `systemd: true` too.
 
 **Adding a source** is one entry in the list, once its series and logs are
 verified ("Verification", below): its `host` label, `service`, the `jobs` it really
-sends, a `logs_silent_after` measured from its quietest hours, and `systemd: true`
-if it has the collector. Removing one takes its name in
+sends, a `logs_silent_after` measured from its quietest hours, `systemd: true`
+if it has the collector, and `probes`, what its blackbox targets reach by their
+`probe` label. Removing one takes its name in
 `watchtower_telemetry_retired_sources` too: Grafana keeps a provisioned rule until
 the file deletes it (docs/runbook.md, "Telemetry alerts"). Two are due:
 

@@ -53,7 +53,7 @@ cleanup() {
   ids="$("$rt" ps -aq --filter "label=${run_label}" 2>/dev/null || true)"
   # One at a time, newest first: a container another one shares a network
   # namespace with can only go after it (podman refuses).
-  for c in $ids; do "$rt" rm -f "$c" >/dev/null 2>&1 || true; done
+  for c in $ids; do "$rt" rm -f -v "$c" >/dev/null 2>&1 || true; done
   [[ "$rt" != podman ]] || podman secret rm "$SECRET_NAME-check" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
@@ -82,7 +82,7 @@ in_netns() { # container script [file]
   c="$("$rt" create --label "$run_label" --network "container:$1" --entrypoint /bin/sh "$PROMETHEUS_IMAGE" -c "$2")"
   [[ -z "${3:-}" ]] || "$rt" cp "$3" "${c}:/tmp/in"
   "$rt" start --attach "$c" || rc=$?
-  "$rt" rm -f "$c" >/dev/null 2>&1 || true
+  "$rt" rm -f -v "$c" >/dev/null 2>&1 || true
   return "$rc"
 }
 
@@ -121,7 +121,7 @@ else
   printf '%s\n' "$out" | sed 's/^/      /'
   fail=1
 fi
-"$rt" rm -f "$loki" >/dev/null
+"$rt" rm -f -v "$loki" >/dev/null
 
 # 4. Grafana, with and without the notifications file.
 grafana_run() { # variant
@@ -169,7 +169,7 @@ grafana_run() { # variant
     in_netns "$g" "wget -q -O - --header 'Authorization: Basic YWRtaW46Y2hlY2s=' http://127.0.0.1:3000${path}" >"$api/$name" 2>/dev/null || true
   done
   python3 "${repo_root}/scripts/check-grafana-provisioning.py" api "$work/out" "$variant" "$api" || fail=1
-  "$rt" rm -f "$g" >/dev/null
+  "$rt" rm -f -v "$g" >/dev/null
 }
 grafana_run full
 grafana_run bare

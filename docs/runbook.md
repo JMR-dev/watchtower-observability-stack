@@ -740,12 +740,17 @@ and the check's event log keeps them. Its period is a year: no ping is no news, 
 a dead Grafana (each node's own check covers that). Until anything first fires it
 stays "new". Grafana's HA cluster sends each notification from one node.
 
-- **Without the ping URL** (before `scripts/healthchecks.sh` has run): the deploy
-  goes on, Grafana gets the rules and the dashboard, and no contact point or policy
-  tree of ours. Alerts show in Grafana and go to its own default contact point, an
-  email it can't send (no SMTP). Run `scripts/healthchecks.sh`,
-  then `scripts/bootstrap.sh` (it lets the deployer read the new secret), then
-  deploy.
+- **Before the URL** (`scripts/bootstrap.sh` has made the secret, but
+  `scripts/healthchecks.sh` hasn't filled it): the deploy goes on, Grafana gets the
+  rules and the dashboard, and no contact point or policy tree of ours. Alerts show
+  in Grafana and go to its own default contact point, which can't send. Run
+  `scripts/healthchecks.sh`, then deploy. A deploy that may not read the secret (no
+  `bootstrap.sh` since it was added) fails, rather than go on without it.
+- **After the URL is gone again** (its newest version disabled or destroyed), the
+  deploy stops writing the notifications file, and that's all: Grafana never
+  deletes a provisioned contact point or policy tree whose file is gone. The
+  contact point, with the URL Grafana last read, stays in its database, and the
+  alerts still reach the check. "Turning the notifications off" below removes them.
 - **The policy tree is provisioned whole:** its root goes to `unrouted`, an email
   contact point that can't send (no SMTP, an `.invalid` address). Nothing routes
   there unless an alert lacks `telemetry="true"`, such as one made in the UI.
@@ -776,8 +781,10 @@ What each alert means, and what to look at first (`<host>` is the source's name)
 **Adding a source:** once its series and logs are verified (docs/client-telemetry.md,
 "Verification"), add one entry to `watchtower_telemetry_sources`: its `host` label,
 `service`, the scrape `jobs` it sends (they decide its checks), `logs_silent_after`
-measured from its quietest hour, and `systemd: true` if Alloy has the systemd
-collector. Check its real rates first, so no rule is empty or flaps. Merge; the
+measured from its quietest hour, `systemd: true` if Alloy has the systemd
+collector, and `probes`: what each blackbox target reaches, by its `probe` label
+(`""` when its series have none), from its Alloy config, so the alerts name it.
+Check its real rates first, so no rule is empty or flaps. Merge; the
 deploy restarts Grafana node by node, and the dashboard's host list follows.
 
 **Removing a source or a check:** Grafana keeps a provisioned rule that leaves its
@@ -796,6 +803,48 @@ up with the ping Grafana would have sent, the URL going to curl on stdin:
 gopass show -o watchtower/healthchecks-telemetry-alert-url | sed 's/.*/url = "&"/' |
   curl -fsS -m 20 -K - -o /dev/null --data-raw TELEMETRY-ALERTS-RESOLVED
 ```
+
+**Turning the notifications off for good.** Taking the URL away stops the deploy
+provisioning the contact point; it doesn't take the one Grafana has out of its
+database. A one-off provisioning file does, on one node (the database is shared).
+Tested with the pinned Grafana on a database that outlives its container:
+
+1. Disable the URL's newest version, so the deploy reads it as having no value:
+   ```bash
+   gcloud secrets versions list healthchecks-telemetry-alert-url --project watchtower-observe
+   gcloud secrets versions disable <newest> --secret healthchecks-telemetry-alert-url --project watchtower-observe
+   ```
+2. Deploy (dispatch `deploy.yml`). Every node drops the notifications file and the
+   quadlet's `Secret=` line. The contact points and the policy tree are still in the
+   database, and the check still gets pings.
+3. On one node (`ssh -J root@10.8.0.1 root@<node>`), the one-off, then a restart:
+   ```bash
+   cat >/etc/watchtower/grafana/provisioning/alerting/telemetry-off.yaml <<'YAML'
+   apiVersion: 1
+   resetPolicies:
+     - 1
+   deleteContactPoints:
+     - orgId: 1
+       uid: telemetry-healthchecks
+     - orgId: 1
+       uid: unrouted
+   YAML
+   systemctl restart grafana
+   ```
+   Both halves, in one file: Grafana resets the policy tree to its default, then
+   deletes the two contact points. Deleting them alone stops Grafana from starting,
+   since the provisioned tree still routes to them.
+4. Check: Alerting → Contact points lists neither, and the notification policies
+   are Grafana's default. The rules and the dashboard stay; their alerts go to the
+   default policy's contact point.
+5. Remove the file (`rm /etc/watchtower/grafana/provisioning/alerting/telemetry-off.yaml`;
+   no restart needed). Left there, every restart of that node resets the policy tree
+   again, and would wipe anything made by hand since.
+6. If it's for good: delete the check in Healthchecks.io, and destroy the disabled
+   version (`gcloud secrets versions destroy`).
+
+Turning them back on is enabling a version (or storing a new URL with
+`scripts/healthchecks.sh`) and deploying: the notifications file provisions them again.
 
 ## Kafka
 

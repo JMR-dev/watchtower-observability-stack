@@ -74,18 +74,15 @@
     dest: "{{ watchtower_config }}/grafana/provisioning/dashboards/telemetry/telemetry-fleet.json"
     mode: "0644"
 
-# The contact point reads the ping URL from the podman secret below; the file
-# holds no secret. With no URL, no file: the rules still evaluate, and notify
-# no one (roles/grafana/defaults).
-- name: The telemetry alerts' contact point and notification policy
-  ansible.builtin.template:
-    src: telemetry-notifications.yaml.j2
-    dest: "{{ watchtower_config }}/grafana/provisioning/alerting/telemetry-notifications.yaml"
-    mode: "0644"
-  when: grafana_telemetry_notify | bool
-  notify: Restart grafana
-
-- name: No contact point without the ping URL
+# telemetry-notifications.yaml reads the ping URL from the podman secret
+# grafana-telemetry-alert-url ($__file{}), and Grafana won't start if that file
+# is there and the secret isn't mounted. So the order holds at every step a run
+# could stop at: the file goes first when the URL is gone, and comes last when
+# it's there, after the secret, the quadlet's Secret= line and a daemon-reload
+# (scripts/check-grafana-provisioning.py checks it). Removing the file here
+# does not take the contact point out of Grafana's database (docs/runbook.md,
+# "Telemetry alerts").
+- name: No contact point file without the ping URL
   ansible.builtin.file:
     path: "{{ watchtower_config }}/grafana/provisioning/alerting/telemetry-notifications.yaml"
     state: absent
@@ -120,6 +117,21 @@
     src: grafana.container.j2
     dest: /etc/containers/systemd/grafana.container
     mode: "0644"
+  notify: Restart grafana
+
+# Every run, not only when the quadlet changed: a run that stopped between the
+# two would leave systemd with the old unit, and Restart=always would start
+# Grafana without the Secret= line once the file below is there.
+- name: Load the quadlet before the contact point file can need its secret
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: The telemetry alerts' contact point and notification policy
+  ansible.builtin.template:
+    src: telemetry-notifications.yaml.j2
+    dest: "{{ watchtower_config }}/grafana/provisioning/alerting/telemetry-notifications.yaml"
+    mode: "0644"
+  when: grafana_telemetry_notify | bool
   notify: Restart grafana
 
 - name: Start Grafana

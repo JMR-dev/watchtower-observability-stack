@@ -3,6 +3,7 @@ package names
 import (
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -394,6 +395,113 @@ func TestOptionalSecretsAreReadAsOptional(t *testing.T) {
 			t.Errorf("deploy.yml never reads optional %s", id)
 		}
 	}
+}
+
+// fakeGcloud answers `gcloud secrets versions access latest --secret ID ...
+// --out-file F` the way Secret Manager does, by the id's first word: val- has a
+// value, none- has no version, off- has its newest version disabled, denied- is
+// a secret the caller may not read (or that doesn't exist: the same answer).
+const fakeGcloud = `#!/usr/bin/env bash
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --secret) id=$2; shift 2 ;;
+    --out-file) out=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$id" in
+  val-*) printf 'value of %s' "$id" >"$out" ;;
+  none-*) echo "ERROR: (gcloud.secrets.versions.access) NOT_FOUND: Secret [projects/1/secrets/${id}] not found or has no versions." >&2; exit 1 ;;
+  off-*) echo "ERROR: (gcloud.secrets.versions.access) FAILED_PRECONDITION: Secret Version [projects/1/secrets/${id}/versions/2] is in DISABLED state." >&2; exit 1 ;;
+  denied-*) echo "ERROR: (gcloud.secrets.versions.access) PERMISSION_DENIED: Permission 'secretmanager.versions.access' denied for resource 'projects/p/secrets/${id}/versions/latest' (or it may not exist)." >&2; exit 1 ;;
+  *) echo "fake gcloud: unknown id ${id}" >&2; exit 2 ;;
+esac
+`
+
+// readSecretsStep is the setup action's "Read secrets from Secret Manager"
+// script, as the runner gets it.
+func readSecretsStep(t *testing.T) string {
+	b, err := os.ReadFile("../../../.gitea/actions/setup/action.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?ms)- name: Read secrets from Secret Manager\n.*?\n      run: \|\n((?:        .*\n|\n)+)`).FindStringSubmatch(string(b))
+	if m == nil {
+		t.Fatal("action.yml has no `Read secrets from Secret Manager` step with a run: | block")
+	}
+	return regexp.MustCompile(`(?m)^        `).ReplaceAllString(m[1], "")
+}
+
+// An optional secret (?NAME=id, ?@NAME=id) is skipped only when it has no value:
+// no version, or its newest disabled. A read that's denied fails the job, as a
+// required secret's failure does: otherwise a deploy whose deployer was never
+// granted the secret would go on without it and say nothing.
+func TestSetupActionSkipsOnlyMissingOptionalSecrets(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("no bash")
+	}
+	script := readSecretsStep(t)
+	run := func(t *testing.T, secrets string) (env, stderr string, err error) {
+		tmp := t.TempDir()
+		bin := filepath.Join(tmp, "tools", "google-cloud-sdk", "bin")
+		if err := os.MkdirAll(bin, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bin, "gcloud"), []byte(fakeGcloud), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, "gcp-deployer.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		envFile := filepath.Join(tmp, "github-env")
+		// The repo's own step, from a file: bash runs what the runner would.
+		stepFile := filepath.Join(tmp, "step.sh")
+		if err := os.WriteFile(stepFile, []byte(script), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", stepFile)
+		cmd.Env = append(os.Environ(), "RUNNER_TEMP="+tmp, "GITHUB_ENV="+envFile, "PROJECT=p", "SECRETS="+secrets)
+		var errOut strings.Builder
+		cmd.Stderr = &errOut
+		err = cmd.Run()
+		b, _ := os.ReadFile(envFile)
+		return string(b), errOut.String(), err
+	}
+
+	t.Run("no version or a disabled one: unset, and the job goes on", func(t *testing.T) {
+		env, stderr, err := run(t, "?OPT=none-a\n?@OPT_FILE=off-b\nREQ=val-c\n")
+		if err != nil {
+			t.Fatalf("failed: %v\n%s", err, stderr)
+		}
+		if strings.Contains(env, "OPT") || !strings.Contains(env, "REQ=value of val-c\n") {
+			t.Errorf("GITHUB_ENV = %q, want REQ alone", env)
+		}
+	})
+	t.Run("an optional secret with a value is read like any other", func(t *testing.T) {
+		env, stderr, err := run(t, "?OPT=val-d\n?@OPT_FILE=val-e\n")
+		if err != nil {
+			t.Fatalf("failed: %v\n%s", err, stderr)
+		}
+		if !strings.Contains(env, "OPT=value of val-d\n") || !regexp.MustCompile(`(?m)^OPT_FILE=.*/secrets/val-e$`).MatchString(env) {
+			t.Errorf("GITHUB_ENV = %q", env)
+		}
+	})
+	for _, line := range []string{"?OPT=denied-f", "?@OPT_FILE=denied-f"} {
+		t.Run("a denied read of "+line+" fails the job, naming the secret", func(t *testing.T) {
+			env, stderr, err := run(t, line+"\n")
+			if err == nil {
+				t.Fatalf("succeeded; GITHUB_ENV = %q", env)
+			}
+			if !strings.Contains(stderr, "reading secret denied-f") || !strings.Contains(stderr, "PERMISSION_DENIED") || !strings.Contains(stderr, "bootstrap.sh") {
+				t.Errorf("stderr = %q", stderr)
+			}
+		})
+	}
+	t.Run("a required secret with no version fails the job", func(t *testing.T) {
+		if env, _, err := run(t, "REQ=none-g\n"); err == nil {
+			t.Fatalf("succeeded; GITHUB_ENV = %q", env)
+		}
+	})
 }
 
 // The telemetry alerts reach their Healthchecks.io check: the deploy reads the

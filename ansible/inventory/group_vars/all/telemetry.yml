@@ -20,6 +20,10 @@
 #                        out for a source that sends no logs
 #   systemd              true if Alloy's unix exporter has the systemd collector
 #                        (node_systemd_unit_state): failed units alert
+#   probes               what its blackbox probes reach, by their `probe` label
+#                        ("" for series without one), from its own Alloy config:
+#                        the alerts name it, since `instance` is only the
+#                        exporter's name (prometheus.exporter.blackbox.<x>)
 #   selector             (optional) its series' selector, in place of
 #                        host="<name>"; for a source with no host, Gitea CI's
 #                        service="gitea-ci"
@@ -35,21 +39,31 @@
 # 400-650 lines an hour); watchtower-bastion's longest silence was 9 minutes;
 # vault-production ships allow-listed units only (median 7 lines an hour) and
 # went 116 minutes without a line. Only vault-production has the systemd
-# collector.
+# collector. The probes are each repo's prometheus.exporter.blackbox targets on
+# its main as of 2026-11-05 (silverbullet-deployment roles/logship, dev_blog
+# vm/config/config.alloy.tmpl, vaultwarden-deployment alloy/config.alloy), and
+# the `probe` labels their live series carry.
 watchtower_telemetry_sources:
   - name: silverbullet-vm
     service: silverbullet
     jobs: [integrations/unix, alloy, caddy, blackbox]
     logs_silent_after: 30m
+    probes:
+      app: "SilverBullet itself (http://127.0.0.1:3000/.instance)"
+      public: "https://silverbullet.jasonmross.dev/.instance"
   - name: blog-vm
     service: blog
     jobs: [integrations/unix, alloy, caddy, blackbox]
     logs_silent_after: 30m
+    probes:
+      "": "https://blog.jasonmross.dev/"
   - name: vault-production
     service: vaultwarden
     jobs: [integrations/unix, alloy, caddy, blackbox]
     logs_silent_after: 6h
     systemd: true
+    probes:
+      "": "https://vault.jasonrossmedia.com/alive"
   - name: watchtower-bastion
     service: bastion
     jobs: [integrations/unix, alloy]
