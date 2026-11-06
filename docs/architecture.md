@@ -152,8 +152,10 @@ write telemetry, into the shared tenant `jasonmross`
   and lint, every host's firewall through `nft --check`; every rendered
   config through the program that reads it (quadlet, Loki, Mimir, Tempo,
   Fluent Bit; shellcheck for the host scripts); our images (native builds,
-  their configs checked with the built image, Trivy, a new tag for any
-  change), agent peers held to writes (nftables and Caddy); Semgrep;
+  Copa patching the OS packages Trivy finds fixable HIGH/CRITICAL holes in,
+  their configs checked with the patched image, then Trivy's gate on what's
+  left, a new tag for any change), agent peers held to writes (nftables and
+  Caddy); Semgrep;
   shellcheck, actionlint, the Alloy example and its scrub rules against a
   PII fixture.
 - **`deploy.yml`** on merge to main, and at 05:00 UTC Monday to Saturday:
