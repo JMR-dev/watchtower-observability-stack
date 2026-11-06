@@ -65,6 +65,15 @@
 # because that daemon keeps images in containerd's image store: Docker 29's
 # default on a new data root, which every arm64 job's daemon has. A daemon on
 # the older storage driver can't, and Copa fails there.
+#
+# For a Debian image, Copa runs apt in a helper image of its own,
+# ghcr.io/project-copacetic/copacetic/debian:stable-slim, and what that
+# fetches goes into ours. scripts/copa-source-policy.json (a BuildKit source
+# policy, which Copa passes on) pins that helper by digest and refuses any
+# other image of Copa's, so a new Copa or Debian that wants a different one
+# fails the build instead of pulling it unpinned. Alpine images need no
+# helper. Bump the digest the way the other pins are bumped: check what
+# `skopeo inspect --raw docker://...:stable-slim | sha256sum` gives.
 
 set -euo pipefail
 
@@ -133,7 +142,8 @@ if ((fixable > 0)); then
   echo "==> ${fixable} to fix:"
   jq -r '[.Results[]?.Vulnerabilities[]? | "  \(.PkgName) \(.InstalledVersion) -> \(.FixedVersion) (\(.VulnerabilityID), \(.Severity))"] | unique | .[]' "$report"
   echo "==> Patching them: $(copa --version), on $(docker info --format 'Docker {{.ServerVersion}}, storage {{.Driver}}')"
-  copa patch --image "$ref" --report "$report" --tag "${ref##*:}-patched" \
+  EXPERIMENTAL_BUILDKIT_SOURCE_POLICY="${repo_root}/scripts/copa-source-policy.json" \
+    copa patch --image "$ref" --report "$report" --tag "${ref##*:}-patched" \
     --addr "docker://${DOCKER_HOST:-unix:///var/run/docker.sock}" --timeout 20m --progress plain
   docker image inspect "$patched" >/dev/null 2>&1 || { echo "copa finished but there is no ${patched}" >&2; exit 1; }
   docker tag "$patched" "$ref"
