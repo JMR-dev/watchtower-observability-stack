@@ -58,7 +58,7 @@ RUN /usr/local/bin/caddy list-modules | grep -qx 'http.handlers.waf' \
 # ── Runtime image: Alpine, CA certificates and the static binary ────────────
 FROM ${ALPINE}
 LABEL org.opencontainers.image.version="2.11.7"
-LABEL watchtower.image.revision="3"
+LABEL watchtower.image.revision="4"
 
 # Every package upgraded to the build day's (IMAGE_DATE, set by
 # scripts/build-image.sh): a new day misses the build cache from here, so the
