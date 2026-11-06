@@ -152,11 +152,14 @@ write telemetry, into the shared tenant `jasonmross`
   and lint, every host's firewall through `nft --check`; every rendered
   config through the program that reads it (quadlet, Loki, Mimir, Tempo,
   Fluent Bit; shellcheck for the host scripts); our images (native builds,
-  their configs checked with the built image, Trivy, a new tag for any
-  change), agent peers held to writes (nftables and Caddy); Semgrep;
+  Copa patching the OS packages Trivy finds fixable HIGH/CRITICAL holes in,
+  their configs checked with the patched image, then Trivy's gate on what's
+  left, a new tag for any change), agent peers held to writes (nftables and
+  Caddy); Semgrep;
   shellcheck, actionlint, the Alloy example and its scrub rules against a
   PII fixture.
 - **`deploy.yml`** on merge to main, and at 05:00 UTC Monday to Saturday:
-  our images (to Artifact Registry, on Alpine's newest patch release and
-  the day's packages), `infra/cloud`, `ansible/playbooks/site.yml`,
+  our images (to Artifact Registry, rebuilt each day: the Alpine ones on
+  Alpine's newest patch release and the day's packages, all of them
+  Copa-patched), `infra/cloud`, `ansible/playbooks/site.yml`,
   `scripts/verify.sh`, then a ping to its Healthchecks.io check.

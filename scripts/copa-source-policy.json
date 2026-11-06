@@ -1,0 +1,26 @@
+{
+  "rules": [
+    {
+      "action": "CONVERT",
+      "selector": {
+        "identifier": "docker-image://ghcr.io/project-copacetic/copacetic/debian:stable-slim"
+      },
+      "updates": {
+        "identifier": "docker-image://ghcr.io/project-copacetic/copacetic/debian:stable-slim@sha256:13e0a2e78aa0554ad5ff66e4e260c6dbcdff807eb1f39d43b9fb0288aae88b04"
+      }
+    },
+    {
+      "action": "DENY",
+      "selector": {
+        "identifier": "docker-image://ghcr.io/project-copacetic/*",
+        "match_type": "WILDCARD"
+      }
+    },
+    {
+      "action": "ALLOW",
+      "selector": {
+        "identifier": "docker-image://ghcr.io/project-copacetic/copacetic/debian:stable-slim@sha256:13e0a2e78aa0554ad5ff66e4e260c6dbcdff807eb1f39d43b9fb0288aae88b04"
+      }
+    }
+  ]
+}

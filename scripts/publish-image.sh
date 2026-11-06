@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Build, check, scan and push one of our images to Artifact Registry, unless
-# its tag is already there.
+# Build, Copa-patch, check, scan and push one of our images to Artifact
+# Registry (scripts/build-image.sh does all but the push), unless its tag is
+# already there.
 #
 #   GAR_PUSH_KEY=<json> scripts/publish-image.sh <name>
 #
