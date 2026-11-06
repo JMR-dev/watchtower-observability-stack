@@ -14,7 +14,9 @@ but off in v1: no backend emits spans, and Caddy's would carry personal data.
 | Bastion | `watchtower-bastion` (watchtower-observe, e2-micro) | agent peer + Alloy `.deb` | W3, here |
 | Gitea | `gitea-vm` (gitea-496920, e2-small) | agent peer + Alloy quadlet | G2, gitea (after its Ansible cutover) |
 
-Alerts and a fleet dashboard (W4, here) come last, for verified hosts only.
+Alerts and a fleet dashboard (W4, here) cover verified sources only: today
+SilverBullet, the blog, Vaultwarden's production host and the bastion; Gitea CI
+and the Gitea VM once their data is verified.
 
 ## How it fits together
 
@@ -409,16 +411,84 @@ warns when unprivileged user namespaces are on.
   publicly, the `:2020` site, the audit log to a file.
 - Golden fixtures get a **dummy** peer: the repo mirrors to GitHub.
 
-### W4: here, alerts (after every source is verified)
+### W4: here, alerts and the fleet dashboard
 
-Grafana-provisioned rules per host in a `watchtower_telemetry_sources` list
-(verified hosts only): silence (`absent_over_time` on node metrics and
+The plan: Grafana-provisioned rules per host in a `watchtower_telemetry_sources`
+list (verified hosts only): silence (`absent_over_time` on node metrics and
 logs), shipping errors, memory, swap, disk, failed units, probes,
 certificate expiry, Caddy 5xx; for Gitea CI, `absent_over_time` on its logs
 and one Cloud Monitoring series, the subscription backlog, NAT drops and
 Cloud Run 5xx. One notification group to the Healthchecks.io check
 `watchtower-telemetry-alerts` (secret `healthchecks-telemetry-alert-url`),
 so it means "anything firing". A fleet dashboard.
+
+As built (docs/runbook.md, "Telemetry alerts", has each alert and what to check
+first):
+
+- `ansible/inventory/group_vars/all/telemetry.yml`: the list, and
+  `watchtower_telemetry_alert`, every threshold and duration in one place, each
+  with the week of real data behind it.
+- `roles/grafana`: a rule group per source in the folder Telemetry
+  (`telemetry-rules.yaml.j2`). A source's scrape `jobs` decide its checks: every
+  job, no metrics (`absent_over_time(up{host, job})`, one alert per job) and a
+  target down (`up == 0`); `integrations/unix`, memory, swap and disk; `alloy`,
+  samples Mimir rejected and Loki writes failed or dropped (`loki_write_*` by
+  `instance`: their `host` is Loki's address); `caddy`, the 5xx share;
+  `blackbox`, probe failures and certificate expiry. `logs_silent_after` sets
+  the log silence window, and `systemd: true` adds failed units.
+- The notifications (`telemetry-notifications.yaml.j2`): a webhook to the check's
+  ping URL, read from a podman secret, with a body whose first line the check's
+  keyword filter sorts into a failure or a success; one route on
+  `telemetry="true"`, grouped on that label alone. Only with the URL; without it
+  the alerts notify no one.
+- The **Telemetry fleet** dashboard (`telemetry-fleet.json.j2`), with a host
+  variable over the list.
+- CI (`scripts/check-grafana.sh`, the configs job): promtool and Loki parse every
+  query, and the pinned Grafana starts on the provisioning with and without the
+  notifications file.
+
+| Source | Jobs | Log silence after | Systemd |
+|---|---|---|---|
+| `silverbullet-vm` | unix, alloy, caddy, blackbox (two probes: `app`, `public`) | 30 m (logs every minute) | no |
+| `blog-vm` | unix, alloy, caddy, blackbox | 30 m (logs every minute) | no |
+| `vault-production` | unix, alloy, caddy, blackbox | 6 h (allow-listed units only: a median of 7 lines an hour, and 116 minutes without one) | yes |
+| `watchtower-bastion` | unix, alloy (no Caddy) | 1 h (longest silence 9 minutes) | no |
+
+`vault-disposable` stays out: it is the test stack (`env="disposable"`). The other hosts lack
+Alloy's systemd collector; with `enable_collectors = ["systemd"]` in their unix
+exporter (in their own repos) they can take `systemd: true` too.
+
+**Adding a source** is one entry in the list, once its series and logs are
+verified ("Verification", below): its `host` label, `service`, the `jobs` it really
+sends, a `logs_silent_after` measured from its quietest hours, and `systemd: true`
+if it has the collector. Removing one takes its name in
+`watchtower_telemetry_retired_sources` too: Grafana keeps a provisioned rule until
+the file deletes it (docs/runbook.md, "Telemetry alerts"). Two are due:
+
+- **The Gitea VM** (after its change is merged and verified): a host entry like the
+  blog's, `{name: gitea-vm, service: gitea, jobs: [...], logs_silent_after: ...}`,
+  with the jobs its Alloy really sends (a Gitea `/metrics` scrape is a job of its
+  own) and a window from its quietest hours.
+- **Gitea CI** (after the GCP pull is merged and has shipped for a week): no host,
+  so `selector: 'service="gitea-ci"'` and `jobs: []`, `logs_silent_after` from its
+  quietest hours (CI is bursty: nights may need a long window, or the runner's own
+  logs, `namespace="gitea-runner"`), and `extra_rules` for what only it has: the
+  absence of one Cloud Monitoring series (proof the pull works), the
+  `watchtower-logs-pull` subscription's backlog (undelivered messages or the
+  oldest unacked age), Cloud NAT's dropped packets and Cloud Run's 5xx. Their
+  metric names depend on how `prometheus.exporter.gcp` names them, so they wait
+  for real data:
+
+  ```yaml
+  - name: gitea-ci
+    service: gitea-ci
+    selector: 'service="gitea-ci"'
+    jobs: []
+    logs_silent_after: 6h   # from its quietest hours
+    extra_rules:
+      - {key: backlog, title: Pub/Sub backlog, datasource: mimir, op: gt, threshold: 1000, for: 30m,
+         expr: '<the subscription backlog series>', summary: 'watchtower-logs-pull is falling behind.'}
+  ```
 
 ## Rollout
 

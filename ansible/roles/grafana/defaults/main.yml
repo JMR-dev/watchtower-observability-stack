@@ -1,0 +1,9 @@
+---
+# Whether Grafana notifies anyone of the telemetry alerts: only once the owner
+# has stored the Healthchecks.io ping URL (scripts/healthchecks.sh), which the
+# deploy then reads as an optional secret. Without it the rules and the
+# dashboard are still provisioned, with no contact point and no policy tree:
+# the alerts show in Grafana and go nowhere. This one value decides both the
+# notifications file and the quadlet's Secret= line, which must go together
+# (a $__file{} naming a missing file stops Grafana).
+grafana_telemetry_notify: "{{ watchtower_optional_secret.healthchecks_telemetry_alert_url | length > 0 }}"

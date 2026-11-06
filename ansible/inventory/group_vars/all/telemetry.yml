@@ -1,0 +1,124 @@
+---
+# The services that ship telemetry here (docs/client-telemetry.md), and the
+# Grafana alerts and fleet dashboard made from them (roles/grafana). Every
+# source here has a rule group of its own in the Telemetry folder and a place in
+# the dashboard's host variable. Only a source whose real series and logs were
+# checked belongs here: a rule over a series that never existed is silent, not
+# green.
+#
+# One entry per source:
+#   name                 its `host` label (rule names, the dashboard)
+#   service              its `service` label
+#   jobs                 the scrape jobs it sends (`up{host=..., job=...}`). Each
+#                        must keep sending `up`; and they decide the checks:
+#                          integrations/unix  memory, swap, disk
+#                          alloy              metrics and log shipping errors
+#                          caddy              Caddy 5xx
+#                          blackbox           probe failures, certificate expiry
+#   logs_silent_after    no log line for this long alerts. Measured per source:
+#                        a quiet host needs a long window or it flaps. Leave it
+#                        out for a source that sends no logs
+#   systemd              true if Alloy's unix exporter has the systemd collector
+#                        (node_systemd_unit_state): failed units alert
+#   selector             (optional) its series' selector, in place of
+#                        host="<name>"; for a source with no host, Gitea CI's
+#                        service="gitea-ci"
+#   extra_rules          (optional) its own rules, each {key, title, datasource:
+#                        mimir or loki, expr, op: gt or lt, threshold, for,
+#                        summary}: Gitea CI's Cloud Monitoring checks
+#
+# Not yet here, until their data is verified: Gitea CI (pulled from GCP) and the
+# Gitea VM. docs/client-telemetry.md says what each will need.
+#
+# Evidence (2026-11-06, Mimir and Loki over the week each host had shipped):
+# silverbullet-vm and blog-vm log every minute (podman health checks and Caddy,
+# 400-650 lines an hour); watchtower-bastion's longest silence was 9 minutes;
+# vault-production ships allow-listed units only (median 7 lines an hour) and
+# went 116 minutes without a line. Only vault-production has the systemd
+# collector.
+watchtower_telemetry_sources:
+  - name: silverbullet-vm
+    service: silverbullet
+    jobs: [integrations/unix, alloy, caddy, blackbox]
+    logs_silent_after: 30m
+  - name: blog-vm
+    service: blog
+    jobs: [integrations/unix, alloy, caddy, blackbox]
+    logs_silent_after: 30m
+  - name: vault-production
+    service: vaultwarden
+    jobs: [integrations/unix, alloy, caddy, blackbox]
+    logs_silent_after: 6h
+    systemd: true
+  - name: watchtower-bastion
+    service: bastion
+    jobs: [integrations/unix, alloy]
+    logs_silent_after: 1h
+
+# Grafana keeps a provisioned rule that leaves its file, and goes on evaluating
+# it, until the file deletes it. So a check a source no longer has (a job taken
+# out of its list) is deleted by itself, and these say what else to delete:
+#   watchtower_telemetry_retired_sources  names taken out of the list above:
+#                                         every rule they had
+#   watchtower_telemetry_retired_rules    uids (tw-<name>-<key>) of extra_rules
+#                                         taken out
+# Delete a rule only while it is quiet: a rule deleted while firing never sends
+# its RESOLVED, and the check stays down until marked up by hand
+# (docs/runbook.md, "Telemetry alerts").
+watchtower_telemetry_retired_sources: []
+watchtower_telemetry_retired_rules: []
+
+# Every threshold and duration the rules use, in one place (the owner's call;
+# docs/runbook.md, "Telemetry alerts", has what each means). `for` is how long
+# a condition must hold before it fires; `window` is the range a query looks
+# back over. Rules are evaluated every minute.
+watchtower_telemetry_alert:
+  # No `up` from one of a source's jobs over the window: a host, its agent, the
+  # tunnel or one scrape is gone. No gap over 2 minutes in any host's week.
+  metrics_silent: {window: 10m, for: 5m}
+  # No log line over logs_silent_after (per source, above).
+  logs_silent: {for: 5m}
+  # A scrape target answering with up == 0. The longest run seen: 5 minutes
+  # (blog-vm's Caddy, when the VM was rebuilt).
+  target_down: {for: 15m}
+  # Remote write rejecting samples, and Loki writes failing or dropping lines,
+  # in every 10-minute window for 20 minutes. None in a week; one failed Loki
+  # request (retried) on silverbullet-vm and two on blog-vm.
+  metrics_shipping: {window: 10m, for: 20m}
+  logs_shipping: {window: 10m, for: 20m}
+  # MemAvailable / MemTotal below this. Lowest seen: 0.09, for a minute, on
+  # blog-vm (1 GB); under 0.15 for 6 minutes in its week. The others stay
+  # above 0.35.
+  memory_available_below: 0.10
+  memory: {for: 15m}
+  # Swap in use above this share. Highest seen: 0.30 (blog-vm). The bastion
+  # has no swap, and its rule stays empty.
+  swap_used_above: 0.50
+  swap: {for: 30m}
+  # A filesystem (not tmpfs, overlay or the EFI partition) fuller than this.
+  # Highest seen: 0.71 (blog-vm's old root); 0.31 to 0.34 today.
+  disk_used_above: 0.85
+  disk: {for: 30m}
+  # A systemd unit in state failed. None in vault-production's two days.
+  units_failed: {for: 15m}
+  # Every probe of a target failing over the window. One failed probe in a
+  # week, on vault-production.
+  probe: {window: 5m, for: 5m}
+  # Days left on a probed certificate. Caddy renews 90-day certificates at 30
+  # days left; seen: 69 to 78.
+  cert_days_below: 14
+  cert: {for: 1h}
+  # Caddy's 5xx share over the window, counted only with at least
+  # caddy_5xx_min of them. No 5xx in any host's week; the quietest 10 minutes
+  # saw 5 requests.
+  caddy_5xx_ratio_above: 0.05
+  caddy_5xx_min: 5
+  caddy_5xx: {window: 10m, for: 10m}
+  # The one notification group (every telemetry alert, grouped on the
+  # `telemetry` label they all carry) to the Healthchecks.io check
+  # watchtower-telemetry-alerts: a ping when it first fires (after group_wait),
+  # on each change (at most every group_interval), again every repeat_interval
+  # while anything fires, and once when everything has resolved.
+  group_wait: 1m
+  group_interval: 5m
+  repeat_interval: 1h

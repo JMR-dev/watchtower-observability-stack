@@ -369,6 +369,76 @@ func TestBastionReadsItsOwnPingURL(t *testing.T) {
 	}
 }
 
+// The deploy reads OptionalSecrets as optional (`?NAME=id`) and every other
+// secret as required: a required read of a secret with no value yet fails the
+// deploy, and an optional read of one it needs lets it run without.
+func TestOptionalSecretsAreReadAsOptional(t *testing.T) {
+	b, err := os.ReadFile("../../../.gitea/workflows/deploy.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	optional := map[string]bool{}
+	for _, id := range OptionalSecrets {
+		optional[id] = true
+	}
+	seen := map[string]bool{}
+	line := regexp.MustCompile(`(?m)^\s+(\??)@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)\s*$`)
+	for _, m := range line.FindAllStringSubmatch(string(b), -1) {
+		seen[m[2]] = true
+		if got := m[1] == "?"; got != optional[m[2]] {
+			t.Errorf("deploy.yml reads %s with optional=%v, want %v", m[2], got, optional[m[2]])
+		}
+	}
+	for _, id := range OptionalSecrets {
+		if !seen[id] {
+			t.Errorf("deploy.yml never reads optional %s", id)
+		}
+	}
+}
+
+// The telemetry alerts reach their Healthchecks.io check: the deploy reads the
+// URL scripts/healthchecks.sh stores, under the name Ansible looks up, into
+// watchtower_optional_secret (site.yml fails a deploy with any watchtower_secret
+// empty); and Grafana's notifications open with the keywords the check sorts
+// them by. Under another keyword the check would ignore every ping.
+func TestTelemetryAlertsReachTheirCheck(t *testing.T) {
+	read := func(path string) string {
+		b, err := os.ReadFile("../../../" + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	deploy := read(".gitea/workflows/deploy.yml")
+	if !strings.Contains(deploy, "?HEALTHCHECKS_TELEMETRY_ALERT_URL="+SecretHealthchecksTelemetryAlertURL+"\n") {
+		t.Errorf("deploy.yml does not read %s as HEALTHCHECKS_TELEMETRY_ALERT_URL", SecretHealthchecksTelemetryAlertURL)
+	}
+	secrets := read("ansible/inventory/group_vars/all/secrets.yml")
+	optional := regexp.MustCompile(`(?ms)^watchtower_optional_secret:\n((?:[ #].*\n|\n)*)`).FindStringSubmatch(secrets)
+	if optional == nil || !strings.Contains(optional[1], "lookup('ansible.builtin.env', 'HEALTHCHECKS_TELEMETRY_ALERT_URL', default='')") {
+		t.Error("secrets.yml does not read HEALTHCHECKS_TELEMETRY_ALERT_URL into watchtower_optional_secret, empty when unset")
+	}
+	healthchecks := read("scripts/healthchecks.sh")
+	if !strings.Contains(healthchecks, `secret.sh" put `+SecretHealthchecksTelemetryAlertURL) {
+		t.Errorf("healthchecks.sh does not store %s", SecretHealthchecksTelemetryAlertURL)
+	}
+	for v, want := range map[string]string{"TELEMETRY_SUCCESS_KW": TelemetryAlertsResolved, "TELEMETRY_FAILURE_KW": TelemetryAlertsFiring} {
+		m := regexp.MustCompile(`(?m)^` + v + `="([^"]*)"$`).FindStringSubmatch(healthchecks)
+		if m == nil || m[1] != want {
+			t.Errorf("healthchecks.sh %s = %v, want %q", v, m, want)
+		}
+	}
+	notifications := read("ansible/roles/grafana/templates/telemetry-notifications.yaml.j2")
+	for _, kw := range []string{TelemetryAlertsFiring, TelemetryAlertsResolved} {
+		if n := strings.Count(notifications, kw); n != 1 {
+			t.Errorf("telemetry-notifications.yaml.j2 holds %s %d times, want once", kw, n)
+		}
+	}
+	if strings.Contains(TelemetryAlertsFiring, TelemetryAlertsResolved) || strings.Contains(TelemetryAlertsResolved, TelemetryAlertsFiring) {
+		t.Error("one keyword holds the other, so a body could match both")
+	}
+}
+
 // scripts/bootstrap.sh makes the reader service account gitea's stacks
 // grant: under another name, their bindings would name an account that
 // doesn't exist.

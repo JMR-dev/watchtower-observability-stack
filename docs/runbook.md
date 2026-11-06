@@ -26,7 +26,7 @@ gopass.
    scripts/secret.sh put hcloud-token
    scripts/secret.sh put healthchecks-pg-backup-url
    scripts/secret.sh put healthchecks-jasonmross-dev-api-key
-   scripts/healthchecks.sh   # a check per host, one for the deploy, one for the bastion; stores their ping URLs
+   scripts/healthchecks.sh   # a check per host, one each for the deploy, the bastion and the telemetry alerts; stores their ping URLs
    for k in admin cluster; do
      scripts/secret.sh put "s3-$k-access-key"
      scripts/secret.sh put "s3-$k-secret-key"
@@ -711,10 +711,91 @@ It reports to the host's own Healthchecks.io check (`watchtower-proxy`,
 `scripts/healthchecks.sh` creates the checks (one per host from
 `nodeCount`; re-run it after changing that) and stores their ping URLs as
 `healthchecks-host-urls`. The deploy gives each host only its own URL. The
-same script creates `watchtower-deploy` (see "Our images") and
-`watchtower-bastion` ("Break glass"), whose URL only the bastion reads.
+same script creates `watchtower-deploy` (see "Our images"),
+`watchtower-bastion` ("Break glass"), whose URL only the bastion reads, and
+`watchtower-telemetry-alerts` ("Telemetry alerts").
 On a host, `watchtower-health check` prints what it sees now, without
 reporting. Every deploy's verify step runs it on each host.
+
+## Telemetry alerts
+
+Grafana alerts on the services that ship telemetry here
+(docs/client-telemetry.md): one rule group per source in
+`watchtower_telemetry_sources` (`ansible/inventory/group_vars/all/telemetry.yml`),
+in the folder **Telemetry**, beside the **Telemetry fleet** dashboard
+(`/d/telemetry-fleet`). Every threshold and duration is in the same file
+(`watchtower_telemetry_alert`). The rules are provisioned from files, so the UI
+can't change them: change the file and deploy.
+
+**One Healthchecks.io check, `watchtower-telemetry-alerts`, means "a telemetry
+alert is firing".** Every rule carries `telemetry="true"`, and the one route for
+that label groups on it alone, so all of them are one notification group. Grafana
+posts the group's notifications to the check's ping URL: when something first
+fires (after a minute's `group_wait`), on each change (at most every 5 minutes),
+every hour while anything fires, and once when everything has resolved. The body's
+first line is `TELEMETRY-ALERTS-FIRING` or `TELEMETRY-ALERTS-RESOLVED`, and the
+check's keyword filter (`scripts/healthchecks.sh`) makes the first a failure (down,
+emails) and the second a success (up, emails); the lines after it name what fires,
+and the check's event log keeps them. Its period is a year: no ping is no news, not
+a dead Grafana (each node's own check covers that). Until anything first fires it
+stays "new". Grafana's HA cluster sends each notification from one node.
+
+- **Without the ping URL** (before `scripts/healthchecks.sh` has run): the deploy
+  goes on, Grafana gets the rules and the dashboard, and no contact point or policy
+  tree of ours. Alerts show in Grafana and go to its own default contact point, an
+  email it can't send (no SMTP). Run `scripts/healthchecks.sh`,
+  then `scripts/bootstrap.sh` (it lets the deployer read the new secret), then
+  deploy.
+- **The policy tree is provisioned whole:** its root goes to `unrouted`, an email
+  contact point that can't send (no SMTP, an `.invalid` address). Nothing routes
+  there unless an alert lacks `telemetry="true"`, such as one made in the UI.
+- A query that fails keeps the rule's last state; one that returns nothing is
+  normal. So a deploy that restarts Loki or Mimir node by node can't fire or clear
+  anything, and a host that went silent is reported once, by the silence rules.
+- To keep a host's alerts quiet while you work on it, add a silence in Grafana
+  (Alerting → Silences) on `host=<name>` before you start. Pausing the check
+  doesn't hold: the next ping resumes it.
+
+What each alert means, and what to look at first (`<host>` is the source's name):
+
+| Alert | Fires when | First check |
+|---|---|---|
+| `<host>: no metrics` | No `up` from one of its scrape jobs for 10 minutes, for 5 more (one alert per job) | Every job: the host is down, its tunnel or Alloy is (`systemctl status alloy wg-quick@wg-watchtower` on it; `wg show wg-watchtower latest-handshakes`), or the proxy is: the other hosts fire too, and the proxy's own check says so. One job: that scrape's target is gone, or its Alloy config dropped it |
+| `<host>: no logs` | No log line for the source's `logs_silent_after` (30 m; 1 h on the bastion; 6 h on vault-production, which ships allow-listed units only), for 5 more minutes | Metrics still flowing: Alloy's journal source or `loki.write` (`journalctl -u alloy -n 50` on the host). Also fires with "no metrics" when the host is gone |
+| `<host>: scrape target down` | A scrape answers `up == 0` for 15 minutes | The target itself: Caddy's `:2020` metrics site, or the exporter. The alert's labels name the job and instance |
+| `<host>: metrics shipping errors` | Mimir rejected samples from it in every 10 minutes for 20 minutes | Mimir's limits for `jasonmross` (`roles/mimir`, `runtime.yaml`: series, rate), or samples out of order or too old after a long outage. Alloy's log names the error |
+| `<host>: log shipping errors` | Loki writes failed (and were retried) or lines were dropped in every 10 minutes for 20 minutes | Loki's ingest: the proxy's Caddy on 3100, then Loki on the nodes (`systemctl status loki`). A 429 or `stream_limited` is Loki's limits |
+| `<host>: memory low` | MemAvailable under 10% of MemTotal for 15 minutes | What grew (`top -o %MEM`, `podman stats`); on the 1 GB blog VM, whether it needs an e2-small (the blog repo's `blog:machineType`) |
+| `<host>: swap in use` | Over 50% of swap in use for 30 minutes | As memory: something outgrew the host |
+| `<host>: disk filling` | A filesystem (not tmpfs, overlay or EFI) over 85% full for 30 minutes | `df -h`, then `du -xh --max-depth=1` on the mount; journald's `SystemMaxUse`, podman's images (`podman image prune`) |
+| `<host>: systemd unit failed` | A unit in state `failed` for 15 minutes (only hosts with the systemd collector: vault-production) | `systemctl --failed`, `journalctl -u <unit> -n 50`. A oneshot stays failed until its next good run |
+| `<host>: probe failing` | Every probe of a target failed for 5 minutes, for 5 more | The service itself, then Caddy on the host. The probe runs on the host: a failing local probe is the service; a failing public one alone is Caddy, its certificate or DNS |
+| `<host>: certificate expiring` | A probed certificate has under 14 days left, for an hour | Caddy's renewal: `journalctl -u caddy` (or the container's log) for ACME errors, DNS-01 credentials |
+| `<host>: Caddy 5xx` | Over 5% of Caddy's answers are 5xx over 10 minutes, with at least 5 of them, for 10 minutes | The app behind Caddy (its container's log); a 502 means it isn't answering |
+
+**Adding a source:** once its series and logs are verified (docs/client-telemetry.md,
+"Verification"), add one entry to `watchtower_telemetry_sources`: its `host` label,
+`service`, the scrape `jobs` it sends (they decide its checks), `logs_silent_after`
+measured from its quietest hour, and `systemd: true` if Alloy has the systemd
+collector. Check its real rates first, so no rule is empty or flaps. Merge; the
+deploy restarts Grafana node by node, and the dashboard's host list follows.
+
+**Removing a source or a check:** Grafana keeps a provisioned rule that leaves its
+file, and goes on evaluating it, until the file deletes it (`deleteRules`). A check
+a source no longer has (a job taken out of its `jobs`) is deleted by itself. A
+source taken out of the list goes in `watchtower_telemetry_retired_sources`, and an
+`extra_rules` entry taken out goes in `watchtower_telemetry_retired_rules` by its
+uid (`tw-<name>-<key>`). Do it while its alerts are quiet: a rule deleted while it
+fires never sends its RESOLVED.
+
+**The check is down and nothing fires** (a rule deleted while firing, or a RESOLVED
+that never arrived): Grafana's Telemetry folder shows nothing firing. Mark the check
+up with the ping Grafana would have sent, the URL going to curl on stdin:
+
+```bash
+gopass show -o watchtower/healthchecks-telemetry-alert-url | sed 's/.*/url = "&"/' |
+  curl -fsS -m 20 -K - -o /dev/null --data-raw TELEMETRY-ALERTS-RESOLVED
+```
 
 ## Kafka
 
@@ -860,6 +941,7 @@ copy. The hosts get it on the next deploy (push to main, or dispatch
 | Healthchecks.io API key | a new key in the project's settings → `secret.sh put healthchecks-jasonmross-dev-api-key` → revoke the old one (only `scripts/healthchecks.sh` uses it) |
 | Hosts' ping URLs | delete a host's check, `scripts/healthchecks.sh` (it makes a new one), then deploy |
 | The bastion's ping URL | delete its check, `scripts/healthchecks.sh` (it makes a new one and stores the URL); the bastion reads it at its next boot or daily ping |
+| The telemetry alerts' ping URL | delete the check `watchtower-telemetry-alerts`, `scripts/healthchecks.sh` (a new one, its URL stored), then deploy: Grafana restarts node by node with it |
 | Agent peers' WireGuard keys | delete the client in the wg-easy UI, then deploy ("WireGuard peers") |
 
 Old versions stay in Secret Manager's history until destroyed:
@@ -881,6 +963,7 @@ Old versions stay in Secret Manager's history until destroyed:
 | Healthchecks.io: a host's check is down | The host reported problems twice in a row, or stopped reporting (down, cut off from the internet, its timer dead) | The alert lists the problems. If it went silent: is the server up (Hetzner Console), and `systemctl status watchtower-health.timer` on it. `watchtower-health check` shows what it sees now |
 | Healthchecks.io: `watchtower-deploy` is down | A deploy job failed, or the 05:00 UTC run (Monday to Saturday) never came | The ping's body links the failed run; its log says which job. If `hosts` failed with "the tunnel to 10.8.0.1:22 never came up", wg-easy or the proxy is down: dispatch with `ssh_via=bastion`, which reinstalls the proxy without the VPN. No run at all: is Gitea's scheduler running, and is `deploy.yml` on main intact? Fix, then dispatch `deploy.yml` (or merge); the next success clears it |
 | Healthchecks.io: `watchtower-bastion` is down | No ping by 07:00 UTC: the bastion didn't come back from a reboot, is up without its guard or sshd, or couldn't reach Secret Manager or Healthchecks.io. A bastion you stopped does this too | `gcloud compute instances describe watchtower-bastion --zone us-east1-b --project watchtower-observe --format 'value(status)'`, then log in ("Break glass"). No login: "The bastion with SSH gone". Logged in: `sudo systemctl start watchtower-ping.service`, then `sudo journalctl -u watchtower-ping.service -n 5` says what stopped the ping |
+| Healthchecks.io: `watchtower-telemetry-alerts` is down | A Grafana telemetry alert fires: a service that ships telemetry here is silent, failing to ship, short of memory or disk, failing its probe, near a certificate's expiry or answering 5xx | The ping's body (the check's event log) names each alert. "Telemetry alerts" above says what each means and what to check first; the **Telemetry fleet** dashboard shows the host. It comes back up by itself when everything resolves |
 | Healthchecks.io: the backup check is down | The nightly backup failed or never ran | The alert carries the run's log; else `journalctl -u watchtower-pg-backup -n 50` on the leader. Usual causes: a cluster S3 key replaced but not yet deployed, no Patroni leader, or the volume not mounted. `systemctl start watchtower-pg-backup` on every node retries |
 | Tempo queries miss recent traces | A live-store or the Kafka path | `systemctl status 'tempo-*'` on each node; Kafka's under-replicated partitions |
 

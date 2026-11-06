@@ -46,8 +46,13 @@ scripts/secret.sh check
   of unit files and container listings): the cluster S3 key, the LUKS key,
   the pull key, Grafana's, Postgres's and Patroni's passwords, wg-easy's
   first-start password, Caddy's DNS-01 key and the Healthchecks.io ping
-  URLs (the backup's, and the host's own). A new value reaches them on
-  the next deploy, and only the containers that use it restart.
+  URLs (the backup's, the host's own, and on the nodes the telemetry
+  alerts'). A new value reaches them on the next deploy, and only the
+  containers that use it restart.
+- **Optional secrets** (`?NAME=id` in `deploy.yml`, `names.OptionalSecrets`):
+  `wireguard-deploy-peer` and `healthchecks-telemetry-alert-url`. A deploy
+  before they have a value goes on without them; every other secret it reads
+  must have one, or the deploy stops.
 
 Why a long-lived key: the Gitea runner cluster keeps Actions jobs away from
 GKE Workload Identity on purpose (instance-wide runners, metadata server
@@ -90,6 +95,7 @@ every 90 days.
 | `healthchecks-pg-backup-url` | Ping URL of the Healthchecks.io check of the nightly backup (docs/runbook.md, "First deploy"). The nightly backup pings it, or its `/fail` when a run fails. Anyone holding it can ping the check |
 | `healthchecks-host-urls` | One JSON object, host name to the ping URL of its Healthchecks.io check, written by `scripts/healthchecks.sh`. Each host gets only its own URL |
 | `healthchecks-deploy-url` | Ping URL of the Healthchecks.io check `watchtower-deploy`, written by `scripts/healthchecks.sh`. The deploy's last job pings it, or its `/fail` when a job failed. Anyone holding it can ping the check |
+| `healthchecks-telemetry-alert-url` | Ping URL of the Healthchecks.io check `watchtower-telemetry-alerts`, written by `scripts/healthchecks.sh`. **Optional:** the deploy reads it as `?HEALTHCHECKS_TELEMETRY_ALERT_URL`, and without it provisions the telemetry alerts with no contact point. Each node's Grafana gets it as a podman secret, which its contact point reads (`$__file{}`) as it starts; Grafana then keeps it in its database, in the clear, where anyone allowed to read contact points in the main org can see it (docs/runbook.md, "Telemetry alerts"). Anyone holding it can ping the check |
 
 ### Read by the bastion
 

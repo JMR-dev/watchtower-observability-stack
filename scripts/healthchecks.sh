@@ -16,6 +16,15 @@
 #     after each boot and at 05:00 UTC every day, once its metadata guard is
 #     loaded and sshd is active (config/bastion/startup.sh). So one that didn't
 #     come back from its 04:00 reboot emails by 07:00.
+#   - watchtower-telemetry-alerts, as healthchecks-telemetry-alert-url: down
+#     while any Grafana telemetry alert fires (roles/grafana). Grafana POSTs
+#     every notification of its one telemetry group to the plain ping URL, and
+#     the check sorts them by a keyword in the body: TELEMETRY-ALERTS-FIRING is a
+#     failure (down, emails), TELEMETRY-ALERTS-RESOLVED a success (up, emails),
+#     anything else is ignored. Pings come only on a change and while something
+#     fires, so its period is the longest Healthchecks.io allows (a year, then a
+#     year's grace): silence means nothing is firing, not that Grafana is gone
+#     (each node's own check covers that). Until the first alert it stays "new".
 #
 #   scripts/healthchecks.sh
 #
@@ -37,6 +46,13 @@ DEPLOY_SCHEDULE="0 5 * * 1-6" # deploy.yml's schedule, in UTC
 DEPLOY_GRACE=7200             # a run takes well under an hour
 BASTION_TIMEOUT=86400         # seconds between pings (watchtower-ping.timer)
 BASTION_GRACE=7200            # then this long before a missed ping alerts
+# The telemetry alerts' check. The keywords are the first line of the body
+# Grafana sends (roles/grafana/templates/telemetry-notifications.yaml.j2;
+# scripts/check-grafana.sh and a Go test keep the two the same). Case-sensitive.
+TELEMETRY_SUCCESS_KW="TELEMETRY-ALERTS-RESOLVED"
+TELEMETRY_FAILURE_KW="TELEMETRY-ALERTS-FIRING"
+TELEMETRY_TIMEOUT=31536000 # a year, Healthchecks.io's longest: no ping is no news
+TELEMETRY_GRACE=31536000
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 stack_file="${repo_root}/infra/cloud/Pulumi.prod.yaml"
@@ -98,3 +114,15 @@ jq -n --argjson timeout "$BASTION_TIMEOUT" --argjson grace "$BASTION_GRACE" '{
 upsert
 jq -r .ping_url "${work}/check.json" | "${repo_root}/scripts/secret.sh" put healthchecks-bastion-url
 echo "Run scripts/bootstrap.sh to let the bastion read its URL. Until it first pings, its check stays \"new\" and never alerts."
+
+# POST only (Grafana's webhook); an unmatched body is ignored, never a failure.
+jq -n --argjson timeout "$TELEMETRY_TIMEOUT" --argjson grace "$TELEMETRY_GRACE" \
+  --arg success "$TELEMETRY_SUCCESS_KW" --arg failure "$TELEMETRY_FAILURE_KW" '{
+  name: "watchtower-telemetry-alerts", slug: "watchtower-telemetry-alerts", tags: "observability watchtower telemetry",
+  timeout: $timeout, grace: $grace, channels: "*", methods: "POST",
+  filter_http_body: true, filter_default_fail: false, start_kw: "", success_kw: $success, failure_kw: $failure,
+  desc: ("Down while any Grafana telemetry alert fires: the services that ship telemetry to watchtower (ansible/inventory/group_vars/all/telemetry.yml). Grafana posts each notification of its one telemetry group here; a body with " + $failure + " is a failure, one with " + $success + " (everything resolved) a success. The body lists what fires. docs/runbook.md, \"Telemetry alerts\".")
+}' >"${work}/spec.json"
+upsert
+jq -r .ping_url "${work}/check.json" | "${repo_root}/scripts/secret.sh" put healthchecks-telemetry-alert-url
+echo "Deploy to give Grafana its URL (the deploy reads it as an optional secret; scripts/bootstrap.sh lets it). Until an alert first fires, its check stays \"new\"."

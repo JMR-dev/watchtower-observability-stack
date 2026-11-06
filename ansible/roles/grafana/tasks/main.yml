@@ -20,6 +20,9 @@
     - {path: "{{ watchtower_config }}/grafana", owner: root, mode: "0755"}
     - {path: "{{ watchtower_config }}/grafana/provisioning", owner: root, mode: "0755"}
     - {path: "{{ watchtower_config }}/grafana/provisioning/datasources", owner: root, mode: "0755"}
+    - {path: "{{ watchtower_config }}/grafana/provisioning/alerting", owner: root, mode: "0755"}
+    - {path: "{{ watchtower_config }}/grafana/provisioning/dashboards", owner: root, mode: "0755"}
+    - {path: "{{ watchtower_config }}/grafana/provisioning/dashboards/telemetry", owner: root, mode: "0755"}
 
 # The database and its owner, once, on whichever member leads.
 - name: Find the Postgres leader
@@ -49,7 +52,10 @@
   changed_when: false
   no_log: true
 
-- name: Grafana config and datasources
+# Grafana reads alerting provisioning only as it starts, and a file it can't
+# read stops it: CI starts the pinned Grafana on exactly these files
+# (scripts/check-grafana.sh).
+- name: Grafana config, datasources, telemetry alerts and the dashboards' provider
   ansible.builtin.template:
     src: "{{ item.src }}"
     dest: "{{ watchtower_config }}/grafana/{{ item.dest }}"
@@ -57,6 +63,33 @@
   loop:
     - {src: grafana.ini.j2, dest: grafana.ini}
     - {src: datasources.yaml.j2, dest: provisioning/datasources/watchtower.yaml}
+    - {src: telemetry-rules.yaml.j2, dest: provisioning/alerting/telemetry-rules.yaml}
+    - {src: telemetry-dashboards.yaml.j2, dest: provisioning/dashboards/telemetry.yaml}
+  notify: Restart grafana
+
+# The provider rereads it every minute: no restart.
+- name: The telemetry fleet dashboard
+  ansible.builtin.template:
+    src: telemetry-fleet.json.j2
+    dest: "{{ watchtower_config }}/grafana/provisioning/dashboards/telemetry/telemetry-fleet.json"
+    mode: "0644"
+
+# The contact point reads the ping URL from the podman secret below; the file
+# holds no secret. With no URL, no file: the rules still evaluate, and notify
+# no one (roles/grafana/defaults).
+- name: The telemetry alerts' contact point and notification policy
+  ansible.builtin.template:
+    src: telemetry-notifications.yaml.j2
+    dest: "{{ watchtower_config }}/grafana/provisioning/alerting/telemetry-notifications.yaml"
+    mode: "0644"
+  when: grafana_telemetry_notify | bool
+  notify: Restart grafana
+
+- name: No contact point without the ping URL
+  ansible.builtin.file:
+    path: "{{ watchtower_config }}/grafana/provisioning/alerting/telemetry-notifications.yaml"
+    state: absent
+  when: not grafana_telemetry_notify | bool
   notify: Restart grafana
 
 - name: Grafana's secrets
@@ -64,10 +97,13 @@
     name: quadlet
     tasks_from: secrets
   vars:
-    quadlet_secrets:
-      - {name: grafana-admin-password, value: "{{ watchtower_secret.grafana_admin_password }}"}
-      - {name: grafana-secret-key, value: "{{ watchtower_secret.grafana_secret_key }}"}
-      - {name: grafana-db-password, value: "{{ watchtower_secret.grafana_db_password }}"}
+    quadlet_secrets: >-
+      {{ [
+           {'name': 'grafana-admin-password', 'value': watchtower_secret.grafana_admin_password},
+           {'name': 'grafana-secret-key', 'value': watchtower_secret.grafana_secret_key},
+           {'name': 'grafana-db-password', 'value': watchtower_secret.grafana_db_password},
+         ] + ([{'name': 'grafana-telemetry-alert-url', 'value': watchtower_optional_secret.healthchecks_telemetry_alert_url}]
+              if grafana_telemetry_notify | bool else []) }}
 
 - name: Restart Grafana when a secret changed
   ansible.builtin.debug:
