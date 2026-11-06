@@ -329,5 +329,7 @@ keep:439 systemd[1]: Started user@3141592650.service - User Manager for UID 3141
 keep:440 systemd[1]: Starting user-runtime-dir@3141592652.service - User Runtime Directory /run/user/3141592659...
 keep:441 systemd[1]: user@1000000000.service: Consumed 1.234s CPU time.
 keep:442 systemd[1]: Started user-runtime-dir@1000.service - User Runtime Directory /run/user/1000.
+keep:444 systemd[1]: run-user-3141592651.mount: Deactivated successfully.
+keep:445 systemd[1]: Unmounting run-user-3141592652.mount - /run/user/3141592652...
 keep:443 systemd[1]: user@999999999.service: Consumed 1.234s CPU time.
 same:159 2026-10-26 03:12:45 mimir ingester ring healthy, 150000 series

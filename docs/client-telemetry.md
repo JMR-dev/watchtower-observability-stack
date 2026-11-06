@@ -96,8 +96,8 @@ Nothing on watchtower scrubs. What a host sends is stored.
   dashed in a hostname and an IPv6 percent-encoded; OS Login names; OS Login
   uids of 10 digits or more after `uid=` (`auid=` and `euid=` too) or `UID `,
   or in `user-<uid>.slice`, `user@<uid>.service`,
-  `user-runtime-dir@<uid>.service` and `/run/user/<uid>`; those two units in the
-  `unit` label, whatever the uid; sudo's command and environment, on any unit
+  `user-runtime-dir@<uid>.service`, `/run/user/<uid>` and `run-user-<uid>.mount`;
+  `user@` and `user-runtime-dir@` units in the `unit` label, whatever the uid; sudo's command and environment, on any unit
   (`ENV=` after sudo's ` ; ` and `COMMAND=` to the end of the line, and
   `(command continued)`, so who ran it and as whom stay); tokens by their shape
   (`ghp_`, `ya29.`, `AKIA`); SSH public keys (`ssh-ed25519`, `ssh-rsa`,
@@ -463,7 +463,7 @@ host `H`:
 {host="H"} |~ `(?i)\\*"[\w-]*(cookie|authorization)[\w-]*\\*"\s*:\s*\[?\s*\\*"`
 {host="H"} |~ "_(gmail|googlemail)_com"
 {host="H"} |~ "\\b(SHA256|SHA-256|SHA1|MD5):[A-Za-z0-9+/]"
-{host="H"} |~ `uid=\d{10}|\bUID \d{10}|\buser-\d{10,}\.slice|\buser(-runtime-dir)?@\d{10}|/run/user/\d{10}`
+{host="H"} |~ `uid=\d{10}|\bUID \d{10}|\buser-\d{10,}\.slice|\buser(-runtime-dir)?@\d{10}|/run/user/\d{10}|\brun-user-\d{10,}\.mount`
 {host="H", unit=~"(user|user-runtime-dir)@[0-9]+\\.service"}
 {host="H"} |~ `\bCOMMAND=[^\[]|;\s*ENV=[^\[]|\(command continued\)[^\[]`
 {host="H"} |~ `ghp_[A-Za-z0-9]{16}|ya29\.[A-Za-z0-9._-]{16}|AKIA[0-9A-Z]{16}`
