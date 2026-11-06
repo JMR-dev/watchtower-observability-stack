@@ -31,11 +31,12 @@ ARG GOOGLECLOUDDNS_VERSION=v1.1.0
 # same pin as vaultwarden-deployment). Space-separated module@version; each
 # becomes an xcaddy --replace. Drop an entry once Caddy or a plugin requires
 # that version or newer, since a replace also blocks upgrades.
-#   golang.org/x/net: CVE-2026-78669, fixed in v0.60.0; Caddy v2.11.7 and
-#   coraza-caddy v2.6.2 still require older releases.
+#   golang.org/x/net: CVE-2026-78669, fixed in v0.60.0, and CVE-2026-78661
+#   (x/net/html), fixed in v0.62.0; Caddy v2.11.7 and coraza-caddy v2.6.2
+#   still require older releases.
 #   github.com/go-jose/go-jose/v4: CVE-2026-116587, fixed in v4.1.6; Caddy
 #   v2.11.7 still requires v4.1.5.
-ARG GO_MODULE_PINS="golang.org/x/net@v0.61.0 github.com/go-jose/go-jose/v4@v4.1.7"
+ARG GO_MODULE_PINS="golang.org/x/net@v0.62.0 github.com/go-jose/go-jose/v4@v4.1.7"
 
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath GOTOOLCHAIN=local
 
