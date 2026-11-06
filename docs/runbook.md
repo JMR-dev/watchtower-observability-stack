@@ -743,10 +743,18 @@ hours of traces for the block builder to catch up on.
 `build/<name>/` holds each of our images: Caddy and wg-easy on Alpine,
 Patroni on the Postgres image. An Alpine image's tag is its version, the
 Alpine release, its revision and the day it was built, e.g.
-`15.5.0-alpine3.24.3-r2-20261025`. Patroni's tag is just version and
-revision, e.g. `4.1.5-r1` (`scripts/image-tag.sh <name>`). Tags in
+`15.5.0-alpine3.24.3-r2-20261025`. Patroni's is its version, revision and
+day, e.g. `4.1.5-r1-20261106` (`scripts/image-tag.sh <name>`). Tags in
 Artifact Registry are immutable, and the deploy reuses a tag that's
 already there instead of rebuilding it.
+
+**Copa patches every build.** `scripts/build-image.sh` has Trivy list the
+image's fixable HIGH/CRITICAL holes in its OS packages, has Copa upgrade
+those packages, checks the patched image, and only then gates it on Trivy.
+A check or a deploy fails only on what's still there after the patch.
+PostgreSQL's own packages are never Copa's (moving PostgreSQL is a
+decision), so a hole in one fails the gate: bump the Postgres base image by
+hand, deliberately.
 
 - **Rebuilt every day but Sunday.** `deploy.yml` also runs at 05:00 UTC,
   Monday to Saturday. Sunday is the hosts' reboot morning (from 07:00).
@@ -754,10 +762,13 @@ already there instead of rebuilding it.
     the newest patch release of the Alpine minor the Dockerfiles name
     (`ARG ALPINE=docker.io/library/alpine:3.24`), and the day.
   - The day's first deploy builds every Alpine image on that release, by
-    digest, with `apk upgrade`, so each package is the day's. It rolls them
-    out one host at a time behind the health gate.
+    digest, with `apk upgrade`, so each package is the day's. It rebuilds
+    Patroni too, and Copa patches each. It rolls them out one host at a
+    time behind the health gate: for Patroni, a restart of each node, the
+    leader's after a switchover, so Grafana's writes pause for a few seconds
+    each morning.
   - Deploys later that day reuse the morning's builds. The images on the
-    hosts are at most a day behind Alpine's package fixes, two over Sunday.
+    hosts are at most a day behind the package fixes, two over Sunday.
   - When Alpine ships 3.24.4, the next run builds `…-alpine3.24.4-…`.
 - **The run alerts.** Every deploy ends by pinging the Healthchecks.io check
   `watchtower-deploy`. It sends `/fail` as soon as any job failed, which
@@ -767,13 +778,14 @@ already there instead of rebuilding it.
   `build/<name>/` without a new version (`org.opencontainers.image.version`),
   bump `watchtower.image.revision`; set it back to 1 with a new version.
   CI's `images` jobs fail a pull request that changes an image but keeps its
-  tag. Otherwise a deploy later that day, or any deploy of Patroni, would
-  keep serving the old image under it.
+  tag. Otherwise a deploy later that day would keep serving the old image
+  under it.
 - **A new Alpine minor** (3.25): change `ARG ALPINE` in every Dockerfile
   together; `image-tag.sh` refuses a mix.
 - **Building one locally:** `scripts/build-image.sh <name> <ref>` (docker;
-  render the configs first with `ansible/playbooks/render.yml`). It builds,
-  checks and scans the image just as CI does.
+  render the configs first with `ansible/playbooks/render.yml`; `copa` on the
+  PATH; Docker with the containerd image store, Docker 29's default on a new
+  data root). It builds, patches, checks and scans the image just as CI does.
 
 ## Rebuilding a host
 

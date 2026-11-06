@@ -127,7 +127,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.gitea/actions/setup
         with:
-          tools: ansible
+          tools: ansible copa
       - name: Render the configs the image is checked against
         working-directory: ansible
         run: ansible-playbook -i inventory/hosts.sample.yml playbooks/render.yml >/dev/null
@@ -138,7 +138,7 @@ jobs:
           set -euo pipefail
           git fetch -q --no-tags --depth=1 origin "$GITHUB_BASE_REF"
           scripts/image-tag.sh --check FETCH_HEAD
-      - name: Build, check its config, Trivy scan (no push)
+      - name: Build, Copa-patch, check its config, Trivy scan (no push)
         run: scripts/build-image.sh "${{ matrix.image }}" "watchtower-${{ matrix.image }}:ci-${GITHUB_SHA:0:12}"
 
   semgrep:

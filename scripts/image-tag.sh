@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The tag of one of our images. On Alpine: its version, the Alpine release,
 # its revision and the day it was built, e.g. 15.5.0-alpine3.24.3-r1-20261025.
-# Patroni, which isn't on Alpine: version and revision, 4.1.5-r1.
+# Patroni, which isn't on Alpine: version, revision and the day,
+# 4.1.5-r1-20261106.
 #
 #   scripts/image-tag.sh <name>          one image's tag
 #   scripts/image-tag.sh --names         every image's name, one a line
@@ -22,17 +23,20 @@
 # mid-run. Without them, this resolves them itself.
 #
 # The day in the tag makes the first deploy of each day (UTC) rebuild every
-# Alpine image with that day's packages; the deploy runs at 05:00 UTC Monday
-# to Saturday for that (deploy.yml), so the images are at most a day behind
-# Alpine's package fixes, two over Sunday. Later deploys that day reuse
-# those builds.
+# image: each Alpine image with that day's packages, and every image with
+# Copa's patches for the fixable holes Trivy knows of that day
+# (scripts/build-image.sh). The deploy runs at 05:00 UTC Monday to Saturday
+# for that (deploy.yml), so the images are at most a day behind the fixes,
+# two over Sunday. Later deploys that day reuse those builds. For Patroni
+# that's a rolling restart of the nodes each day, the leader's after a
+# switchover.
 #
 # Tags in Artifact Registry are immutable and a tag that's there is reused
 # (scripts/publish-image.sh), so any other change to build/<name>/ needs a
 # new tag, or a deploy later the same day would keep the morning's image: a
 # new version (org.opencontainers.image.version), or else the next revision
 # (watchtower.image.revision; back to 1 with a new version). CI's --check
-# makes sure of it, and Patroni's tag has nothing else to change it.
+# makes sure of it.
 
 set -euo pipefail
 
@@ -54,19 +58,27 @@ alpine_minor() {
 }
 
 # The newest patch release of the Dockerfiles' one Alpine minor, from Docker
-# Hub: the X.Y.Z tag that is the same image (index digest) as X.Y.
+# Hub: the X.Y.Z tag whose linux/arm64 image is X.Y's. Compared by that image,
+# the only one we build on and run, not by the whole index: the two indexes can
+# list different platforms for hours (on 2026-11-05 alpine:3.24 gained riscv64
+# and 3.24.4 didn't, every other platform's image the same). The build pins
+# that release's own index (ALPINE_DIGEST), so its tag and digest agree.
 alpine() {
-  local minor tags release digest
+  local minor tags arm64 release digest
   minor="$(for n in $(names); do alpine_minor "${repo_root}/build/${n}/Dockerfile"; done | sort -u)"
   [[ -n "$minor" ]] || die "no Dockerfile builds on Alpine (ARG ALPINE=docker.io/library/alpine:X.Y)"
   [[ "$minor" != *$'\n'* ]] || die "the Dockerfiles build on different Alpine releases: $(tr '\n' ' ' <<<"$minor")"
   tags="$(curl -fsSL --retry 3 "https://hub.docker.com/v2/namespaces/library/repositories/alpine/tags?name=${minor}&page_size=100")"
-  digest="$(jq -r --arg m "$minor" '.results[] | select(.name == $m) | .digest' <<<"$tags")"
-  [[ "$digest" == sha256:* ]] || die "Docker Hub has no alpine:${minor}"
-  release="$(jq -r --arg m "$minor" --arg d "$digest" \
-    '[.results[] | select(.digest == $d and (.name | startswith($m + ".")) and (.name | test("^[0-9]+\\.[0-9]+\\.[0-9]+$")))][0].name // empty' <<<"$tags")"
+  arm64="$(jq -r --arg m "$minor" \
+    '[.results[] | select(.name == $m) | .images[] | select(.os == "linux" and .architecture == "arm64") | .digest][0] // empty' <<<"$tags")"
+  [[ "$arm64" == sha256:* ]] || die "Docker Hub has no linux/arm64 alpine:${minor}"
+  release="$(jq -r --arg m "$minor" --arg a "$arm64" \
+    '[.results[] | select((.name | startswith($m + ".")) and (.name | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
+      and any(.images[]; .os == "linux" and .architecture == "arm64" and .digest == $a))][0].name // empty' <<<"$tags")"
   # Hub's tags can briefly disagree while a release is being published.
-  [[ -n "$release" ]] || die "alpine:${minor} (${digest}) is no alpine:${minor}.Z on Docker Hub yet; retry shortly"
+  [[ -n "$release" ]] || die "alpine:${minor}'s arm64 image (${arm64}) is no alpine:${minor}.Z's on Docker Hub yet; retry shortly"
+  digest="$(jq -r --arg r "$release" '.results[] | select(.name == $r) | .digest' <<<"$tags")"
+  [[ "$digest" == sha256:* ]] || die "Docker Hub lists alpine:${release} without an index digest"
   printf 'ALPINE_RELEASE=%s\nALPINE_DIGEST=%s\n' "$release" "$digest"
 }
 
@@ -92,19 +104,19 @@ tag() {
     die "build/$1/Dockerfile needs the org.opencontainers.image.version and watchtower.image.revision labels"
   [[ "$revision" =~ ^[1-9][0-9]*$ ]] || die "build/$1/Dockerfile: watchtower.image.revision must be 1, 2, ..."
   minor="$(alpine_minor "$df")"
+  need_inputs
+  [[ "${IMAGE_DATE:-}" =~ ^[0-9]{8}$ ]] || die "IMAGE_DATE is '${IMAGE_DATE:-}', not YYYYMMDD"
   if [[ -z "$minor" ]]; then
-    printf '%s-r%s\n' "$version" "$revision"
+    printf '%s-r%s-%s\n' "$version" "$revision" "$IMAGE_DATE"
     return
   fi
-  need_inputs
   [[ "${ALPINE_RELEASE:-}" == "${minor}".* ]] ||
     die "build/$1 builds on Alpine ${minor}, but ALPINE_RELEASE is '${ALPINE_RELEASE:-}' (scripts/image-tag.sh --inputs)"
-  [[ "${IMAGE_DATE:-}" =~ ^[0-9]{8}$ ]] || die "IMAGE_DATE is '${IMAGE_DATE:-}', not YYYYMMDD"
   printf '%s-alpine%s-r%s-%s\n' "$version" "$ALPINE_RELEASE" "$revision" "$IMAGE_DATE"
 }
 
-# The Alpine tags need the release and the day; resolve them unless the
-# caller did.
+# Every tag needs the day, and the Alpine tags the release too; resolve them
+# unless the caller did.
 need_inputs() {
   [[ -n "${ALPINE_RELEASE:-}" && -n "${ALPINE_DIGEST:-}" && -n "${IMAGE_DATE:-}" ]] && return
   local out kv

@@ -16,7 +16,7 @@ reachable only through WireGuard at the private endpoint
 - **Backups:** Grafana's database dumped nightly to Object Storage and kept 90 days, with a Healthchecks.io alert the moment a run fails
 - **Host health:** every host checks its services, disks and SELinux every 5 minutes and reports to its own Healthchecks.io check, so a lost node is noticed even though users aren't affected
 - **Access:** WireGuard (wg-easy) on the proxy; Caddy (with the Coraza WAF) answers only on the tunnel address
-- **Images:** our own (Caddy, wg-easy, Patroni) in a private Artifact Registry repo, minimal Alpine where they can be, built natively for ARM, scanned by Trivy
+- **Images:** our own (Caddy, wg-easy, Patroni) in a private Artifact Registry repo, minimal Alpine where they can be, built natively for ARM, scanned by Trivy, with fixable OS-package holes patched by Copa before the scan that gates them
 - **DNS:** the Cloud DNS zone `watchtower.jasonmross.dev`, delegated from `jasonmross.dev`
 - **CI/CD:** Gitea Actions: `ci.yml` (status checks), `deploy.yml` (deploy on merge to main)
 

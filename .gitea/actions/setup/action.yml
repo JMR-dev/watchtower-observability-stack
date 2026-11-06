@@ -18,12 +18,17 @@ description: |
                 a PGP signature, no checksum)
     gcloud      computed from the official tarball on 2026-10-24 (Google
                 publishes no checksum for the current release)
+    copa        copacetic_checksums.txt on the GitHub release
+                (project-copacetic/copacetic). The checksums file isn't
+                signed and Copa publishes no build provenance; GitHub's
+                immutable-release attestation (`gh release verify-asset`)
+                confirms each tarball is the one published, as on 2026-11-06.
   Python tools come from uv, into a venv on a uv-managed CPython 3.13, from
   hash-locked requirement files (`--require-hashes`):
     ansible       ansible/requirements.txt (ansible-core)
     ansible-lint  ansible/requirements-lint.txt (ansible-core + ansible-lint)
     semgrep       .gitea/requirements/semgrep.txt
-  uv and those three also install on arm64 runners (the Patroni image job);
+  uv, those three and copa also install on arm64 runners (the image jobs);
   every other tool is amd64 only.
 
   Secrets: every line of `secrets` is NAME=id or @NAME=id, id a Secret
@@ -40,7 +45,7 @@ description: |
 
 inputs:
   tools:
-    description: Space-separated subset of "go pulumi alloy shellcheck actionlint wireproxy awscli gcloud ansible ansible-lint semgrep"
+    description: Space-separated subset of "go pulumi alloy shellcheck actionlint wireproxy awscli gcloud ansible ansible-lint semgrep copa"
     required: false
     default: ""
   gcp-key:
@@ -83,6 +88,9 @@ runs:
         AWSCLI_SHA256: 5def7d1b7e55d892f9a381bb2cb2081a685712464be0d36d5d706af0ac48d0d3
         GCLOUD_VERSION: "590.0.1"
         GCLOUD_SHA256: d1ae7be7e12c4e7d8286fab4774f5441020aca89dc7793ddacbace8d11d20f06
+        COPA_VERSION: "0.15.0"
+        COPA_SHA256_AMD64: cff3fe9320f3bd24bafcfd0ce877ef57e23acad0836da0ac6c253919f71c9cad
+        COPA_SHA256_ARM64: 2444b6109c6164beef980641ec5f2813bc42b1703add6dd73591ace23051ca8f
       run: |
         set -euo pipefail
         # Reading secrets needs gcloud.
@@ -126,7 +134,7 @@ runs:
         $sudo apt-get install -y -qq --no-install-recommends $apt_deps >/dev/null
 
         for tool in $TOOLS; do
-          case "$tool" in ansible | ansible-lint | semgrep) ;; *)
+          case "$tool" in ansible | ansible-lint | semgrep | copa) ;; *)
             [[ "$arch" == x86_64 ]] || { echo "${tool}: amd64 only (this runner is ${arch})" >&2; exit 1; } ;;
           esac
           case "$tool" in
@@ -183,6 +191,18 @@ runs:
                 echo "CLOUDSDK_CORE_DISABLE_PROMPTS=1"
                 echo "CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=1"
               } >>"$GITHUB_ENV"
+              ;;
+            copa)
+              # The image jobs patch with it (scripts/build-image.sh), on arm64.
+              case "$arch" in
+                x86_64) copa_arch=amd64 sum="$COPA_SHA256_AMD64" ;;
+                aarch64) copa_arch=arm64 sum="$COPA_SHA256_ARM64" ;;
+                *) echo "copa: no pinned build for ${arch}" >&2; exit 1 ;;
+              esac
+              fetch "https://github.com/project-copacetic/copacetic/releases/download/v${COPA_VERSION}/copa_${COPA_VERSION}_linux_${copa_arch}.tar.gz" \
+                "$sum" "${tools_dir}/copa.tgz"
+              tar -C "$bin" -xzf "${tools_dir}/copa.tgz" copa
+              "${bin}/copa" --version
               ;;
             ansible | ansible-lint | semgrep)
               case "$tool" in
