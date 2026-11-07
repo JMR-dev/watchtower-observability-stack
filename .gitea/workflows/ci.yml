@@ -6,8 +6,8 @@
 # images (patroni), images (wg-easy), semgrep, shell, alloy.
 #
 # A PR that changes documentation only (docs/ and Markdown, not
-# docs/config.alloy.example) runs the lint jobs, semgrep, shell and alloy, and
-# skips the rest (the changes job, below). A skipped required check passes.
+# docs/config.alloy.example) runs only the lint job, shell, and skips the rest
+# (the changes job, below). A skipped required check passes.
 #
 # Runs on the GKE runners (gitea-496920/gitea-runners; the gitea repo's
 # docs/runners.md):
@@ -34,8 +34,9 @@ jobs:
   # Whether the PR changes documentation only: every changed path under docs/
   # or a Markdown file, except docs/config.alloy.example, which roles/gcppull
   # deploys its scrub rules from (ansible/roles/gcppull/defaults). A docs-only
-  # PR runs only the lint jobs (semgrep, shell, alloy) and skips go, ansible,
-  # configs and images: Gitea counts a skipped required check as passed. Those
+  # PR runs only the lint job (shell: shellcheck and actionlint) and skips go,
+  # ansible, configs, images, semgrep and alloy: Gitea counts a skipped
+  # required check as passed. Those
   # jobs run unless this one says docs_only=true, so a failure here runs
   # everything rather than skipping it. Paths are compared with the base
   # branch's tip, so a base that moved on can only make a PR look less
@@ -198,6 +199,8 @@ jobs:
         run: scripts/build-image.sh "${{ matrix.image }}" "watchtower-${{ matrix.image }}:ci-${GITHUB_SHA:0:12}"
 
   semgrep:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -234,6 +237,8 @@ jobs:
         run: actionlint -config-file .gitea/actionlint.yaml .gitea/workflows/*.yml
 
   alloy:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
