@@ -4,7 +4,7 @@
 //
 // Logs: each log entry goes through loki.process "gcp", this pipeline's own rules,
 // then loki.process "scrub", the block every service shares, byte for byte as in
-// config/alloy/config.alloy.example. Nothing later scrubs: what comes out is stored.
+// docs/config.alloy.example. Nothing later scrubs: what comes out is stored.
 // scripts/check-gcppull-scrub.sh runs all of it over made-up entries in every shape.
 
 logging {

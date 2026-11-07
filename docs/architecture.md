@@ -65,7 +65,7 @@ write telemetry, into the shared tenant `jasonmross`
 
 ## Data flow
 
-1. **Clients** run Grafana Alloy (`config/alloy/config.alloy.example`) with
+1. **Clients** run Grafana Alloy (`docs/config.alloy.example`) with
    PII scrubbing, as WireGuard peers.
 2. Alloy sends **logs** to `:3100`, **metrics** to `:8080` and **traces** to
    `:4317`/`:4318` on `watchtower.jasonmross.dev`, over TLS, with the tenant

@@ -5,6 +5,10 @@
 # Branches): go, ansible, configs, images (alloy), images (caddy),
 # images (patroni), images (wg-easy), semgrep, shell, alloy.
 #
+# A PR that changes documentation only (docs/ and Markdown, not
+# docs/config.alloy.example) runs the lint jobs, semgrep, shell and alloy, and
+# skips the rest (the changes job, below). A skipped required check passes.
+#
 # Runs on the GKE runners (gitea-496920/gitea-runners; the gitea repo's
 # docs/runners.md):
 #   ubuntu-latest  a job pod of its own
@@ -27,7 +31,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Whether the PR changes documentation only: every changed path under docs/
+  # or a Markdown file, except docs/config.alloy.example, which roles/gcppull
+  # deploys its scrub rules from (ansible/roles/gcppull/defaults). A docs-only
+  # PR runs only the lint jobs (semgrep, shell, alloy) and skips go, ansible,
+  # configs and images: Gitea counts a skipped required check as passed. Those
+  # jobs run unless this one says docs_only=true, so a failure here runs
+  # everything rather than skipping it. Paths are compared with the base
+  # branch's tip, so a base that moved on can only make a PR look less
+  # docs-only, never more. deploy.yml skips a docs-only push to main the same
+  # way.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.paths.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Changed paths
+        id: paths
+        run: |
+          set -euo pipefail
+          git fetch -q --no-tags --depth=1 origin "$GITHUB_BASE_REF"
+          changed="$(git diff --name-only FETCH_HEAD HEAD)"
+          docs_only=true
+          [[ -n "$changed" ]] || docs_only=false
+          while IFS= read -r path; do
+            [[ -n "$path" ]] || continue
+            case "$path" in
+              docs/config.alloy.example) docs_only=false ;;
+              docs/* | *.md) ;;
+              *) docs_only=false ;;
+            esac
+          done <<<"$changed"
+          printf 'changed:\n%s\ndocs only: %s\n' "$changed" "$docs_only"
+          echo "docs_only=${docs_only}" >>"$GITHUB_OUTPUT"
+
   go:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: heavy
     timeout-minutes: 40
     steps:
@@ -51,6 +93,8 @@ jobs:
           go build -o /dev/null ./cloud
 
   ansible:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -94,6 +138,8 @@ jobs:
           done
 
   configs:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     # Runs the hosts' own images against their rendered configs.
     runs-on: docker
     timeout-minutes: 30
@@ -122,6 +168,8 @@ jobs:
     # The check names branch protection requires; without this Gitea would
     # append the runner too.
     name: images (${{ matrix.image }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     # Built natively for the hosts, which are all ARM.
     runs-on: docker-arm64
     timeout-minutes: 40
@@ -196,8 +244,8 @@ jobs:
       - name: The client example is formatted and valid
         run: |
           set -euo pipefail
-          diff -u config/alloy/config.alloy.example <(alloy fmt config/alloy/config.alloy.example)
-          alloy validate config/alloy/config.alloy.example
+          diff -u docs/config.alloy.example <(alloy fmt docs/config.alloy.example)
+          alloy validate docs/config.alloy.example
       # Nothing on watchtower scrubs: the client's rules are all there is.
       - name: Its scrub rules hold back the PII in the fixture, and only that
         run: scripts/check-alloy-scrub.sh

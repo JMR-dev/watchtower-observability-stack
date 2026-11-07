@@ -22,5 +22,5 @@ gcppull_enabled: >-
 # The shared scrub block, out of the client example as it stands, so this
 # config can't drift from what every service copies.
 gcppull_scrub_block: >-
-  {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../config/alloy/config.alloy.example')
+  {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../docs/config.alloy.example')
      | regex_search('(?ms)^// scrub: begin.*^// scrub: end$') }}

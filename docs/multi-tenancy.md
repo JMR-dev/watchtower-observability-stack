@@ -83,7 +83,7 @@ loki.write "default" {
 }
 ```
 
-`config/alloy/config.alloy.example` is the full client config, with the
+`docs/config.alloy.example` is the full client config, with the
 scrubbing every client needs.
 
 ## Offboarding

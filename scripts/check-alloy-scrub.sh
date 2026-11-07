@@ -4,7 +4,7 @@
 # only thing between a service's logs and storage (docs/client-telemetry.md).
 #
 #   scripts/check-alloy-scrub.sh [config] [fixture]
-#   (defaults: config/alloy/config.alloy.example, config/alloy/testdata/scrub.log)
+#   (defaults: docs/config.alloy.example, config/alloy/testdata/scrub.log)
 #
 # The rules are the loki.process block between the config's
 # "// scrub: begin" and "// scrub: end" lines; they run with the fixture's
@@ -38,7 +38,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-config="${1:-${repo_root}/config/alloy/config.alloy.example}"
+config="${1:-${repo_root}/docs/config.alloy.example}"
 fixture="${2:-${repo_root}/config/alloy/testdata/scrub.log}"
 forbidden="${fixture%.log}.forbidden"
 caddy="${fixture%.log}.caddy.log"

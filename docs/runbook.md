@@ -90,7 +90,7 @@ gopass.
    `https://watchtower.jasonmross.dev:51821` (user `admin`, the wg-easy
    password).
 9. Open `https://watchtower.jasonmross.dev` (Grafana, user `admin`) and point
-   a test Alloy (`config/alloy/config.alloy.example`) at the stack.
+   a test Alloy (`docs/config.alloy.example`) at the stack.
 
 ## Host access
 

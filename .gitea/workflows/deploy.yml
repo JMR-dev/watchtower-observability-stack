@@ -1,6 +1,6 @@
 # Deploy main:  images -> Hetzner (Pulumi) -> hosts (Ansible) -> verify.
 #
-#   push to main       deploys
+#   push to main       deploys, unless it changes documentation only (below)
 #   05:00 UTC,         deploys main again: the day's first deploy rebuilds
 #   Monday-Saturday    every image, the Alpine ones with the day's packages,
 #                      Copa-patches them (scripts/build-image.sh) and rolls
@@ -35,6 +35,16 @@ name: deploy
 on:
   push:
     branches: [main]
+    # A push that changes documentation only (docs/ and Markdown) deploys
+    # nothing; the next scheduled run deploys main as usual. Later patterns
+    # override earlier ones, so docs/config.alloy.example still deploys:
+    # roles/gcppull takes its scrub rules from it. ci.yml's changes job draws
+    # the same line for pull requests.
+    paths:
+      - "**"
+      - "!docs/**"
+      - "!**.md"
+      - "docs/config.alloy.example"
   # Gitea runs schedules in UTC. Keep scripts/healthchecks.sh's
   # DEPLOY_SCHEDULE equal.
   schedule:

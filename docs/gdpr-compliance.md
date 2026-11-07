@@ -90,7 +90,7 @@ expire. As with the archive, the servers' key can only add dumps, and the
 ### Collector-side scrubbing
 
 Clients run Grafana Alloy with the redaction pipeline in
-`config/alloy/config.alloy.example`:
+`docs/config.alloy.example`:
 
 - IPv4 / IPv6 addresses → `[REDACTED-IP*]`
 - Email addresses → `[REDACTED-EMAIL]`

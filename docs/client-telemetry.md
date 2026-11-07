@@ -59,7 +59,7 @@ and the Gitea VM once their data is verified.
 | Metrics | `prometheus.exporter.unix` (`job="integrations/unix"`), `prometheus.exporter.self` (`job="alloy"`), Caddy's metrics (`job="caddy"`), a blackbox probe of the public health URL (`job="blackbox"`); every 60 s |
 | Caddy metrics | The global `metrics` option and a site `:2020 { metrics }` bound to loopback (`bind 127.0.0.1` with host networking, `PublishPort=127.0.0.1:2020:2020` in bridge mode). **Never publish the admin API (:2019)** |
 | Coraza | Its audit log goes to a **local rotated file** (`SecAuditLog /var/log/caddy/coraza-audit.log` or the like), never the journal: a record holds whole requests, cookies and bodies |
-| Scrub | `config/alloy/config.alloy.example`'s `loki.process "scrub"`, plus the service's own rules (below). A fixture test in the repo's CI with `scripts/check-alloy-scrub.sh` |
+| Scrub | `docs/config.alloy.example`'s `loki.process "scrub"`, plus the service's own rules (below). A fixture test in the repo's CI with `scripts/check-alloy-scrub.sh` |
 | Retries | `loki.write` as in the example (`max_backoff_period = "5m"`, `max_backoff_retries = 300`, `retry_on_http_429 = true`): about a day of retrying, through a watchtower restart or the proxy's Sunday reboot |
 | Units | Alloy `After=`/`Wants=wg-quick@wg-watchtower.service`, with a handler of its own. **Never** where a change restarts the app (Gitea's `vm/systemd/`, the blog's `render_all` quadlet loop) |
 | Deploy check | Warn only: Alloy's `/-/ready`, then whether `wg show wg-watchtower latest-handshakes` is non-zero within 2 minutes |
