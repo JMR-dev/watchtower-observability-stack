@@ -46,8 +46,17 @@ scripts/secret.sh check
   of unit files and container listings): the cluster S3 key, the LUKS key,
   the pull key, Grafana's, Postgres's and Patroni's passwords, wg-easy's
   first-start password, Caddy's DNS-01 key, the GCP reader's key and the
-  Healthchecks.io ping URLs (the backup's, and the host's own). A new value reaches them on
-  the next deploy, and only the containers that use it restart.
+  Healthchecks.io ping URLs (the backup's, the host's own, and on the nodes
+  the telemetry alerts'). A new value reaches them on the next deploy, and
+  only the containers that use it restart.
+- **Optional secrets** (`?NAME=id` in `deploy.yml`, `names.OptionalSecrets`):
+  `wireguard-deploy-peer`, `gcp-telemetry-reader-key` and
+  `healthchecks-telemetry-alert-url`. A deploy
+  goes on without one that has no value (no version, or its newest disabled or
+  destroyed), and without one it may not read (`PERMISSION_DENIED`: not made
+  yet, or not yet granted by `scripts/bootstrap.sh`), with a warning on the
+  run that names it. Any other error reading one stops the deploy, as does
+  any trouble with every other secret it reads.
 
 Why a long-lived key: the Gitea runner cluster keeps Actions jobs away from
 GKE Workload Identity on purpose (instance-wide runners, metadata server
@@ -91,6 +100,7 @@ every 90 days.
 | `healthchecks-pg-backup-url` | Ping URL of the Healthchecks.io check of the nightly backup (docs/runbook.md, "First deploy"). The nightly backup pings it, or its `/fail` when a run fails. Anyone holding it can ping the check |
 | `healthchecks-host-urls` | One JSON object, host name to the ping URL of its Healthchecks.io check, written by `scripts/healthchecks.sh`. Each host gets only its own URL |
 | `healthchecks-deploy-url` | Ping URL of the Healthchecks.io check `watchtower-deploy`, written by `scripts/healthchecks.sh`. The deploy's last job pings it, or its `/fail` when a job failed. Anyone holding it can ping the check |
+| `healthchecks-telemetry-alert-url` | Ping URL of the Healthchecks.io check `watchtower-telemetry-alerts`, written by `scripts/healthchecks.sh`. **Optional:** the deploy reads it as `?HEALTHCHECKS_TELEMETRY_ALERT_URL`; with no value (no version, or its newest disabled) it provisions the telemetry alerts but no contact point, and so it does, with a warning on the run, when it may not read it yet (`scripts/bootstrap.sh` grants it; `scripts/healthchecks.sh` says whether it has). Each node's Grafana gets it as a podman secret, which its contact point reads (`$__file{}`) as it starts. **Grafana then keeps it in the clear:** in the contact point's plain `settings`, in `alert_configuration` and every row of `alert_configuration_history`, so in each nightly dump of Grafana's database too, and any Viewer of the main org can read it from `/api/v1/provisioning/contact-points`. A value removed later stays there, still notified, until the one-off in docs/runbook.md ("Telemetry alerts") removes the contact point. Anyone holding it can ping the check |
 
 ### Read by the bastion
 

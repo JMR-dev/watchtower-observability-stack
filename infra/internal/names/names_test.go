@@ -3,6 +3,7 @@ package names
 import (
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -366,6 +367,215 @@ func TestBastionReadsItsOwnPingURL(t *testing.T) {
 	}
 	if got := strings.Fields(m[1]); !reflect.DeepEqual(got, BastionSecrets) {
 		t.Errorf("bootstrap.sh bastion_readable = %v, want %v", got, BastionSecrets)
+	}
+}
+
+// The deploy reads OptionalSecrets as optional (`?NAME=id`) and every other
+// secret as required: a required read of a secret with no value yet fails the
+// deploy, and an optional read of one it needs lets it run without.
+func TestOptionalSecretsAreReadAsOptional(t *testing.T) {
+	b, err := os.ReadFile("../../../.gitea/workflows/deploy.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	optional := map[string]bool{}
+	for _, id := range OptionalSecrets {
+		optional[id] = true
+	}
+	seen := map[string]bool{}
+	line := regexp.MustCompile(`(?m)^\s+(\??)@?[A-Z][A-Z0-9_]*=([a-z0-9-]+)\s*$`)
+	for _, m := range line.FindAllStringSubmatch(string(b), -1) {
+		seen[m[2]] = true
+		if got := m[1] == "?"; got != optional[m[2]] {
+			t.Errorf("deploy.yml reads %s with optional=%v, want %v", m[2], got, optional[m[2]])
+		}
+	}
+	for _, id := range OptionalSecrets {
+		if !seen[id] {
+			t.Errorf("deploy.yml never reads optional %s", id)
+		}
+	}
+}
+
+// fakeGcloud answers `gcloud secrets versions access latest --secret ID ...
+// --out-file F` the way Secret Manager does, by the id's first word: val- has a
+// value, none- has no version, off- has its newest version disabled, denied- is
+// a secret the caller may not read (or that doesn't exist: the same answer),
+// token- is gcloud failing to authenticate at all.
+const fakeGcloud = `#!/usr/bin/env bash
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --secret) id=$2; shift 2 ;;
+    --out-file) out=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$id" in
+  val-*) printf 'value of %s' "$id" >"$out" ;;
+  none-*) echo "ERROR: (gcloud.secrets.versions.access) NOT_FOUND: Secret [projects/1/secrets/${id}] not found or has no versions." >&2; exit 1 ;;
+  off-*) echo "ERROR: (gcloud.secrets.versions.access) FAILED_PRECONDITION: Secret Version [projects/1/secrets/${id}/versions/2] is in DISABLED state." >&2; exit 1 ;;
+  denied-*) echo "ERROR: (gcloud.secrets.versions.access) PERMISSION_DENIED: Permission 'secretmanager.versions.access' denied for resource 'projects/p/secrets/${id}/versions/latest' (or it may not exist)." >&2; exit 1 ;;
+  token-*) echo "ERROR: (gcloud.secrets.versions.access) There was a problem refreshing your current auth tokens: ('invalid_grant: Invalid JWT Signature.')" >&2; exit 1 ;;
+  *) echo "fake gcloud: unknown id ${id}" >&2; exit 2 ;;
+esac
+`
+
+// readSecretsStep is the setup action's "Read secrets from Secret Manager"
+// script, as the runner gets it.
+func readSecretsStep(t *testing.T) string {
+	b, err := os.ReadFile("../../../.gitea/actions/setup/action.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?ms)- name: Read secrets from Secret Manager\n.*?\n      run: \|\n((?:        .*\n|\n)+)`).FindStringSubmatch(string(b))
+	if m == nil {
+		t.Fatal("action.yml has no `Read secrets from Secret Manager` step with a run: | block")
+	}
+	return regexp.MustCompile(`(?m)^        `).ReplaceAllString(m[1], "")
+}
+
+// An optional secret (?NAME=id, ?@NAME=id) is skipped when it has no value (no
+// version, or its newest disabled), and when the read is denied, which is also
+// what a secret not yet made looks like to the deployer: a merge must not break
+// every deploy until the owner runs bootstrap.sh. A denied read is never silent,
+// though: a warning annotation names the secret. Any other error fails the job.
+func TestSetupActionSkipsOnlyMissingOptionalSecrets(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("no bash")
+	}
+	script := readSecretsStep(t)
+	run := func(t *testing.T, secrets string) (env, output string, err error) {
+		tmp := t.TempDir()
+		bin := filepath.Join(tmp, "tools", "google-cloud-sdk", "bin")
+		if err := os.MkdirAll(bin, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bin, "gcloud"), []byte(fakeGcloud), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, "gcp-deployer.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		envFile := filepath.Join(tmp, "github-env")
+		// The repo's own step, from a file: bash runs what the runner would.
+		stepFile := filepath.Join(tmp, "step.sh")
+		if err := os.WriteFile(stepFile, []byte(script), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", stepFile)
+		cmd.Env = append(os.Environ(), "RUNNER_TEMP="+tmp, "GITHUB_ENV="+envFile, "PROJECT=p", "SECRETS="+secrets)
+		// The job log: stdout (where workflow commands go) and stderr.
+		var out strings.Builder
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		err = cmd.Run()
+		b, _ := os.ReadFile(envFile)
+		return string(b), out.String(), err
+	}
+
+	t.Run("no version or a disabled one: unset, and the job goes on", func(t *testing.T) {
+		env, stderr, err := run(t, "?OPT=none-a\n?@OPT_FILE=off-b\nREQ=val-c\n")
+		if err != nil {
+			t.Fatalf("failed: %v\n%s", err, stderr)
+		}
+		if strings.Contains(env, "OPT") || !strings.Contains(env, "REQ=value of val-c\n") {
+			t.Errorf("GITHUB_ENV = %q, want REQ alone", env)
+		}
+	})
+	t.Run("an optional secret with a value is read like any other", func(t *testing.T) {
+		env, stderr, err := run(t, "?OPT=val-d\n?@OPT_FILE=val-e\n")
+		if err != nil {
+			t.Fatalf("failed: %v\n%s", err, stderr)
+		}
+		if !strings.Contains(env, "OPT=value of val-d\n") || !regexp.MustCompile(`(?m)^OPT_FILE=.*/secrets/val-e$`).MatchString(env) {
+			t.Errorf("GITHUB_ENV = %q", env)
+		}
+	})
+	for _, line := range []string{"?OPT=denied-f", "?@OPT_FILE=denied-f"} {
+		t.Run("a denied read of "+line+": unset, the job goes on, and a warning names it", func(t *testing.T) {
+			env, output, err := run(t, line+"\nREQ=val-g\n")
+			if err != nil {
+				t.Fatalf("failed: %v\n%s", err, output)
+			}
+			if strings.Contains(env, "OPT") || !strings.Contains(env, "REQ=value of val-g\n") {
+				t.Errorf("GITHUB_ENV = %q, want REQ alone", env)
+			}
+			warning := regexp.MustCompile(`(?m)^::warning[^:]*::denied-f can't be read \(PERMISSION_DENIED\).*scripts/bootstrap\.sh.*goes on without OPT`)
+			if !warning.MatchString(output) {
+				t.Errorf("no warning annotation naming denied-f, bootstrap.sh and OPT in the job log:\n%s", output)
+			}
+		})
+	}
+	for _, line := range []string{"?OPT=token-h", "?@OPT_FILE=token-h"} {
+		t.Run("any other error reading "+line+" fails the job, naming the secret", func(t *testing.T) {
+			env, output, err := run(t, line+"\n")
+			if err == nil {
+				t.Fatalf("succeeded; GITHUB_ENV = %q", env)
+			}
+			if !strings.Contains(output, "reading secret token-h") || !strings.Contains(output, "auth tokens") {
+				t.Errorf("job log = %q", output)
+			}
+		})
+	}
+	t.Run("a required secret, with no version or denied, fails the job", func(t *testing.T) {
+		for _, line := range []string{"REQ=none-i", "REQ=denied-j"} {
+			if env, _, err := run(t, line+"\n"); err == nil {
+				t.Errorf("%s succeeded; GITHUB_ENV = %q", line, env)
+			}
+		}
+	})
+}
+
+// The telemetry alerts reach their Healthchecks.io check: the deploy reads the
+// URL scripts/healthchecks.sh stores, under the name Ansible looks up, into
+// watchtower_optional_secret (site.yml fails a deploy with any watchtower_secret
+// empty); and Grafana's notifications open with the keywords the check sorts
+// them by. Under another keyword the check would ignore every ping.
+func TestTelemetryAlertsReachTheirCheck(t *testing.T) {
+	read := func(path string) string {
+		b, err := os.ReadFile("../../../" + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	deploy := read(".gitea/workflows/deploy.yml")
+	if !strings.Contains(deploy, "?HEALTHCHECKS_TELEMETRY_ALERT_URL="+SecretHealthchecksTelemetryAlertURL+"\n") {
+		t.Errorf("deploy.yml does not read %s as HEALTHCHECKS_TELEMETRY_ALERT_URL", SecretHealthchecksTelemetryAlertURL)
+	}
+	secrets := read("ansible/inventory/group_vars/all/secrets.yml")
+	optional := regexp.MustCompile(`(?ms)^watchtower_optional_secret:\n((?:[ #].*\n|\n)*)`).FindStringSubmatch(secrets)
+	if optional == nil || !strings.Contains(optional[1], "lookup('ansible.builtin.env', 'HEALTHCHECKS_TELEMETRY_ALERT_URL', default='')") {
+		t.Error("secrets.yml does not read HEALTHCHECKS_TELEMETRY_ALERT_URL into watchtower_optional_secret, empty when unset")
+	}
+	healthchecks := read("scripts/healthchecks.sh")
+	if !strings.Contains(healthchecks, `secret.sh" put `+SecretHealthchecksTelemetryAlertURL) {
+		t.Errorf("healthchecks.sh does not store %s", SecretHealthchecksTelemetryAlertURL)
+	}
+	// A deploy the deployer may not read it for only warns, so healthchecks.sh
+	// says, as it stores it, whether bootstrap.sh has granted it, and never
+	// grants it itself (bootstrap.sh owns IAM).
+	if !strings.Contains(healthchecks, "gcloud secrets get-iam-policy "+SecretHealthchecksTelemetryAlertURL) ||
+		!strings.Contains(healthchecks, "roles/secretmanager.secretAccessor") || !strings.Contains(healthchecks, "run scripts/bootstrap.sh") {
+		t.Errorf("healthchecks.sh does not check that the deployer may read %s and point at bootstrap.sh", SecretHealthchecksTelemetryAlertURL)
+	}
+	if strings.Contains(healthchecks, "add-iam-policy-binding") || strings.Contains(healthchecks, "set-iam-policy") {
+		t.Error("healthchecks.sh changes IAM: that is bootstrap.sh's")
+	}
+	for v, want := range map[string]string{"TELEMETRY_SUCCESS_KW": TelemetryAlertsResolved, "TELEMETRY_FAILURE_KW": TelemetryAlertsFiring} {
+		m := regexp.MustCompile(`(?m)^` + v + `="([^"]*)"$`).FindStringSubmatch(healthchecks)
+		if m == nil || m[1] != want {
+			t.Errorf("healthchecks.sh %s = %v, want %q", v, m, want)
+		}
+	}
+	notifications := read("ansible/roles/grafana/templates/telemetry-notifications.yaml.j2")
+	for _, kw := range []string{TelemetryAlertsFiring, TelemetryAlertsResolved} {
+		if n := strings.Count(notifications, kw); n != 1 {
+			t.Errorf("telemetry-notifications.yaml.j2 holds %s %d times, want once", kw, n)
+		}
+	}
+	if strings.Contains(TelemetryAlertsFiring, TelemetryAlertsResolved) || strings.Contains(TelemetryAlertsResolved, TelemetryAlertsFiring) {
+		t.Error("one keyword holds the other, so a body could match both")
 	}
 }
 

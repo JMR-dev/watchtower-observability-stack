@@ -91,6 +91,11 @@ write telemetry, into the shared tenant `jasonmross`
 9. **Every 5 minutes** each host checks its own services, disks and
    SELinux, and reports to its own Healthchecks.io check, which emails when
    it is unhealthy twice in a row or goes 15 minutes without reporting.
+10. **Every minute** Grafana evaluates the telemetry alerts on the services
+    that ship here (`group_vars/all/telemetry.yml`), and sends their one
+    notification group to the Healthchecks.io check
+    `watchtower-telemetry-alerts`, down while any fires (runbook, "Telemetry
+    alerts").
 
 ## What each failure costs
 

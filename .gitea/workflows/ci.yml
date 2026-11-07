@@ -107,6 +107,11 @@ jobs:
         run: ansible-playbook -i inventory/hosts.sample.yml playbooks/render.yml >/dev/null
       - name: quadlet, Loki, Mimir, Tempo and Fluent Bit check them
         run: scripts/check-configs.sh
+      # Grafana doesn't start on an alerting file it can't load. promtool and
+      # Loki parse every alert and dashboard query, then the pinned Grafana
+      # starts on the provisioning, with the notifications file and without.
+      - name: Grafana loads its provisioning, and every query in it parses
+        run: scripts/check-grafana.sh
       # The bastion's peer checks, metadata guard and ruleset rollback, in
       # Debian 13 as on the VM: root reaches the metadata server, no other uid
       # does, and a ruleset nobody confirms goes back.

@@ -1,0 +1,63 @@
+# Managed by Ansible (roles/grafana). Where the telemetry alerts go: one
+# notification group, every rule with telemetry="true", grouped on that label
+# alone, to the Healthchecks.io check watchtower-telemetry-alerts. The check
+# goes down on a ping whose body says FIRING and up on one that says RESOLVED
+# (scripts/healthchecks.sh sets its keyword filter), so it means "a telemetry
+# alert is firing". Grafana's HA cluster sends each notification from one node.
+#
+# Only here when the deploy has the ping URL (healthchecks-telemetry-alert-url):
+# Grafana reads it from the podman secret as it starts, and it is never in this
+# file. A $__file{} that names a missing file stops Grafana, so the task that
+# writes this file and the quadlet's Secret= line go by the same variable, in an
+# order no partial run can break (roles/grafana/tasks/main.yml).
+#
+# Taking this file away does not take what it made out of Grafana: the contact
+# points (the URL Grafana last read included) and the policy tree stay in its
+# database, and the alerts still reach the check. docs/runbook.md, "Telemetry
+# alerts", has the one-off that turns them off.
+#
+# Provisioning a policy tree replaces the whole tree. Its root goes to
+# `unrouted`, an email contact point that can't send (no SMTP here, an
+# .invalid address): only an alert without telemetry="true", made in the UI,
+# would land there.
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: telemetry-healthchecks
+    receivers:
+      - uid: telemetry-healthchecks
+        type: webhook
+        disableResolveMessage: false
+        settings:
+          url: $__file{/run/secrets/grafana-telemetry-alert-url}
+          httpMethod: POST
+          maxAlerts: "50"
+          # The body Healthchecks.io filters on: its first line holds exactly
+          # one keyword, then one line per alert (names, hosts, summaries).
+          payload:
+            template: |-
+{% raw %}              {{ if eq .Status "firing" }}TELEMETRY-ALERTS-FIRING{{ else }}TELEMETRY-ALERTS-RESOLVED{{ end }} ({{ len .Alerts.Firing }} firing, {{ len .Alerts.Resolved }} resolved)
+              {{ range .Alerts.Firing }}firing: {{ .Labels.alertname }}: {{ .Annotations.summary }}
+              {{ end }}{{ range .Alerts.Resolved }}resolved: {{ .Labels.alertname }}
+              {{ end }}
+{% endraw %}
+  - orgId: 1
+    name: unrouted
+    receivers:
+      - uid: unrouted
+        type: email
+        settings:
+          addresses: unrouted@watchtower.invalid
+          singleEmail: true
+policies:
+  - orgId: 1
+    receiver: unrouted
+    group_by: [grafana_folder, alertname]
+    routes:
+      - receiver: telemetry-healthchecks
+        object_matchers:
+          - [telemetry, "=", "true"]
+        group_by: [telemetry]
+        group_wait: {{ watchtower_telemetry_alert.group_wait }}
+        group_interval: {{ watchtower_telemetry_alert.group_interval }}
+        repeat_interval: {{ watchtower_telemetry_alert.repeat_interval }}

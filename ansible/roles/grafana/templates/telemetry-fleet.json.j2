@@ -1,0 +1,240 @@
+{#- Managed by Ansible (roles/grafana): the telemetry fleet dashboard, one row
+    of panels per signal the alerts watch, over the hosts in
+    watchtower_telemetry_sources. Grafana's own placeholders are ${...}, which
+    Jinja leaves alone; Jinja here only fills in the datasources and the host
+    list. CI parses every query and loads it in the pinned Grafana
+    (scripts/check-grafana.sh). -#}
+{%- set mimir = {'type': 'prometheus', 'uid': 'mimir-' ~ watchtower_agent_tenant} | to_json -%}
+{%- set loki = {'type': 'loki', 'uid': 'loki-' ~ watchtower_agent_tenant} | to_json -%}
+{%- set hosts = watchtower_telemetry_sources | map(attribute='name') | list -%}
+{%- set real_fs = 'fstype!~\\"tmpfs|ramfs|devtmpfs|overlay|squashfs|vfat|nsfs|fuse.*\\"' -%}
+{
+  "uid": "telemetry-fleet",
+  "title": "Telemetry fleet",
+  "description": "The services that ship telemetry to watchtower (group_vars/all/telemetry.yml), and what the telemetry alerts watch. docs/runbook.md, \"Telemetry alerts\".",
+  "tags": ["telemetry"],
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "1m",
+  "schemaVersion": 41,
+  "time": {"from": "now-24h", "to": "now"},
+  "timezone": "utc",
+  "templating": {
+    "list": [
+      {
+        "name": "host",
+        "label": "Host",
+        "type": "custom",
+        "query": {{ hosts | join(',') | to_json }},
+        "multi": true,
+        "includeAll": true,
+        "current": {"selected": true, "text": ["All"], "value": ["$__all"]},
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "alertlist",
+      "title": "Telemetry alerts firing or pending",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 6},
+      "options": {
+        "viewMode": "list",
+        "groupMode": "default",
+        "groupBy": [],
+        "maxItems": 50,
+        "sortOrder": 1,
+        "dashboardAlerts": false,
+        "alertName": "",
+        "alertInstanceLabelFilter": "{telemetry=\"true\"}",
+        "showInstances": true,
+        "stateFilter": {"firing": true, "pending": true, "error": true, "noData": false, "normal": false, "recovering": true}
+      }
+    },
+    {
+      "id": 2,
+      "type": "state-timeline",
+      "title": "Scrape targets up (1 up, 0 down, gap: nothing arrived)",
+      "gridPos": {"x": 0, "y": 6, "w": 24, "h": 8},
+      "datasource": {{ mimir }},
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "${__field.labels.host} ${__field.labels.job}",
+          "mappings": [{"type": "value", "options": {"0": {"text": "down", "color": "red"}, "1": {"text": "up", "color": "green"}}}],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]},
+          "color": {"mode": "thresholds"}
+        },
+        "overrides": []
+      },
+      "options": {"showValue": "never", "mergeValues": true, "legend": {"showLegend": false}},
+      "targets": [
+        {"refId": "A", "datasource": {{ mimir }}, "expr": "min by (host, job) (up{host=~\"$host\"})"}
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Memory available",
+      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
+      "datasource": {{ mimir }},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1,
+          "displayName": "${__field.labels.host}",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": {{ watchtower_telemetry_alert.memory_available_below }}}]},
+          "custom": {"thresholdsStyle": {"mode": "line"}}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {"refId": "A", "datasource": {{ mimir }}, "expr": "node_memory_MemAvailable_bytes{host=~\"$host\"} / node_memory_MemTotal_bytes{host=~\"$host\"}"}
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Swap in use (hosts with swap)",
+      "gridPos": {"x": 12, "y": 14, "w": 12, "h": 8},
+      "datasource": {{ mimir }},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1,
+          "displayName": "${__field.labels.host}",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": {{ watchtower_telemetry_alert.swap_used_above }}}]},
+          "custom": {"thresholdsStyle": {"mode": "line"}}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {"refId": "A", "datasource": {{ mimir }}, "expr": "(1 - node_memory_SwapFree_bytes{host=~\"$host\"} / node_memory_SwapTotal_bytes{host=~\"$host\"}) and node_memory_SwapTotal_bytes{host=~\"$host\"} > 0"}
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Disk used",
+      "gridPos": {"x": 0, "y": 22, "w": 12, "h": 8},
+      "datasource": {{ mimir }},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1,
+          "displayName": "${__field.labels.host} ${__field.labels.mountpoint}",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": {{ watchtower_telemetry_alert.disk_used_above }}}]},
+          "custom": {"thresholdsStyle": {"mode": "line"}}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {"refId": "A", "datasource": {{ mimir }}, "expr": "1 - node_filesystem_avail_bytes{host=~\"$host\", {{ real_fs }}} / node_filesystem_size_bytes{host=~\"$host\", {{ real_fs }}}"}
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Log lines per host",
+      "gridPos": {"x": 12, "y": 22, "w": 12, "h": 8},
+      "datasource": {{ loki }},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "displayName": "${__field.labels.host}", "custom": {"drawStyle": "bars", "fillOpacity": 60}},
+        "overrides": []
+      },
+      "targets": [
+        {"refId": "A", "datasource": {{ loki }}, "queryType": "range", "expr": "sum by (host) (count_over_time({host=~\"$host\"}[$__auto]))"}
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Shipping errors per second",
+      "description": "Samples Mimir rejected; log lines Alloy dropped; Loki writes that failed (and were retried). loki_write_* carry the source in `instance`.",
+      "gridPos": {"x": 0, "y": 30, "w": 12, "h": 8},
+      "datasource": {{ mimir }},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "min": 0},
+        "overrides": [
+          {"matcher": {"id": "byFrameRefID", "options": "A"}, "properties": [{"id": "displayName", "value": "${__field.labels.host} samples rejected"}]},
+          {"matcher": {"id": "byFrameRefID", "options": "B"}, "properties": [{"id": "displayName", "value": "${__field.labels.instance} log lines dropped"}]},
+          {"matcher": {"id": "byFrameRefID", "options": "C"}, "properties": [{"id": "displayName", "value": "${__field.labels.instance} Loki writes failed"}]}
+        ]
+      },
+      "targets": [
+        {"refId": "A", "datasource": {{ mimir }}, "expr": "sum by (host) (rate(prometheus_remote_storage_samples_failed_total{host=~\"$host\"}[$__rate_interval]))"},
+        {"refId": "B", "datasource": {{ mimir }}, "expr": "sum by (instance) (rate(loki_write_dropped_entries_total{instance=~\"$host\"}[$__rate_interval]))"},
+        {"refId": "C", "datasource": {{ mimir }}, "expr": "sum by (instance) (rate(loki_write_request_duration_seconds_count{instance=~\"$host\", status_code!~\"2..\"}[$__rate_interval]))"}
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Caddy 5xx share",
+      "gridPos": {"x": 12, "y": 30, "w": 12, "h": 8},
+      "datasource": {{ mimir }},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0,
+          "displayName": "${__field.labels.host}",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": {{ watchtower_telemetry_alert.caddy_5xx_ratio_above }}}]},
+          "custom": {"thresholdsStyle": {"mode": "line"}}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {"refId": "A", "datasource": {{ mimir }}, "expr": "sum by (host) (rate(caddy_http_request_duration_seconds_count{host=~\"$host\", code=~\"5..\"}[$__rate_interval])) / sum by (host) (rate(caddy_http_request_duration_seconds_count{host=~\"$host\"}[$__rate_interval]))"}
+      ]
+    },
+    {
+      "id": 9,
+      "type": "state-timeline",
+      "title": "Probes",
+      "gridPos": {"x": 0, "y": 38, "w": 12, "h": 8},
+      "datasource": {{ mimir }},
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "${__field.labels.host} ${__field.labels.probe}",
+          "mappings": [{"type": "value", "options": {"0": {"text": "failing", "color": "red"}, "1": {"text": "ok", "color": "green"}}}],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]},
+          "color": {"mode": "thresholds"}
+        },
+        "overrides": []
+      },
+      "options": {"showValue": "never", "mergeValues": true, "legend": {"showLegend": false}},
+      "targets": [
+        {"refId": "A", "datasource": {{ mimir }}, "expr": "min by (host, instance, probe) (probe_success{host=~\"$host\", job=\"blackbox\"})"}
+      ]
+    },
+    {
+      "id": 10,
+      "type": "bargauge",
+      "title": "Certificate days left",
+      "gridPos": {"x": 12, "y": 38, "w": 12, "h": 8},
+      "datasource": {{ mimir }},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d", "min": 0, "max": 90, "decimals": 0,
+          "displayName": "${__field.labels.host} ${__field.labels.probe}",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": {{ watchtower_telemetry_alert.cert_days_below }}}, {"color": "green", "value": 30}]},
+          "color": {"mode": "thresholds"}
+        },
+        "overrides": []
+      },
+      "options": {"orientation": "horizontal", "displayMode": "basic", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [
+        {"refId": "A", "datasource": {{ mimir }}, "instant": true, "range": false, "expr": "min by (host, instance, probe) (probe_ssl_earliest_cert_expiry{host=~\"$host\", job=\"blackbox\"} - time()) / 86400"}
+      ]
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Failed systemd units (hosts with the systemd collector)",
+      "gridPos": {"x": 0, "y": 46, "w": 24, "h": 6},
+      "datasource": {{ mimir }},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "options": {"showHeader": true},
+      "transformations": [{"id": "labelsToFields", "options": {"mode": "columns"}}],
+      "targets": [
+        {"refId": "A", "datasource": {{ mimir }}, "instant": true, "range": false, "format": "table", "expr": "max by (host, name) (node_systemd_unit_state{host=~\"$host\", state=\"failed\"}) > 0"}
+      ]
+    }
+  ]
+}
