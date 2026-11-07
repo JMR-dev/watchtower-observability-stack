@@ -31,8 +31,8 @@
 #                        mimir or loki, expr, op: gt or lt, threshold, for,
 #                        summary}: Gitea CI's Cloud Monitoring checks
 #
-# Not yet here, until their data is verified: Gitea CI (pulled from GCP) and the
-# Gitea VM. docs/client-telemetry.md says what each will need.
+# Not yet here, until its data is verified: Gitea CI (pulled from GCP).
+# docs/client-telemetry.md says what it will need.
 #
 # Evidence (2026-11-06, Mimir and Loki over the week each host had shipped):
 # silverbullet-vm and blog-vm log every minute (podman health checks and Caddy,
@@ -43,6 +43,12 @@
 # its main as of 2026-11-05 (silverbullet-deployment roles/logship, dev_blog
 # vm/config/config.alloy.tmpl, vaultwarden-deployment alloy/config.alloy), and
 # the `probe` labels their live series carry.
+#
+# gitea-vm (2026-11-07, its first two hours after Gitea #39 deployed it): all
+# five jobs kept `up` at 1, including `gitea`, Gitea's own /metrics; about
+# 20,000 log lines an hour (the CI runners poll it through Caddy around the
+# clock) and not one silent minute; no systemd collector; one blackbox probe
+# with no `probe` label, the gitea repo's vm/config/config.alloy.tmpl target.
 watchtower_telemetry_sources:
   - name: silverbullet-vm
     service: silverbullet
@@ -68,6 +74,12 @@ watchtower_telemetry_sources:
     service: bastion
     jobs: [integrations/unix, alloy]
     logs_silent_after: 1h
+  - name: gitea-vm
+    service: gitea
+    jobs: [integrations/unix, alloy, caddy, gitea, blackbox]
+    logs_silent_after: 30m
+    probes:
+      "": "https://gitea.jasonmross.dev/api/healthz"
 
 # Grafana keeps a provisioned rule that leaves its file, and goes on evaluating
 # it, until the file deletes it. So a check a source no longer has (a job taken

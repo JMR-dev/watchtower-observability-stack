@@ -15,8 +15,8 @@ but off in v1: no backend emits spans, and Caddy's would carry personal data.
 | Gitea | `gitea-vm` (gitea-496920, e2-small) | agent peer + Alloy quadlet | G2, gitea (after its Ansible cutover) |
 
 Alerts and a fleet dashboard (W4, here) cover verified sources only: today
-SilverBullet, the blog, Vaultwarden's production host and the bastion; Gitea CI
-and the Gitea VM once their data is verified.
+SilverBullet, the blog, Vaultwarden's production host, the bastion and the
+Gitea VM; Gitea CI once its data is verified.
 
 ## How it fits together
 
@@ -454,6 +454,7 @@ first):
 | `blog-vm` | unix, alloy, caddy, blackbox | 30 m (logs every minute) | no |
 | `vault-production` | unix, alloy, caddy, blackbox | 6 h (allow-listed units only: a median of 7 lines an hour, and 116 minutes without one) | yes |
 | `watchtower-bastion` | unix, alloy (no Caddy) | 1 h (longest silence 9 minutes) | no |
+| `gitea-vm` | unix, alloy, caddy, gitea (Gitea's own `/metrics`), blackbox | 30 m (about 20,000 lines an hour, never a silent minute) | no |
 
 `vault-disposable` stays out: it is the test stack (`env="disposable"`). The other hosts lack
 Alloy's systemd collector; with `enable_collectors = ["systemd"]` in their unix
@@ -465,12 +466,8 @@ sends, a `logs_silent_after` measured from its quietest hours, `systemd: true`
 if it has the collector, and `probes`, what its blackbox targets reach by their
 `probe` label. Removing one takes its name in
 `watchtower_telemetry_retired_sources` too: Grafana keeps a provisioned rule until
-the file deletes it (docs/runbook.md, "Telemetry alerts"). Two are due:
+the file deletes it (docs/runbook.md, "Telemetry alerts"). One is due:
 
-- **The Gitea VM** (after its change is merged and verified): a host entry like the
-  blog's, `{name: gitea-vm, service: gitea, jobs: [...], logs_silent_after: ...}`,
-  with the jobs its Alloy really sends (a Gitea `/metrics` scrape is a job of its
-  own) and a window from its quietest hours.
 - **Gitea CI** (after the GCP pull is merged and has shipped for a week): no host,
   so `selector: 'service="gitea-ci"'` and `jobs: []`, `logs_silent_after` from its
   quietest hours (CI is bursty: nights may need a long window, or the runner's own
